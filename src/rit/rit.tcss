@@ -1,0 +1,130 @@
+/* rit - Global Styles */
+
+/* === Diff Styles === */
+.diff-added {
+    background: $success 15%;
+    color: $success;
+    height: 1;
+    padding: 0;
+    margin: 0;
+}
+
+.diff-removed {
+    background: $error 15%;
+    color: $error;
+    height: 1;
+    padding: 0;
+    margin: 0;
+}
+
+.diff-line {
+    height: 1;
+    padding: 0;
+    margin: 0;
+}
+
+/* Vertical containers used for modified lines */
+Vertical.diff-line {
+    height: auto;
+    padding: 0;
+    margin: 0;
+}
+
+/* === Global Styles === */
+Screen {
+    background: $background;
+}
+
+/* === TabbedContent === */
+TabbedContent {
+    height: 1fr;
+}
+
+ContentSwitcher {
+    height: 1fr;
+}
+
+TabPane {
+    height: 1fr;
+    padding: 0;
+}
+
+Tabs {
+    background: $surface;
+    dock: top;
+}
+
+Tab {
+    padding: 0 2;
+    color: $text-disabled;
+    background: $surface;
+}
+
+Tab:focus {
+    text-style: bold;
+}
+
+Tab.-active {
+    color: $foreground;
+    background: $background;
+    text-style: bold;
+}
+
+Tab:hover {
+    color: $foreground;
+}
+
+/* === Footer === */
+Footer {
+    background: $surface;
+}
+
+FooterKey {
+    background: $surface;
+    color: $text-disabled;
+}
+
+FooterKey:hover {
+    background: $primary 20%;
+}
+
+FooterKey > .footer-key--key {
+    background: $primary 30%;
+    color: $foreground;
+}
+
+/* === Scrollbars === */
+* {
+    scrollbar-background: $surface;
+    scrollbar-color: $text-disabled;
+    scrollbar-color-hover: $primary;
+    scrollbar-color-active: $primary;
+}
+
+/* === Static Text === */
+Static {
+    color: $foreground;
+}
+
+/* === Markdown === */
+Markdown {
+    margin: 0 1;
+}
+
+MarkdownH1 {
+    color: $primary;
+    text-style: bold;
+    margin: 1 0;
+}
+
+MarkdownH2 {
+    color: $secondary;
+    text-style: bold;
+    margin: 1 0;
+}
+
+/* === Notification Toast === */
+Toast {
+    background: $surface;
+    border: solid $primary;
+}

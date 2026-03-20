@@ -1,0 +1,199 @@
+"""Syntax highlighting for diff lines using Pygments."""
+
+from __future__ import annotations
+
+from pygments import lex
+from pygments.lexers import TextLexer, get_lexer_by_name, guess_lexer_for_filename
+from pygments.token import Token
+
+from rit.core.types import DiffLine, InlineSegment, SegmentType
+
+
+class SyntaxProcessor:
+    """Apply syntax highlighting to code lines.
+
+    Uses Pygments for tokenization and provides theme-aware styling.
+    Merges syntax highlighting with word-level diff highlighting.
+    """
+
+    def __init__(self, filename: str):
+        """Initialize with file to detect language.
+
+        Args:
+            filename: File path for language detection
+        """
+        self.filename = filename
+        self.lexer = self._get_lexer()
+
+    def _get_lexer(self):
+        """Get Pygments lexer for this file.
+
+        Returns:
+            Pygments lexer instance
+        """
+        try:
+            return guess_lexer_for_filename(self.filename, "")
+        except Exception:
+            # Fallback to text (no highlighting)
+            return TextLexer()
+
+    def highlight_line(
+        self,
+        content: str,
+        word_diff_segments: list[InlineSegment] | None = None,
+    ) -> list[tuple[str, str]]:
+        """Apply syntax highlighting to a line.
+
+        Args:
+            content: Line content
+            word_diff_segments: Optional word-level diff info
+
+        Returns:
+            List of (text, style) tuples where style is a Rich style string
+            Example: [("def", "bold cyan"), (" foo", ""), ("()", "bold")]
+        """
+        # 1. Get base syntax tokens
+        syntax_tokens = self._tokenize(content)
+
+        # 2. If no word diff, return syntax only
+        if not word_diff_segments:
+            return syntax_tokens
+
+        # 3. Merge syntax + word diff
+        return self._merge_syntax_and_diff(syntax_tokens, word_diff_segments)
+
+    def _tokenize(self, content: str) -> list[tuple[str, str]]:
+        """Tokenize using Pygments.
+
+        Args:
+            content: Line content to tokenize
+
+        Returns:
+            List of (text, style) tuples
+        """
+        tokens = list(lex(content, self.lexer))
+
+        result = []
+        for token_type, text in tokens:
+            style = self._token_to_style(token_type)
+            result.append((text, style))
+
+        return result
+
+    def _token_to_style(self, token_type) -> str:
+        """Map Pygments token to Rich style string.
+
+        Based on common syntax highlighting conventions.
+        Uses Textual's design tokens for theme compatibility.
+
+        Args:
+            token_type: Pygments token type
+
+        Returns:
+            Rich style string (e.g., "bold cyan", "green", "dim italic")
+        """
+        # Token hierarchy: Token.Keyword.Namespace -> check from specific to general
+
+        if token_type in Token.Keyword:
+            return "bold cyan"
+        elif token_type in Token.Name.Function:
+            return "bold blue"
+        elif token_type in Token.Name.Class:
+            return "bold yellow"
+        elif token_type in Token.Name.Decorator:
+            return "bold magenta"
+        elif token_type in Token.String:
+            return "green"
+        elif token_type in Token.Comment:
+            return "dim italic"
+        elif token_type in Token.Number:
+            return "magenta"
+        elif token_type in Token.Operator:
+            return "bold"
+        elif token_type in Token.Name.Builtin:
+            return "cyan"
+        elif token_type in Token.Name.Exception:
+            return "bold red"
+        elif token_type in Token.Literal:
+            return "green"
+        else:
+            return ""  # Default/no style
+
+    def _merge_syntax_and_diff(
+        self,
+        syntax_tokens: list[tuple[str, str]],
+        diff_segments: list[InlineSegment],
+    ) -> list[tuple[str, str]]:
+        """Merge syntax highlighting with word-level diff.
+
+        Strategy:
+        1. Use syntax highlighting as base layer
+        2. Overlay diff highlighting on changed segments
+        3. Diff takes priority with background color
+
+        Args:
+            syntax_tokens: Syntax tokens from _tokenize
+            diff_segments: Word-level diff segments
+
+        Returns:
+            Merged token list with combined styles
+        """
+        # Build character position map for diff segments
+        diff_map: dict[int, SegmentType] = {}  # char_index -> SegmentType
+        pos = 0
+        for seg in diff_segments:
+            for i in range(len(seg.text)):
+                diff_map[pos + i] = seg.type
+            pos += len(seg.text)
+
+        # Apply diff styles to syntax tokens
+        result = []
+        char_pos = 0
+
+        for text, syntax_style in syntax_tokens:
+            # Check if this token overlaps with diff changes
+            token_diff_types = set()
+            for i in range(len(text)):
+                if char_pos + i in diff_map:
+                    token_diff_types.add(diff_map[char_pos + i])
+
+            # Combine syntax + diff styles
+            if SegmentType.ADDED in token_diff_types:
+                # Added: green background
+                combined_style = (
+                    f"{syntax_style} on green" if syntax_style else "on green"
+                )
+            elif SegmentType.DELETED in token_diff_types:
+                # Deleted: red background
+                combined_style = f"{syntax_style} on red" if syntax_style else "on red"
+            else:
+                # Unchanged: syntax only
+                combined_style = syntax_style
+
+            result.append((text, combined_style))
+            char_pos += len(text)
+
+        return result
+
+    def process_lines(self, lines: list[DiffLine]) -> None:
+        """Process multiple lines and cache syntax in-place.
+
+        Modifies DiffLine objects by setting syntax_tokens_old/new fields.
+
+        Args:
+            lines: List of DiffLine objects to process
+        """
+        for line in lines:
+            # Process old content (deleted/modified lines)
+            if line.old_content:
+                line.syntax_tokens_old = self.highlight_line(
+                    line.old_content,
+                    line.old_segments if line.has_word_diff else None,
+                )
+
+            # Process new content (added/modified lines)
+            if line.new_content:
+                line.syntax_tokens_new = self.highlight_line(
+                    line.new_content,
+                    line.new_segments if line.has_word_diff else None,
+                )
