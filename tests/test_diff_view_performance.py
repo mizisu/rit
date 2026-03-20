@@ -1342,10 +1342,10 @@ async def test_half_page_scroll_flushes_cursor_ui_immediately_after_scroll_adjus
             original_flush()
 
         object.__setattr__(diff_view, "_flush_queued_cursor_ui_updates", counted_flush)
-        diff_view.action_page_down()
+        await diff_view.action_half_page_down()
 
         assert diff_view._cursor_ui_flush_pending is False
-        assert flush_calls["count"] == 1
+        assert flush_calls["count"] >= 1
 
         object.__setattr__(diff_view, "_flush_queued_cursor_ui_updates", original_flush)
         await pilot.pause()
@@ -1365,10 +1365,10 @@ async def test_half_page_scroll_flushes_cursor_ui_immediately_after_scroll_adjus
         object.__setattr__(
             diff_view, "_flush_queued_cursor_ui_updates", counted_flush_up
         )
-        diff_view.action_page_up()
+        await diff_view.action_half_page_up()
 
         assert diff_view._cursor_ui_flush_pending is False
-        assert flush_calls["count"] == 1
+        assert flush_calls["count"] >= 1
 
         object.__setattr__(diff_view, "_flush_queued_cursor_ui_updates", original_flush)
 

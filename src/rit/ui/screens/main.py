@@ -238,14 +238,22 @@ class MainScreen(Screen):
     def action_scroll_half_page_down(self) -> None:
         if self.current_tab == 0:
             scroll = self.pr_info.query_one("#main-scroll", VerticalScroll)
-            scroll.scroll_relative(y=scroll.size.height // 2, animate=False)
-            self.call_after_refresh(self.pr_info.select_first_visible_item)
+            scroll.scroll_relative(
+                y=scroll.size.height // 2,
+                duration=0.2,
+                easing="out_cubic",
+                on_complete=self.pr_info.select_first_visible_item,
+            )
 
     def action_scroll_half_page_up(self) -> None:
         if self.current_tab == 0:
             scroll = self.pr_info.query_one("#main-scroll", VerticalScroll)
-            scroll.scroll_relative(y=-(scroll.size.height // 2), animate=False)
-            self.call_after_refresh(self.pr_info.select_first_visible_item)
+            scroll.scroll_relative(
+                y=-(scroll.size.height // 2),
+                duration=0.2,
+                easing="out_cubic",
+                on_complete=self.pr_info.select_first_visible_item,
+            )
 
     def action_scroll_to_top(self) -> None:
         if self.current_tab == 0:

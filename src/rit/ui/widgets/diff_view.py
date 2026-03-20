@@ -290,8 +290,8 @@ class DiffView(VerticalScroll):
         Binding("up", "scroll_up", "Scroll Up", show=False),
         Binding("g", "scroll_home", "Go to Top", show=False),
         Binding("G", "scroll_end", "Go to Bottom", show=False),
-        Binding("ctrl+d", "page_down", "Page Down", show=False),
-        Binding("ctrl+u", "page_up", "Page Up", show=False),
+        Binding("ctrl+d", "half_page_down", "Page Down", show=False),
+        Binding("ctrl+u", "half_page_up", "Page Up", show=False),
         Binding("v", "toggle_visual", "Visual", show=True),
         Binding("V", "toggle_visual_line", "Visual Line", show=True),
         Binding("y", "yank", "Yank", show=False),
@@ -861,41 +861,42 @@ class DiffView(VerticalScroll):
 
         self._flush_queued_cursor_ui_updates()
 
-    def action_page_down(self) -> None:
+    async def action_half_page_down(self) -> None:
         if self._all_lines:
-            step = self._half_page_step()
-            viewport_offset = self._current_cursor_viewport_offset()
-            self._suppress_cursor_scroll = True
-            try:
-                moved = self._move_cursor_rows(step, scroll_in_visual=self.visual_mode)
-            finally:
-                self._suppress_cursor_scroll = False
-            if moved and viewport_offset is not None:
-                row = self._current_row()
-                if row is not None:
-                    self._scroll_row_to_viewport_offset(row, viewport_offset)
-            self._flush_cursor_ui_now_if_safe()
+            await self._animated_half_page_scroll(1)
             return
 
         self.scroll_page_down(animate=False)
 
-    def action_page_up(self) -> None:
+    async def action_half_page_up(self) -> None:
         if self._all_lines:
-            step = self._half_page_step()
-            viewport_offset = self._current_cursor_viewport_offset()
+            await self._animated_half_page_scroll(-1)
+            return
+
+        self.scroll_page_up(animate=False)
+
+    async def _animated_half_page_scroll(self, direction: int) -> None:
+        step = self._half_page_step()
+        viewport_offset = self._current_cursor_viewport_offset()
+        delay = 0.15 / step
+
+        for _ in range(step):
             self._suppress_cursor_scroll = True
             try:
-                moved = self._move_cursor_rows(-step, scroll_in_visual=self.visual_mode)
+                moved = self._move_cursor_rows(
+                    direction,
+                    scroll_in_visual=self.visual_mode,
+                )
             finally:
                 self._suppress_cursor_scroll = False
-            if moved and viewport_offset is not None:
+            if not moved:
+                break
+            if viewport_offset is not None:
                 row = self._current_row()
                 if row is not None:
                     self._scroll_row_to_viewport_offset(row, viewport_offset)
             self._flush_cursor_ui_now_if_safe()
-            return
-
-        self.scroll_page_up(animate=False)
+            await asyncio.sleep(delay)
 
     def action_cycle_active_pane(self) -> None:
         if not self._all_lines:
