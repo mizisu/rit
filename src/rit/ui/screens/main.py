@@ -81,7 +81,6 @@ _FILES_BINDINGS = [
 
 
 class MainScreen(Screen):
-
     BINDINGS = _COMMON_BINDINGS + _PR_INFO_BINDINGS
 
     current_tab: reactive[int] = reactive(0)
