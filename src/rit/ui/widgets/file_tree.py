@@ -81,6 +81,8 @@ class FileTree(Vertical):
         Binding("k", "cursor_up", "Prev", show=False),
         Binding("h", "collapse_or_parent", "Collapse", show=False),
         Binding("l", "expand_or_child", "Expand", show=False),
+        Binding("ctrl+d", "half_page_down", "Half Page Down", show=False),
+        Binding("ctrl+u", "half_page_up", "Half Page Up", show=False),
         Binding("/", "start_search", "Search", show=False),
     ]
 
@@ -186,6 +188,18 @@ class FileTree(Vertical):
     def action_cursor_up(self) -> None:
         tree = self.query_one("#file-tree", Tree)
         tree.action_cursor_up()
+
+    def action_half_page_down(self) -> None:
+        tree = self.query_one("#file-tree", Tree)
+        step = max(1, tree.scrollable_content_region.height // 2)
+        for _ in range(step):
+            tree.action_cursor_down()
+
+    def action_half_page_up(self) -> None:
+        tree = self.query_one("#file-tree", Tree)
+        step = max(1, tree.scrollable_content_region.height // 2)
+        for _ in range(step):
+            tree.action_cursor_up()
 
     def action_collapse_or_parent(self) -> None:
         tree = self.query_one("#file-tree", Tree)
