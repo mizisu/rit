@@ -421,12 +421,15 @@ class DiffView(VerticalScroll):
 
         self._top_virtual_buffer_widget: Static | None = None
         self._bottom_virtual_buffer_widget: Static | None = None
+        self._center_padding_widget: Static | None = None
+        self._center_padding_height: int = 0
 
         self._highlighter_prewarm_started: bool = False
         self._suspend_active_pane_watch: bool = False
         self._suspend_cursor_line_watch: bool = False
         self._suspend_cursor_column_watch: bool = False
         self._suppress_cursor_scroll: bool = False
+        self._pending_count: str = ""
 
         self._cursor_ui_flush_pending: bool = False
         self._queued_cursor_dirty_lines: set[int] = set()
@@ -647,17 +650,28 @@ class DiffView(VerticalScroll):
         if self.visual_mode:
             self._queue_cursor_ui_flush(selection_dirty_lines={self.cursor_line})
 
+    def _consume_count(self) -> int:
+        if self._pending_count:
+            count = int(self._pending_count)
+            self._pending_count = ""
+            return max(1, count)
+        return 1
+
     def action_scroll_down(self) -> None:
+        count = self._consume_count()
         if self._all_lines:
-            self._move_cursor_rows(1, scroll_in_visual=self.visual_mode)
+            self._move_cursor_rows(count, scroll_in_visual=self.visual_mode)
         else:
-            super().action_scroll_down()
+            for _ in range(count):
+                super().action_scroll_down()
 
     def action_scroll_up(self) -> None:
+        count = self._consume_count()
         if self._all_lines:
-            self._move_cursor_rows(-1, scroll_in_visual=self.visual_mode)
+            self._move_cursor_rows(-count, scroll_in_visual=self.visual_mode)
         else:
-            super().action_scroll_up()
+            for _ in range(count):
+                super().action_scroll_up()
 
     def action_cursor_left(self) -> None:
         if not self._all_lines:
@@ -1187,7 +1201,23 @@ class DiffView(VerticalScroll):
         self.focus()
         _search.handle_submitted(self, event.value)
 
+    _COUNT_MOTION_KEYS = frozenset({"j", "k", "up", "down"})
+
     def on_key(self, event: events.Key) -> None:
+        if event.character and event.character in "123456789":
+            self._pending_count += event.character
+            event.stop()
+            event.prevent_default()
+            return
+        if event.character == "0" and self._pending_count:
+            self._pending_count += "0"
+            event.stop()
+            event.prevent_default()
+            return
+
+        if event.key not in self._COUNT_MOTION_KEYS:
+            self._pending_count = ""
+
         if event.key == "escape":
             bar = self._search_bar_widget
             if bar is not None and bar.display:
