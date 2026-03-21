@@ -2118,6 +2118,8 @@ class DiffView(VerticalScroll):
         self._hunk_header_widgets = {}
         self._top_virtual_buffer_widget = None
         self._bottom_virtual_buffer_widget = None
+        self._center_padding_widget = None
+        self._center_padding_height = 0
         self._suspend_active_pane_watch = False
         self._visual_selection_specs = {}
 
@@ -2911,10 +2913,36 @@ class DiffView(VerticalScroll):
         top, bottom = bounds
         mid = (top + bottom) // 2
         viewport_height = max(1, self.scrollable_content_region.height)
-        self.scroll_to(
-            y=max(0, mid - viewport_height // 2),
-            animate=False,
-        )
+        target_y = max(0, mid - viewport_height // 2)
+
+        base_max_y = int(self.max_scroll_y) - self._center_padding_height
+        needed_padding = max(0, target_y - base_max_y)
+
+        container = self._content_widget
+        if container is None:
+            return
+
+        delta = needed_padding - self._center_padding_height
+        if delta != 0:
+            self._center_padding_height = needed_padding
+            pad = self._center_padding_widget
+            if needed_padding > 0:
+                if pad is None:
+                    pad = Static("", id="center-padding")
+                    pad.styles.height = needed_padding
+                    container.mount(pad)
+                    self._center_padding_widget = pad
+                else:
+                    pad.styles.height = needed_padding
+            elif pad is not None:
+                pad.styles.height = 0
+
+            from textual.geometry import Size
+
+            vs = self.virtual_size
+            self.virtual_size = Size(vs.width, max(0, vs.height + delta))
+
+        self.scroll_to(y=target_y, animate=False)
 
     _DIFF_MODES: tuple[str, ...] = ("auto", "split", "unified")
 
