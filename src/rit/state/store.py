@@ -36,6 +36,8 @@ class PRStoreState:
     thread_info_cache: dict[int, ReviewThreadInfo] = field(default_factory=dict)
     thread_cache: dict[int, ReviewThread] = field(default_factory=dict)
 
+    file_contents: dict[str, str] = field(default_factory=dict)
+
     selected_file: str | None = None
     files_loaded_count: int = 0
     files_total_count: int = 0
@@ -203,6 +205,23 @@ class PRStore:
 
     def get_file_diff(self, filename: str) -> FileDiff | None:
         return self._state.file_diffs.get(filename)
+
+    async def get_file_content(self, filename: str) -> str | None:
+        """Fetch full file content at the PR's head ref. Cached after first call."""
+        cached = self._state.file_contents.get(filename)
+        if cached is not None:
+            return cached
+
+        pr = self._state.pr
+        if pr is None or not pr.head_sha:
+            return None
+
+        try:
+            content = await self._service.get_file_content(filename, pr.head_sha)
+            self._state.file_contents[filename] = content
+            return content
+        except Exception:
+            return None
 
     def get_file_comments(self, filename: str) -> list[PRComment]:
         return self._state.comments_by_file.get(filename, [])

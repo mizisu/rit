@@ -272,6 +272,19 @@ class GitHubService:
 
         return is_resolved == resolve
 
+    async def get_file_content(self, path: str, ref: str) -> str:
+        """Fetch raw file content at a given ref (branch/sha)."""
+        repo = await self.get_repo()
+        result = await self._run_gh(
+            [
+                "api",
+                f"/repos/{repo.full_name}/contents/{path}?ref={ref}",
+                "-H",
+                "Accept: application/vnd.github.raw+json",
+            ]
+        )
+        return result
+
     async def resolve_thread(self, thread_id: str) -> bool:
         return await self._set_thread_resolved(thread_id, resolve=True)
 

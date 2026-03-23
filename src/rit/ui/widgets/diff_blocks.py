@@ -397,8 +397,10 @@ def _refresh_grouped_blocks_for_lines(view, line_indices: set[int]) -> bool:
 
 
 def _block_chunk_limit(view) -> int | None:
+    if view._showing_full_file:
+        return view.UNIFIED_BLOCK_CHUNK_SIZE
     if (
-        not view._virtualized
+        not view._virt.active
         and len(view._all_lines) >= view.BLOCK_RENDER_LINE_THRESHOLD
     ):
         return None
@@ -476,6 +478,8 @@ def _render_unified_line_block(
         [line.line_index for line in lines],
         classes="diff-block",
     )
+    if view._showing_full_file:
+        block._annotations.styles.width = view.PREVIEW_PREFIX_WIDTH
     block.update_block(
         annotations=annotations,
         code_lines=code_lines,

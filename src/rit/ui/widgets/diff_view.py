@@ -302,13 +302,12 @@ class DiffView(VerticalScroll):
         Binding("n", "next_search_match", "Next Match", show=False),
         Binding("N", "prev_search_match", "Prev Match", show=False),
         Binding("$", "end_of_line", "End of Line", show=False),
-        Binding("tab", "cycle_active_pane", "Switch Pane", show=False),
-        Binding("shift+tab", "cycle_active_pane_reverse", "", show=False),
         Binding("}", "next_comment", "Next Comment", show=False),
         Binding("{", "prev_comment", "Prev Comment", show=False),
         Binding("r", "toggle_resolve", "Resolve", show=False),
         Binding("|", "cycle_diff_mode", "Mode", show=False),
         Binding("z", "center_cursor", "Center", show=False),
+        Binding("p", "toggle_full_file", "Preview", show=False),
     ]
 
     @dataclass
@@ -1961,12 +1960,20 @@ class DiffView(VerticalScroll):
         finally:
             _RENDER_REQUEST_CONTEXT.reset(token)
 
+    # ------------------------------------------------------------------
+    # show_diff — main public entry point
+    # ------------------------------------------------------------------
+
     async def show_diff(self, filename: str, diff: FileDiff) -> None:
         self._render_request_token += 1
         request_token = self._render_request_token
         self._suspend_split_state_rerender = True
         self._suspend_scroll_virtual_window_watch = True
         try:
+            if filename != self.current_file:
+                self._showing_full_file = False
+                self._saved_diff = None
+
             self.current_file = filename
             self._diff = diff
             self.current_hunk_index = 0
@@ -2008,18 +2015,10 @@ class DiffView(VerticalScroll):
             self._line_widgets_by_index = {}
             self._row_anchor_widgets = {}
             self._hunk_header_widgets = {}
-            self._top_virtual_buffer_widget = None
-            self._bottom_virtual_buffer_widget = None
-            self._suspend_active_pane_watch = False
-            self._cursor_ui_flush_pending = False
-            self._queued_cursor_dirty_lines.clear()
-            self._queued_selection_dirty_lines.clear()
-            self._queued_selection_full_refresh = False
-            self._queued_sync_search_match = False
-            self._queued_update_status_line = False
+            self._cursor_ui = CursorUIState()
             self._visual_selection_specs = {}
 
-            self._exit_visual_mode()
+            _selection._exit_visual_mode(self)
             self.visual_type = "char"
 
             self.active_pane = "new"
@@ -2041,6 +2040,7 @@ class DiffView(VerticalScroll):
                     line.line_index = line_index
                     self._all_lines.append(line)
                     self._hunk_index_by_line.append(hunk_index)
+
                     if line.is_modified:
                         self._modified_line_count += 1
 
@@ -2058,15 +2058,13 @@ class DiffView(VerticalScroll):
                 hunk_end = line_index - 1
                 self._hunk_line_ranges.append((hunk_index, hunk_start, hunk_end))
 
-            _comments.build_comment_map(self)
-            self._update_split_state()
-            self._rebuild_rendered_rows()
+            if not self._showing_full_file:
+                _comments.build_comment_map(self)
+            _render._update_split_state(self)
+            _render._rebuild_rendered_rows(self)
             _virtual._rebuild_virtual_layout(self)
             _virtual._configure_virtual_window(self)
 
-            # Render cache hit immediately; otherwise show plain text first and
-            # finish syntax highlighting in the background. Large virtualized diffs
-            # highlight only the visible window after the first paint.
             if _hl._has_highlighted_diff(self, diff):
                 _hl._highlight_diff_sync(self, diff)
             elif _hl._use_windowed_highlight_strategy(self, diff):
@@ -2080,869 +2078,59 @@ class DiffView(VerticalScroll):
             self._suspend_split_state_rerender = False
             self._suspend_scroll_virtual_window_watch = False
 
-    async def _render_diff(self) -> None:
-        request_token = _RENDER_REQUEST_CONTEXT.get()
-        if request_token is not None and not self._is_current_render_request(
-            request_token
-        ):
-            return
-        header = self._header_widget
-        if header is None:
-            header = self.query_one("#diff-header", Static)
-            self._header_widget = header
-        if self._file:
-            header_text = (
-                f"{self.current_file}  "
-                f"[green]+{self._file.additions}[/] "
-                f"[red]-{self._file.deletions}[/]"
-            )
-            header.update(header_text)
-        else:
-            header.update(self.current_file or "No file selected")
-
-        new_content = self._content_widget
-        if new_content is None:
-            new_content = self.query_one("#diff-content", VerticalScroll)
-            self._content_widget = new_content
-        await new_content.remove_children()
-        if request_token is not None and not self._is_current_render_request(
-            request_token
-        ):
-            return
-
-        self._code_widgets_by_line = {}
-        self._unified_blocks_by_line = {}
-        self._split_blocks_by_line = {}
-        self._line_widgets_by_index = {}
-        self._row_anchor_widgets = {}
-        self._hunk_header_widgets = {}
-        self._top_virtual_buffer_widget = None
-        self._bottom_virtual_buffer_widget = None
-        self._center_padding_widget = None
-        self._center_padding_height = 0
-        self._suspend_active_pane_watch = False
-        self._visual_selection_specs = {}
-
-        if not self._diff or not self._diff.hunks:
-            new_content.mount(Static("No changes in this file", classes="placeholder"))
-        elif self._virtualized:
-            _virtual._render_virtual_window(self, new_content)
-        else:
-            for hunk_index, hunk in enumerate(self._diff.hunks):
-                self._render_hunk(new_content, hunk, hunk_index=hunk_index)
-
-        if self._virtualized:
-            self._rendered_window_start = self._virtual_window_start
-            self._rendered_window_end = self._virtual_window_end
-        else:
-            self._rendered_window_start = 0
-            self._rendered_window_end = len(self._all_lines) - 1
-
-        if request_token is not None:
-            self.call_after_refresh(
-                lambda: self._finalize_render_state_if_current(request_token)
-            )
-        else:
-            self.call_after_refresh(self._finalize_render_state)
-
-    def _render_hunk(
-        self,
-        container: VerticalScroll,
-        hunk: DiffHunk,
-        *,
-        hunk_index: int,
-        window_start: int | None = None,
-        window_end: int | None = None,
-        show_header: bool = True,
-    ) -> None:
-        if window_start is not None and window_end is not None:
-            lines = [
-                line
-                for line in hunk.lines
-                if window_start <= line.line_index <= window_end
-            ]
-        else:
-            lines = hunk.lines
-
-        if not lines:
-            return
-
-        if show_header:
-            hunk_header = (
-                f"@@ -{hunk.old_start},{hunk.old_count} "
-                f"+{hunk.new_start},{hunk.new_count} @@"
-            )
-            if hunk.header:
-                hunk_header += f" {hunk.header}"
-            hunk_header_widget = Static(
-                hunk_header,
-                classes="hunk-header",
-                id=f"hunk-{hunk_index}",
-            )
-            container.mount(hunk_header_widget)
-            self._register_hunk_header_widget(hunk_index, hunk_header_widget)
-
-        if self.split:
-            self._render_hunk_split(container, lines)
-        else:
-            self._render_hunk_unified(container, lines)
-
-    def _build_unified_prefix_content(self, line: DiffLine) -> Content:
-        prefix_parts: list[Content] = []
-
-        if self.show_line_numbers:
-            old_no = str(line.old_line_no) if line.old_line_no else ""
-            new_no = str(line.new_line_no) if line.new_line_no else ""
-            prefix_parts.append(Content.styled(f"{old_no:>4} ", "$text-disabled"))
-            prefix_parts.append(Content.styled(f"{new_no:>4} ", "$text-disabled"))
-
-        prefix = " "
-        if line.is_added:
-            prefix = "+"
-        elif line.is_deleted:
-            prefix = "-"
-
-        prefix_parts.append(Content(prefix + " "))
-        return Content("").join(prefix_parts)
-
-    def _unified_line_style(
-        self,
-        line: DiffLine,
-        *,
-        side: Literal["old", "new", "auto"] = "auto",
-    ) -> str:
-        if side == "old" and line.is_modified:
-            return "on $error 10%"
-        if side == "new" and line.is_modified:
-            return "on $success 10%"
-        if line.is_added:
-            return "on $success 10%"
-        if line.is_deleted:
-            return "on $error 10%"
-        return ""
-
-    def _split_line_style(
-        self,
-        line: DiffLine,
-        *,
-        side: Literal["old", "new"],
-    ) -> str:
-        if side == "old" and (line.is_deleted or line.is_modified):
-            return "on $error 10%"
-        if side == "new" and (line.is_added or line.is_modified):
-            return "on $success 10%"
-        return ""
-
-    def _mount_split_lines(
-        self,
-        container: VerticalScroll,
-        lines: list[DiffLine],
-        *,
-        before: Widget | None = None,
-    ) -> None:
-        if not _blocks._should_use_split_block_renderer(self):
-            for line in lines:
-                widget = self._render_line_split(line)
-                if before is not None:
-                    container.mount(widget, before=before)
-                else:
-                    container.mount(widget)
-                _comments.mount_comments_for_line(
-                    self, container, line.line_index, before=before
-                )
-            return
-
-        chunk_limit = _blocks._block_chunk_limit(self)
-        block_lines: list[DiffLine] = []
-        for line in lines:
-            if _blocks._can_render_in_split_block(self, line):
-                block_lines.append(line)
-                if chunk_limit is not None and len(block_lines) >= chunk_limit:
-                    _blocks._render_split_line_block(
-                        self, container, block_lines, before=before
-                    )
-                    block_lines = []
-                continue
-
-            if block_lines:
-                _blocks._render_split_line_block(
-                    self, container, block_lines, before=before
-                )
-                block_lines = []
-
-            widget = self._render_line_split(line)
-            if before is not None:
-                container.mount(widget, before=before)
-            else:
-                container.mount(widget)
-            _comments.mount_comments_for_line(
-                self, container, line.line_index, before=before
-            )
-
-        if block_lines:
-            _blocks._render_split_line_block(
-                self, container, block_lines, before=before
-            )
-
-    def _mount_unified_lines(
-        self,
-        container: VerticalScroll,
-        lines: list[DiffLine],
-        *,
-        before: Widget | None = None,
-    ) -> None:
-        if not _blocks._should_use_unified_block_renderer(self):
-            for line in lines:
-                widget = self._render_line_unified(line)
-                if before is not None:
-                    container.mount(widget, before=before)
-                else:
-                    container.mount(widget)
-                _comments.mount_comments_for_line(
-                    self, container, line.line_index, before=before
-                )
-            return
-
-        chunk_limit = _blocks._block_chunk_limit(self)
-        block_lines: list[DiffLine] = []
-        for line in lines:
-            if _blocks._can_render_in_unified_block(self, line):
-                block_lines.append(line)
-                if chunk_limit is not None and len(block_lines) >= chunk_limit:
-                    _blocks._render_unified_line_block(
-                        self, container, block_lines, before=before
-                    )
-                    block_lines = []
-                continue
-
-            if block_lines:
-                _blocks._render_unified_line_block(
-                    self, container, block_lines, before=before
-                )
-                block_lines = []
-
-            widget = self._render_line_unified(line)
-            if before is not None:
-                container.mount(widget, before=before)
-            else:
-                container.mount(widget)
-            _comments.mount_comments_for_line(
-                self, container, line.line_index, before=before
-            )
-
-        if block_lines:
-            _blocks._render_unified_line_block(
-                self, container, block_lines, before=before
-            )
-
-    def _render_hunk_unified(
-        self,
-        container: VerticalScroll,
-        lines: list[DiffLine],
-    ) -> None:
-        self._mount_unified_lines(container, lines)
-
-    def _render_hunk_split(
-        self,
-        container: VerticalScroll,
-        lines: list[DiffLine],
-    ) -> None:
-        self._mount_split_lines(container, lines)
-
-    def _get_hunk_index_for_line(self, line_index: int) -> int | None:
-        if 0 <= line_index < len(self._hunk_index_by_line):
-            return self._hunk_index_by_line[line_index]
-        return None
+    async def prepare(self) -> None:
+        if self._diff:
+            await asyncio.to_thread(lambda: _render._precompute_diff_data(self))
 
     def _update_status_line(self) -> None:
         return
 
-    def _finalize_render_state(self) -> None:
-        self._show_initial_cursor()
-        if self.visual_mode:
-            self._update_selection_highlighting({self.cursor_line})
-        self._update_status_line()
-        _hl._ensure_visible_highlight(self)
+    # ------------------------------------------------------------------
+    # Full-file toggle
+    # ------------------------------------------------------------------
 
-        # Execute pending comment jump (set by cross-file navigation).
-        pending = self._pending_comment_jump
-        if pending is not None:
-            self._pending_comment_jump = None
-            indices = self._comment_line_indices
-            if indices:
-                line = indices[0] if pending == "first" else indices[-1]
-                _comments._jump_to_comment_line(self, line)
-            else:
-                # File has threads but no visible comment lines → skip onward.
-                direction = 1 if pending == "first" else -1
-                self.post_message(self.CrossFileComment(direction=direction))
-
-    def _render_line_unified(self, line: DiffLine) -> Horizontal | Vertical:
-        if line.is_modified:
-            return self._render_modified_line(line)
-
-        prefix_content = self._build_unified_prefix_content(line)
-
-        if line.is_added and line.highlighted_new_content:
-            code_content = line.highlighted_new_content
-        elif line.is_deleted and line.highlighted_old_content:
-            code_content = line.highlighted_old_content
-        elif line.highlighted_old_content:
-            code_content = line.highlighted_old_content
+    def action_toggle_full_file(self) -> None:
+        if not self.current_file or self.store is None:
+            return
+        if self._showing_full_file:
+            self._restore_diff_view()
         else:
-            content_text = line.new_content if line.is_added else line.old_content
-            code_content = Content(content_text)
-
-        code_classes = "code-content"
-        if line.is_added:
-            code_classes += " -added"
-        elif line.is_deleted:
-            code_classes += " -removed"
-
-        prefix_widget = Static(prefix_content, classes="line-prefix")
-        code_widget = Static(code_content, classes=code_classes)
-
-        container = Horizontal(
-            prefix_widget,
-            code_widget,
-            classes="diff-line",
-            id=f"line-{line.line_index}",
-        )
-
-        self._register_line_widget(line.line_index, container)
-        self._register_row_anchor_widget(f"line-{line.line_index}", container)
-        self._register_code_widgets(line.line_index, code_widget)
-        return container
-
-    def _build_split_prefix(
-        self,
-        line_no: int | None,
-        prefix: str,
-        *,
-        line_index: int,
-    ) -> Content:
-        parts: list[Content] = []
-
-        if self.show_line_numbers:
-            line_text = str(line_no) if line_no is not None else ""
-            parts.append(Content.styled(f"{line_text:>4} ", "$text-disabled"))
-
-        parts.append(Content(prefix + " "))
-
-        return Content("").join(parts)
-
-    def _render_line_split(self, line: DiffLine) -> Horizontal:
-        if line.is_deleted or line.is_modified:
-            left_prefix = self._build_split_prefix(
-                line.old_line_no,
-                "-" if line.is_deleted or line.is_modified else " ",
-                line_index=line.line_index,
-            )
-            left_content = (
-                line.highlighted_old_content
-                if line.highlighted_old_content
-                else Content(line.old_content)
-            )
-            left_classes = "code-content -old-side"
-            if line.is_deleted or line.is_modified:
-                left_classes += " -removed"
-        else:
-            left_prefix = self._build_split_prefix(
-                line.old_line_no,
-                " ",
-                line_index=line.line_index,
-            )
-            left_content = line.highlighted_old_content or Content(line.old_content)
-            left_classes = "code-content -old-side"
-
-        if line.is_added or line.is_modified:
-            right_prefix = self._build_split_prefix(
-                line.new_line_no,
-                "+" if line.is_added or line.is_modified else " ",
-                line_index=line.line_index,
-            )
-            right_content = (
-                line.highlighted_new_content
-                if line.highlighted_new_content
-                else Content(line.new_content)
-            )
-            right_classes = "code-content -new-side"
-            if line.is_added or line.is_modified:
-                right_classes += " -added"
-        else:
-            right_prefix = self._build_split_prefix(
-                line.new_line_no,
-                " ",
-                line_index=line.line_index,
-            )
-            right_content = line.highlighted_new_content or Content(line.new_content)
-            right_classes = "code-content -new-side"
-
-        if line.is_added:
-            left_content = Content(" ")
-            left_classes += " -placeholder"
-        if line.is_deleted:
-            right_content = Content(" ")
-            right_classes += " -placeholder"
-
-        left_prefix_widget = Static(left_prefix, classes="line-prefix")
-        left_code_widget = Static(left_content, classes=left_classes)
-        left_row = Horizontal(
-            left_prefix_widget,
-            left_code_widget,
-            classes="split-pane split-pane-left",
-            id=f"line-{line.line_index}-old",
-        )
-
-        right_prefix_widget = Static(right_prefix, classes="line-prefix")
-        right_code_widget = Static(right_content, classes=right_classes)
-        right_row = Horizontal(
-            right_prefix_widget,
-            right_code_widget,
-            classes="split-pane split-pane-right",
-            id=f"line-{line.line_index}-new",
-        )
-
-        self._register_code_widgets(
-            line.line_index, left_code_widget, right_code_widget
-        )
-        container = Horizontal(
-            left_row,
-            right_row,
-            classes="diff-line split-container",
-            id=f"line-{line.line_index}",
-        )
-        self._register_line_widget(line.line_index, container)
-        self._register_row_anchor_widget(f"line-{line.line_index}", container)
-        return container
-
-    def _render_modified_line(self, line: DiffLine) -> Vertical:
-        old_prefix_parts: list[Content] = []
-        if self.show_line_numbers:
-            old_prefix_parts.append(
-                Content.styled(f"{line.old_line_no:>4} ", "$text-disabled")
-            )
-            old_prefix_parts.append(
-                Content.styled("     ", "$text-disabled")
-            )  # Empty new line number
-        old_prefix_parts.append(Content("- "))
-        old_prefix_content = Content("").join(old_prefix_parts)
-
-        old_code_content = (
-            line.highlighted_old_content
-            if line.highlighted_old_content
-            else Content(line.old_content)
-        )
-
-        old_prefix_widget = Static(old_prefix_content, classes="line-prefix")
-        old_code_widget = Static(old_code_content, classes="code-content -removed")
-        old_horizontal = Horizontal(
-            old_prefix_widget,
-            old_code_widget,
-            classes="diff-line",
-            id=f"line-{line.line_index}-old",
-        )
-
-        new_prefix_parts: list[Content] = []
-        if self.show_line_numbers:
-            new_prefix_parts.append(
-                Content.styled("     ", "$text-disabled")
-            )  # Empty old line number
-            new_prefix_parts.append(
-                Content.styled(f"{line.new_line_no:>4} ", "$text-disabled")
-            )
-        new_prefix_parts.append(Content("+ "))
-        new_prefix_content = Content("").join(new_prefix_parts)
-
-        new_code_content = (
-            line.highlighted_new_content
-            if line.highlighted_new_content
-            else Content(line.new_content)
-        )
-
-        new_prefix_widget = Static(new_prefix_content, classes="line-prefix")
-        new_code_widget = Static(new_code_content, classes="code-content -added")
-        new_horizontal = Horizontal(
-            new_prefix_widget,
-            new_code_widget,
-            classes="diff-line",
-            id=f"line-{line.line_index}-new",
-        )
-
-        self._register_code_widgets(line.line_index, old_code_widget, new_code_widget)
-
-        container = Vertical(
-            old_horizontal,
-            new_horizontal,
-            classes="diff-line",
-            id=f"line-{line.line_index}",
-        )
-        self._register_line_widget(line.line_index, container)
-        self._register_row_anchor_widget(f"line-{line.line_index}-old", old_horizontal)
-        self._register_row_anchor_widget(f"line-{line.line_index}-new", new_horizontal)
-        return container
-
-    def _compute_selection_spec_for_line(
-        self,
-        line_idx: int,
-    ) -> tuple[int, int | None, Literal["char", "line"]] | None:
-        if not self.visual_mode or self.visual_anchor_line is None:
-            return None
-        if not self._all_lines or not self._is_line_rendered(line_idx):
-            return None
-
-        start_line = min(self.visual_anchor_line, self.cursor_line)
-        end_line = max(self.visual_anchor_line, self.cursor_line)
-        if not (start_line <= line_idx <= end_line):
-            return None
-
-        if self.visual_type == "line":
-            return (0, None, "line")
-
-        start_col = (
-            self.visual_anchor_column if self.visual_anchor_column is not None else 0
-        )
-        end_col = self.cursor_column
-
-        if self.visual_anchor_line < self.cursor_line:
-            first_line_col = start_col
-            last_line_col = end_col
-        elif self.visual_anchor_line > self.cursor_line:
-            first_line_col = end_col
-            last_line_col = start_col
-        else:
-            first_line_col = min(start_col, end_col)
-            last_line_col = max(start_col, end_col)
-
-        if start_line == end_line:
-            return (first_line_col, last_line_col, "char")
-        if line_idx == start_line:
-            return (first_line_col, None, "char")
-        if line_idx == end_line:
-            return (0, last_line_col, "char")
-        return (0, None, "char")
-
-    def _compute_visible_selection_specs(
-        self,
-    ) -> dict[int, tuple[int, int | None, Literal["char", "line"]]]:
-        if not self.visual_mode or self.visual_anchor_line is None:
-            return {}
-
-        if not self._all_lines:
-            return {}
-
-        start_line = min(self.visual_anchor_line, self.cursor_line)
-        end_line = max(self.visual_anchor_line, self.cursor_line)
-
-        rendered_start, rendered_end = self._get_rendered_line_bounds()
-        visible_start = max(start_line, rendered_start)
-        visible_end = min(end_line, rendered_end)
-
-        if visible_start > visible_end:
-            return {}
-
-        specs: dict[int, tuple[int, int | None, Literal["char", "line"]]] = {}
-        for line_idx in range(visible_start, visible_end + 1):
-            spec = self._compute_selection_spec_for_line(line_idx)
-            if spec is not None:
-                specs[line_idx] = spec
-
-        return specs
-
-    def _update_selection_highlighting(
-        self, dirty_lines: set[int] | None = None
-    ) -> None:
-        if not self.visual_mode or self.visual_anchor_line is None:
-            return
-
-        if not self._all_lines or not self.is_mounted:
-            return
-
-        old_specs = self._visual_selection_specs
-
-        incremental = bool(dirty_lines) and bool(old_specs)
-        if incremental:
-            new_specs = dict(old_specs)
-            candidate_lines = set(dirty_lines or ())
-            for line_idx in candidate_lines:
-                spec = self._compute_selection_spec_for_line(line_idx)
-                if spec is None:
-                    new_specs.pop(line_idx, None)
-                else:
-                    new_specs[line_idx] = spec
-        else:
-            new_specs = self._compute_visible_selection_specs()
-
-        lines_to_clear = set(old_specs) - set(new_specs)
-        lines_to_apply = {
-            line_idx
-            for line_idx, spec in new_specs.items()
-            if old_specs.get(line_idx) != spec
-        }
-
-        if dirty_lines:
-            for line_idx in dirty_lines:
-                if line_idx in new_specs:
-                    lines_to_apply.add(line_idx)
-                elif line_idx in old_specs:
-                    lines_to_clear.add(line_idx)
-
-        for line_idx in sorted(lines_to_clear):
-            self._clear_line_selection(line_idx)
-
-        for line_idx in sorted(lines_to_apply):
-            sel_start, sel_end, _ = new_specs[line_idx]
-            self._apply_line_selection(line_idx, sel_start, sel_end)
-
-        self._visual_selection_specs = new_specs
-
-    def _clear_line_selection(self, line_idx: int) -> None:
-        if line_idx < 0 or line_idx >= len(self._all_lines):
-            return
-
-        if _blocks._refresh_grouped_blocks_for_lines(self, {line_idx}):
-            return
-
-        code_widgets = self._get_code_widgets(line_idx)
-        if not code_widgets:
-            return
-
-        for widget in code_widgets:
-            if widget.has_class("-placeholder"):
-                continue
-
-            widget.remove_class("-selected")
-            widget.remove_class("-anchor")
-
-            line = self._all_lines[line_idx]
-            side = self._get_line_side_for_widget(line, widget)
-            has_cursor = (
-                line_idx == self.cursor_line
-                and self._widget_matches_cursor_side(line, widget)
-            )
-            if has_cursor:
-                cursor_col = self.cursor_column
-                new_content = self._build_code_content_with_cursor(
-                    line,
-                    True,
-                    cursor_col,
-                    side=side,
-                )
-            else:
-                new_content = self._base_code_content(line, side=side)
-            widget.update(new_content)
-
-    def _apply_line_selection(
-        self, line_idx: int, start_col: int, end_col: int | None
-    ) -> None:
-        if line_idx < 0 or line_idx >= len(self._all_lines):
-            return
-
-        if _blocks._refresh_grouped_blocks_for_lines(self, {line_idx}):
-            return
-
-        line = self._all_lines[line_idx]
-        text = self._get_line_text(line)
-
-        code_widgets = self._get_code_widgets(line_idx)
-        if not code_widgets:
-            return
-
-        for widget in code_widgets:
-            if widget.has_class("-placeholder"):
-                continue
-
-            actual_end = end_col if end_col is not None else len(text) - 1
-            side = self._get_line_side_for_widget(line, widget)
-            has_cursor = (
-                line_idx == self.cursor_line
-                and self._widget_matches_cursor_side(line, widget)
-            )
-            cursor_col = self.cursor_column if has_cursor else None
-            content = self._build_code_content_with_selection(
-                line,
-                has_cursor,
-                cursor_col,
-                start_col,
-                actual_end,
-                side=side,
-            )
-            widget.update(content)
-
-            if self.visual_type == "line":
-                widget.add_class("-selected")
-                if line_idx == self.visual_anchor_line:
-                    widget.add_class("-anchor")
-                else:
-                    widget.remove_class("-anchor")
-            else:
-                widget.remove_class("-selected")
-                widget.remove_class("-anchor")
-
-    def _compute_base_code_content(
-        self,
-        line: DiffLine,
-        *,
-        side: Literal["old", "new", "auto"] = "auto",
-        empty_fallback: str = "",
-    ) -> Content:
-        if side == "old":
-            if line.highlighted_old_content is not None:
-                return line.highlighted_old_content
-            return Content(line.old_content if line.old_content else empty_fallback)
-        if side == "new":
-            if line.highlighted_new_content is not None:
-                return line.highlighted_new_content
-            return Content(line.new_content if line.new_content else empty_fallback)
-        if line.highlighted_new_content is not None:
-            return line.highlighted_new_content
-        if line.highlighted_old_content is not None:
-            return line.highlighted_old_content
-
-        text_content = self._get_line_text(line, side)
-        return Content(text_content if text_content else empty_fallback)
-
-    def _base_code_content(
-        self,
-        line: DiffLine,
-        *,
-        side: Literal["old", "new", "auto"] = "auto",
-        empty_fallback: str = "",
-    ) -> Content:
-        line_index = line.line_index
-        if line_index < 0:
-            return self._compute_base_code_content(
-                line,
-                side=side,
-                empty_fallback=empty_fallback,
+            self.run_worker(
+                self._load_and_show_full_file(),
+                exclusive=True,
+                name="diff-full-file",
             )
 
-        cache_key = (line_index, side, empty_fallback)
-        cached = self._base_code_content_cache.get(cache_key)
-        if cached is not None:
-            return cached
-
-        cached = self._compute_base_code_content(
-            line,
-            side=side,
-            empty_fallback=empty_fallback,
-        )
-        self._base_code_content_cache[cache_key] = cached
-        return cached
-
-    def _build_code_content_with_selection(
-        self,
-        line: DiffLine,
-        has_cursor: bool,
-        cursor_col: int | None,
-        sel_start: int,
-        sel_end: int,
-        *,
-        side: Literal["old", "new", "auto"] = "auto",
-    ) -> Content:
-        base_content = self._base_code_content(line, side=side)
-        base_content = _search.apply_search_highlights(
-            self,
-            base_content,
-            line.line_index,
-            side,
-        )
-        text_content = self._get_line_text(line, side)
-        if not text_content:
-            return base_content
-
-        sel_start = max(0, min(sel_start, len(text_content) - 1))
-        sel_end = max(0, min(sel_end, len(text_content) - 1))
-
-        if sel_start > sel_end:
-            sel_start, sel_end = sel_end, sel_start
-
-        result = base_content.stylize("reverse dim", sel_start, sel_end + 1)
-
-        if has_cursor and cursor_col is not None and cursor_col < len(text_content):
-            result = result.stylize("reverse bold", cursor_col, cursor_col + 1)
-
-        return result
-
-    def _scroll_to_cursor(self) -> None:
-        if not self._all_lines or not self.is_mounted:
+    async def _load_and_show_full_file(self) -> None:
+        if self.current_file is None or self.store is None:
             return
-
-        row = self._current_row()
-        if row is None:
+        content = await self.store.get_file_content(self.current_file)
+        if content is None:
+            self.post_message(
+                Flash("Failed to load file content", style="error", duration=2.0)
+            )
             return
+        self._saved_diff = self._diff
+        full_diff = _render._build_full_file_diff(self.current_file, content)
+        self._showing_full_file = True
+        await self.show_diff(self.current_file, full_diff)
+        self.post_message(Flash("Full file preview", style="success", duration=1.5))
 
-        bounds = self._row_vertical_bounds(row)
-        if bounds is None:
+    def _restore_diff_view(self) -> None:
+        if self._saved_diff is None or self.current_file is None:
             return
-
-        top, bottom = bounds
-        saved = self._suspend_scroll_virtual_window_watch
-        self._suspend_scroll_virtual_window_watch = True
-        try:
-            self._scroll_to_vertical_span(top, bottom, animate=False)
-        finally:
-            self._suspend_scroll_virtual_window_watch = saved
-
-    def _show_initial_cursor(self) -> None:
-        if not self._all_lines or not self.is_mounted:
-            return
-
-        self._update_line_cursor(self.cursor_line)
-
-    def action_next_comment(self) -> None:
-        _comments.next_comment(self)
-
-    def action_prev_comment(self) -> None:
-        _comments.prev_comment(self)
-
-    def action_toggle_resolve(self) -> None:
+        diff = self._saved_diff
+        self._saved_diff = None
+        self._showing_full_file = False
         self.run_worker(
-            _comments.toggle_resolve(self),
-            exclusive=False,
-            name="diff-toggle-resolve",
+            self._restore_diff_async(self.current_file, diff),
+            exclusive=True,
+            name="diff-restore",
         )
 
-    def action_center_cursor(self) -> None:
-        row = self._current_row()
-        if row is None:
-            return
-        bounds = self._row_vertical_bounds(row)
-        if bounds is None:
-            return
-        top, bottom = bounds
-        mid = (top + bottom) // 2
-        viewport_height = max(1, self.scrollable_content_region.height)
-        target_y = max(0, mid - viewport_height // 2)
-
-        base_max_y = int(self.max_scroll_y) - self._center_padding_height
-        needed_padding = max(0, target_y - base_max_y)
-
-        container = self._content_widget
-        if container is None:
-            return
-
-        delta = needed_padding - self._center_padding_height
-        if delta != 0:
-            self._center_padding_height = needed_padding
-            pad = self._center_padding_widget
-            if needed_padding > 0:
-                if pad is None:
-                    pad = Static("", id="center-padding")
-                    pad.styles.height = needed_padding
-                    container.mount(pad)
-                    self._center_padding_widget = pad
-                else:
-                    pad.styles.height = needed_padding
-            elif pad is not None:
-                pad.styles.height = 0
-
-            from textual.geometry import Size
-
-            vs = self.virtual_size
-            self.virtual_size = Size(vs.width, max(0, vs.height + delta))
-
-        self.scroll_to(y=target_y, animate=False)
+    async def _restore_diff_async(self, filename: str, diff: FileDiff) -> None:
+        await self.show_diff(filename, diff)
+        self.post_message(Flash("Diff view", style="success", duration=1.5))
 
     _DIFF_MODES: tuple[str, ...] = ("auto", "split", "unified")
 
@@ -2956,300 +2144,202 @@ class DiffView(VerticalScroll):
         label = {"auto": "Auto", "split": "Split", "unified": "Unified"}[new_mode]
         self.post_message(Flash(f"Diff mode: {label}", style="success", duration=1.5))
 
-    def next_hunk(self) -> None:
-        if not self._diff or not self._diff.hunks:
-            return
-
-        total = len(self._diff.hunks)
-        if self.current_hunk_index < total - 1:
-            self.current_hunk_index += 1
-            target_row = self._first_row_for_hunk(self.current_hunk_index)
-            if target_row is not None:
-                self._jump_to_row_with_anchor(target_row, viewport_offset=0)
-            else:
-                self._scroll_to_hunk(self.current_hunk_index)
-            self.post_message(
-                self.HunkNavigated(
-                    hunk_index=self.current_hunk_index,
-                    total_hunks=total,
-                )
+    @work(thread=True)
+    async def _copy_to_clipboard_async(self, text: str) -> None:
+        try:
+            await asyncio.to_thread(pyperclip.copy, text)
+            self.app.post_message(
+                Flash("Copied to clipboard", style="success", duration=2.0)
             )
+        except Exception as e:
+            self.app.post_message(
+                Flash(f"Failed to copy: {str(e)}", style="error", duration=3.0)
+            )
+
+    # ==================================================================
+    # Wrapper methods — delegate to extracted modules
+    # ==================================================================
+
+    # --- Cursor / scroll / word motion (_cursor) ---
+
+    def action_scroll_down(self) -> None:
+        _cursor._scroll_down(self)
+
+    def action_scroll_up(self) -> None:
+        _cursor._scroll_up(self)
+
+    def action_cursor_left(self) -> None:
+        _cursor._cursor_left(self)
+
+    def action_cursor_right(self) -> None:
+        _cursor._cursor_right(self)
+
+    def action_start_of_line(self) -> None:
+        _cursor._start_of_line(self)
+
+    def action_first_non_blank(self) -> None:
+        _cursor._first_non_blank(self)
+
+    def action_end_of_line(self) -> None:
+        _cursor._end_of_line(self)
+
+    def action_scroll_home(self) -> None:
+        _cursor._scroll_home(self)
+
+    def action_scroll_end(self) -> None:
+        _cursor._scroll_end(self)
+
+    async def action_half_page_down(self) -> None:
+        await _cursor._half_page_down(self)
+
+    async def action_half_page_up(self) -> None:
+        await _cursor._half_page_up(self)
+
+    def action_cycle_active_pane(self) -> None:
+        _cursor._cycle_active_pane(self)
+
+    def action_cycle_active_pane_reverse(self) -> None:
+        _cursor._cycle_active_pane(self)
+
+    def action_next_word(self) -> None:
+        _cursor._next_word(self)
+
+    def action_prev_word(self) -> None:
+        _cursor._prev_word(self)
+
+    def action_end_word(self) -> None:
+        _cursor._end_word(self)
+
+    def action_center_cursor(self) -> None:
+        _cursor._center_cursor(self)
+
+    def next_hunk(self) -> None:
+        _cursor._next_hunk(self)
 
     def prev_hunk(self) -> None:
-        if not self._diff or not self._diff.hunks:
-            return
+        _cursor._prev_hunk(self)
 
-        total = len(self._diff.hunks)
-        if self.current_hunk_index > 0:
-            self.current_hunk_index -= 1
-            target_row = self._first_row_for_hunk(self.current_hunk_index)
-            if target_row is not None:
-                self._jump_to_row_with_anchor(target_row, viewport_offset=0)
-            else:
-                self._scroll_to_hunk(self.current_hunk_index)
-            self.post_message(
-                self.HunkNavigated(
-                    hunk_index=self.current_hunk_index,
-                    total_hunks=total,
-                )
-            )
+    def _move_cursor(self, **kwargs) -> bool:
+        return _cursor._move_cursor(self, **kwargs)
 
-    def _scroll_to_hunk(self, index: int) -> None:
-        if self._diff is None or not (0 <= index < len(self._diff.hunks)):
-            return
+    def _jump_to_row_with_anchor(self, row: RenderedRow, **kwargs) -> None:
+        _cursor._jump_to_row_with_anchor(self, row, **kwargs)
 
-        if self._virtualized:
-            target_range = next(
-                (item for item in self._hunk_line_ranges if item[0] == index),
-                None,
-            )
-            if target_range is not None:
-                _, start, end = target_range
-                target_line = start if end >= start else start
-                if not (
-                    self._virtual_window_start
-                    <= target_line
-                    <= self._virtual_window_end
-                ):
-                    _virtual._set_virtual_window_around(self, target_line)
-                    self._window_render_pending = True
-                    self.run_worker(
-                        _virtual._run_virtual_window_render_for_request(
-                            self, self._render_request_token
-                        ),
-                        exclusive=True,
-                        name="diff-virtual-hunk-jump",
-                    )
-                    self.call_after_refresh(lambda: self._scroll_to_hunk(index))
-                    return
-
-        if 0 <= index < len(self._hunk_header_top_offsets):
-            self._scroll_to_vertical_span(
-                self._hunk_header_top_offsets[index],
-                self._hunk_header_top_offsets[index] + 1,
-                animate=True,
-                top_align=True,
-            )
-
-    def _get_line_side_for_widget(
-        self,
-        line: DiffLine,
-        widget: Static,
-    ) -> Literal["old", "new", "auto"]:
-        if widget.has_class("-old-side"):
-            return "old"
-        if widget.has_class("-new-side"):
-            return "new"
-
-        if line.is_modified:
-            if widget.has_class("-removed"):
-                return "old"
-            if widget.has_class("-added"):
-                return "new"
-
-        if line.is_deleted:
-            return "old"
-        if line.is_added:
-            return "new"
-        return "auto"
-
-    def _get_line_text(
-        self,
-        line: DiffLine,
-        side: Literal["old", "new", "auto"] = "auto",
-    ) -> str:
-        if side == "old":
-            return line.old_content
-        if side == "new":
-            return line.new_content
-
-        if line.new_content:
-            return line.new_content
-        if line.old_content:
-            return line.old_content
-        return ""
-
-    def _is_word_char(self, char: str) -> bool:
-        return char.isalnum() or char == "_"
-
-    def _find_first_word(self, text: str) -> int:
-        pos = 0
-        while pos < len(text) and text[pos].isspace():
-            pos += 1
-        return pos
-
-    def _find_next_word_start(self, text: str, pos: int) -> int | None:
-        if pos >= len(text) - 1:
-            return None
-
-        current_pos = pos
-
-        if self._is_word_char(text[current_pos]):
-            while current_pos < len(text) and self._is_word_char(text[current_pos]):
-                current_pos += 1
-        elif not text[current_pos].isspace():
-            while (
-                current_pos < len(text)
-                and not text[current_pos].isspace()
-                and not self._is_word_char(text[current_pos])
-            ):
-                current_pos += 1
-
-        while current_pos < len(text) and text[current_pos].isspace():
-            current_pos += 1
-
-        return current_pos if current_pos < len(text) else None
-
-    def _find_prev_word_start(self, text: str, pos: int) -> int | None:
-        if pos <= 0:
-            return None
-
-        current_pos = pos - 1
-
-        while current_pos > 0 and text[current_pos].isspace():
-            current_pos -= 1
-
-        if self._is_word_char(text[current_pos]):
-            while current_pos > 0 and self._is_word_char(text[current_pos - 1]):
-                current_pos -= 1
-        else:
-            while (
-                current_pos > 0
-                and not text[current_pos - 1].isspace()
-                and not self._is_word_char(text[current_pos - 1])
-            ):
-                current_pos -= 1
-
-        return current_pos
-
-    def _find_next_word_end(self, text: str, pos: int) -> int | None:
-        if pos >= len(text) - 1:
-            return None
-
-        current_pos = pos + 1
-
-        while current_pos < len(text) and text[current_pos].isspace():
-            current_pos += 1
-
-        if current_pos >= len(text):
-            return None
-
-        if self._is_word_char(text[current_pos]):
-            while current_pos < len(text) - 1 and self._is_word_char(
-                text[current_pos + 1]
-            ):
-                current_pos += 1
-        else:
-            while (
-                current_pos < len(text) - 1
-                and not text[current_pos + 1].isspace()
-                and not self._is_word_char(text[current_pos + 1])
-            ):
-                current_pos += 1
-
-        return current_pos
+    def _row_is_visible(self, row: RenderedRow) -> bool:
+        return _cursor._row_is_visible(self, row)
 
     def _scroll_to_cursor_horizontal(self) -> None:
-        prefix_width = (
-            self.LAYOUT.split_prefix_width
-            if self.split
-            else self.LAYOUT.unified_prefix_width
-        )
-        cursor_x = prefix_width + self.cursor_column
+        _cursor._scroll_to_cursor_horizontal(self)
 
-        viewport_width = self.size.width
-        current_scroll = self.scroll_x
-        edge_padding = self.LAYOUT.horizontal_scroll_edge_padding
-        reveal_padding = self.LAYOUT.horizontal_scroll_reveal_padding
+    # --- Visual mode / selection (_selection) ---
 
-        if cursor_x >= current_scroll + viewport_width - edge_padding:
-            self.scroll_x = cursor_x - viewport_width + reveal_padding
+    def action_toggle_visual(self) -> None:
+        _selection._toggle_visual(self)
 
-        elif cursor_x < current_scroll + prefix_width:
-            self.scroll_x = max(0, cursor_x - prefix_width - edge_padding)
+    def action_toggle_visual_line(self) -> None:
+        _selection._toggle_visual_line(self)
 
-    def _widget_matches_cursor_side(self, line: DiffLine, widget: Static) -> bool:
-        cursor_side = self._cursor_side_for_line(line)
-        widget_side = self._get_line_side_for_widget(line, widget)
+    def action_yank(self) -> None:
+        _selection._yank(self)
 
-        if cursor_side == "auto":
-            return True
-        return widget_side == cursor_side or widget_side == "auto"
+    def action_exit_visual(self) -> None:
+        _selection._exit_visual(self)
+
+    def _compute_selection_spec_for_line(self, line_idx: int):
+        return _selection._compute_selection_spec_for_line(self, line_idx)
+
+    def _update_selection_highlighting(
+        self, dirty_lines: set[int] | None = None
+    ) -> None:
+        _selection._update_selection_highlighting(self, dirty_lines)
+
+    def _build_code_content_with_selection(self, *args, **kwargs) -> Content:
+        return _selection._build_code_content_with_selection(self, *args, **kwargs)
+
+    # --- Rendering (_render) ---
+
+    def _update_split_state(self) -> None:
+        _render._update_split_state(self)
+
+    def _rebuild_rendered_rows(self) -> None:
+        _render._rebuild_rendered_rows(self)
+
+    async def _render_diff(self) -> None:
+        await _render._render_diff(self)
+
+    def _render_hunk(self, *args, **kwargs) -> None:
+        _render._render_hunk(self, *args, **kwargs)
+
+    def _finalize_render_state(self) -> None:
+        _render._finalize_render_state(self)
+
+    def _build_unified_prefix_content(self, line: DiffLine) -> Content:
+        return _render._build_unified_prefix_content(self, line)
+
+    def _build_split_prefix(self, *args, **kwargs) -> Content:
+        return _render._build_split_prefix(self, *args, **kwargs)
+
+    def _unified_line_style(self, line: DiffLine, **kwargs) -> str:
+        return _render._unified_line_style(self, line, **kwargs)
+
+    def _split_line_style(self, line: DiffLine, **kwargs) -> str:
+        return _render._split_line_style(self, line, **kwargs)
+
+    def _mount_split_lines(self, *args, **kwargs) -> None:
+        _render._mount_split_lines(self, *args, **kwargs)
+
+    def _mount_unified_lines(self, *args, **kwargs) -> None:
+        _render._mount_unified_lines(self, *args, **kwargs)
+
+    def _base_code_content(self, line: DiffLine, **kwargs) -> Content:
+        return _render._base_code_content(self, line, **kwargs)
+
+    def _build_code_content_with_cursor(self, *args, **kwargs) -> Content:
+        return _render._build_code_content_with_cursor(self, *args, **kwargs)
 
     def _update_line_cursor(self, line_idx: int) -> None:
-        if line_idx < 0 or line_idx >= len(self._all_lines):
-            return
+        _render._update_line_cursor(self, line_idx)
 
-        if not self.is_mounted:
-            return
+    def _invalidate_base_code_content_cache(
+        self, line_indices: set[int] | None = None
+    ) -> None:
+        _render._invalidate_base_code_content_cache(self, line_indices)
 
-        if _blocks._refresh_grouped_blocks_for_lines(self, {line_idx}):
-            return
+    def _comparison_heavy_ratio(self) -> float:
+        return _render._comparison_heavy_ratio(self)
 
-        code_widgets = self._get_code_widgets(line_idx)
-        if not code_widgets:
-            return
+    def _average_render_line_height(self) -> float:
+        return _render._average_render_line_height(self)
 
-        line = self._all_lines[line_idx]
-        has_cursor = line_idx == self.cursor_line
+    def _render_height_for_line(self, line: DiffLine) -> int:
+        return _render._render_height_for_line(self, line)
 
-        for code_widget in code_widgets:
-            if code_widget.has_class("-placeholder"):
-                if code_widget.has_class("-cursor"):
-                    code_widget.remove_class("-cursor")
-                continue
+    def _line_index_at_vertical_offset(self, offset: int) -> int:
+        return _render._line_index_at_vertical_offset(self, offset)
 
-            side = self._get_line_side_for_widget(line, code_widget)
-            show_cursor = has_cursor and self._widget_matches_cursor_side(
-                line, code_widget
-            )
-            had_cursor = code_widget.has_class("-cursor")
+    def _viewport_center_line(self) -> int:
+        return _render._viewport_center_line(self)
 
-            has_search = bool(self._search_query and self._search_matches)
+    def _get_rendered_line_bounds(self) -> tuple[int, int]:
+        return _render._get_rendered_line_bounds(self)
 
-            if not show_cursor and not had_cursor and not has_search:
-                continue
+    def _is_line_rendered(self, line_idx: int) -> bool:
+        return _render._is_line_rendered(self, line_idx)
 
-            new_content = self._build_code_content_with_cursor(
-                line,
-                show_cursor,
-                self.cursor_column if show_cursor else None,
-                side=side,
-            )
-            code_widget.update(new_content)
+    def _should_render_hunk_header(self, *args, **kwargs) -> bool:
+        return _render._should_render_hunk_header(self, *args, **kwargs)
 
-            if show_cursor:
-                if not had_cursor:
-                    code_widget.add_class("-cursor")
-            elif had_cursor:
-                code_widget.remove_class("-cursor")
+    def _compute_base_code_content(self, *args, **kwargs) -> Content:
+        return _render._compute_base_code_content(self, *args, **kwargs)
 
-    def _build_code_content_with_cursor(
-        self,
-        line: DiffLine,
-        has_cursor: bool,
-        cursor_col: int | None,
-        *,
-        side: Literal["old", "new", "auto"] = "auto",
-    ) -> Content:
-        base_content = self._base_code_content(line, side=side, empty_fallback=" ")
-        base_content = _search.apply_search_highlights(
-            self,
-            base_content,
-            line.line_index,
-            side,
-        )
+    def _current_cursor_viewport_offset(self) -> int | None:
+        return _cursor._current_cursor_viewport_offset(self)
 
-        if not has_cursor or cursor_col is None:
-            return base_content
+    def _queue_cursor_ui_flush(self, **kwargs) -> None:
+        _cursor._queue_cursor_ui_flush(self, **kwargs)
 
-        text_content = self._get_line_text(line, side)
-        if not text_content:
-            return Content(" ").stylize("reverse", 0, 1)
+    def _flush_queued_cursor_ui_updates(self) -> None:
+        _cursor._flush_queued_cursor_ui_updates(self)
 
-        if cursor_col >= len(text_content):
-            return base_content
-
-        result = base_content.stylize("reverse", cursor_col, cursor_col + 1)
-
-        return result
+    def _copy_to_clipboard(self, text: str) -> None:
+        _selection._copy_to_clipboard(text)
