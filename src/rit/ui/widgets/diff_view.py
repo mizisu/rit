@@ -381,565 +381,70 @@ class DiffView(VerticalScroll):
             self.app.sub_title = (
                 "-- VISUAL LINE --" if new_type == "line" else "-- VISUAL --"
             )
-            self._queue_cursor_ui_flush(
+            _cursor._queue_cursor_ui_flush(
+                self,
                 selection_dirty_lines={self.cursor_line},
                 update_status_line=True,
             )
             return
-        self._queue_cursor_ui_flush(update_status_line=True)
-
-    def _enter_visual_mode(self, visual_type: Literal["char", "line"]) -> None:
-        self.visual_type = visual_type
-
-        if not self.visual_mode:
-            self.visual_mode = True
-            self.visual_anchor_line = self.cursor_line
-            self.visual_anchor_column = self.cursor_column
-            return
-
-        if self.visual_anchor_line is None:
-            self.visual_anchor_line = self.cursor_line
-        if self.visual_anchor_column is None:
-            self.visual_anchor_column = self.cursor_column
-
-    def _exit_visual_mode(self) -> None:
-        self.visual_mode = False
-        self.visual_anchor_line = None
-        self.visual_anchor_column = None
+        _cursor._queue_cursor_ui_flush(self, update_status_line=True)
 
     def watch_visual_anchor_line(
         self, old_anchor: int | None, new_anchor: int | None
     ) -> None:
         if self.visual_mode:
-            self._queue_cursor_ui_flush(selection_dirty_lines={self.cursor_line})
+            _cursor._queue_cursor_ui_flush(
+                self, selection_dirty_lines={self.cursor_line}
+            )
 
     def watch_visual_anchor_column(
         self, old_col: int | None, new_col: int | None
     ) -> None:
         if self.visual_mode:
-            self._queue_cursor_ui_flush(selection_dirty_lines={self.cursor_line})
-
-    def _consume_count(self) -> int:
-        if self._pending_count:
-            count = int(self._pending_count)
-            self._pending_count = ""
-            return max(1, count)
-        return 1
-
-    def action_scroll_down(self) -> None:
-        count = self._consume_count()
-        if self._all_lines:
-            self._move_cursor_rows(count, scroll_in_visual=self.visual_mode)
-        else:
-            for _ in range(count):
-                super().action_scroll_down()
-
-    def action_scroll_up(self) -> None:
-        count = self._consume_count()
-        if self._all_lines:
-            self._move_cursor_rows(-count, scroll_in_visual=self.visual_mode)
-        else:
-            for _ in range(count):
-                super().action_scroll_up()
-
-    def action_cursor_left(self) -> None:
-        if not self._all_lines:
-            return
-
-        if self.visual_mode and self.visual_type == "line":
-            return
-
-        if self.cursor_column > 0:
-            self._move_cursor(column=self.cursor_column - 1)
-
-    def action_cursor_right(self) -> None:
-        if not self._all_lines:
-            return
-
-        if self.visual_mode and self.visual_type == "line":
-            return
-
-        if self.cursor_line >= len(self._all_lines):
-            return
-
-        text = self._get_cursor_text()
-        if not text:
-            self._move_cursor(column=0)
-            return
-
-        max_col = len(text) - 1
-        if self.cursor_column < max_col:
-            self._move_cursor(column=self.cursor_column + 1)
-
-    def action_start_of_line(self) -> None:
-        if not self._all_lines:
-            return
-
-        if self.visual_mode and self.visual_type == "line":
-            return
-
-        self._move_cursor(column=0)
-
-    def action_first_non_blank(self) -> None:
-        if not self._all_lines:
-            return
-
-        if self.visual_mode and self.visual_type == "line":
-            return
-
-        if not (0 <= self.cursor_line < len(self._all_lines)):
-            return
-
-        text = self._get_cursor_text()
-        first_non_blank = 0
-        while first_non_blank < len(text) and text[first_non_blank].isspace():
-            first_non_blank += 1
-
-        self._move_cursor(column=0 if first_non_blank >= len(text) else first_non_blank)
-
-    def action_end_of_line(self) -> None:
-        if not self._all_lines:
-            return
-
-        if self.visual_mode and self.visual_type == "line":
-            return
-
-        if not (0 <= self.cursor_line < len(self._all_lines)):
-            return
-
-        text = self._get_cursor_text()
-        self._move_cursor(column=max(0, len(text) - 1))
-
-    def action_scroll_home(self) -> None:
-        rows = self._rows_for_current_mode()
-        if rows:
-            self._jump_to_row_with_anchor(rows[0], viewport_offset=0)
-            return
-
-        self.scroll_home(animate=False)
-
-    def action_scroll_end(self) -> None:
-        rows = self._rows_for_current_mode()
-        if rows:
-            self._jump_to_row_with_anchor(rows[-1], bottom_align=True)
-            self.scroll_end(animate=False)
-            self._flush_cursor_ui_now_if_safe()
-            return
-
-        self.scroll_end(animate=False)
-
-    def _half_page_step(self) -> int:
-        return max(1, self.scrollable_content_region.height // 2)
-
-    def _current_cursor_viewport_offset(self) -> int | None:
-        row = self._current_row()
-        if row is None:
-            return None
-
-        bounds = self._row_vertical_bounds(row)
-        if bounds is None:
-            return None
-
-        top, _ = bounds
-        return max(0, top - int(self.scroll_y))
-
-    def _scroll_row_to_viewport_offset(
-        self,
-        row: RenderedRow,
-        viewport_offset: int,
-        *,
-        animate: bool = False,
-    ) -> None:
-        bounds = self._row_vertical_bounds(row)
-        if bounds is None:
-            return
-
-        top, bottom = bounds
-        viewport_height = max(1, self.scrollable_content_region.height)
-        target_scroll = max(0, top - max(0, viewport_offset))
-        if bottom - target_scroll > viewport_height:
-            target_scroll = max(0, bottom - viewport_height)
-
-        self.scroll_to(
-            y=min(target_scroll, max(0, int(self.max_scroll_y))),
-            animate=animate,
-        )
-
-    def _scroll_row_to_viewport_bottom(
-        self,
-        row: RenderedRow,
-        *,
-        animate: bool = False,
-    ) -> None:
-        bounds = self._row_vertical_bounds(row)
-        if bounds is None:
-            return
-
-        _, bottom = bounds
-        viewport_height = max(1, self.scrollable_content_region.height)
-        self.scroll_to(
-            y=min(max(0, bottom - viewport_height), max(0, int(self.max_scroll_y))),
-            animate=animate,
-        )
-
-    def _row_is_visible(self, row: RenderedRow) -> bool:
-        bounds = self._row_vertical_bounds(row)
-        if bounds is None:
-            return False
-
-        top, bottom = bounds
-        current_top = int(self.scroll_y)
-        current_bottom = current_top + max(1, self.scrollable_content_region.height)
-        return top >= current_top and bottom <= current_bottom
-
-    def _jump_to_row_with_anchor(
-        self,
-        row: RenderedRow,
-        *,
-        pane: Literal["old", "new"] | None = None,
-        column: int | None = None,
-        viewport_offset: int | None = None,
-        bottom_align: bool = False,
-        animate: bool = False,
-        reveal_horizontal: bool = False,
-    ) -> None:
-        target_pane = pane
-        if target_pane is None and row.side != "auto":
-            target_pane = "old" if row.side == "old" else "new"
-
-        self._suppress_cursor_scroll = True
-        try:
-            self._move_cursor(
-                line=row.line_index,
-                pane=target_pane,
-                column=column,
-                scroll_in_visual=self.visual_mode,
+            _cursor._queue_cursor_ui_flush(
+                self, selection_dirty_lines={self.cursor_line}
             )
-        finally:
-            self._suppress_cursor_scroll = False
 
-        if bottom_align:
-            self._scroll_row_to_viewport_bottom(row, animate=animate)
-        elif viewport_offset is not None:
-            self._scroll_row_to_viewport_offset(
-                row,
-                viewport_offset,
-                animate=animate,
-            )
-        else:
-            self._scroll_to_cursor()
+    # ------------------------------------------------------------------
+    # Key handling
+    # ------------------------------------------------------------------
 
-        if reveal_horizontal:
-            self._scroll_to_cursor_horizontal()
+    _COUNT_MOTION_KEYS = frozenset({"j", "k", "up", "down"})
 
-        self._flush_cursor_ui_now_if_safe()
-
-    def _flush_cursor_ui_now_if_safe(self) -> None:
-        if (
-            not self.is_mounted
-            or not self._cursor_ui_flush_pending
-            or self._window_render_pending
-        ):
+    def on_key(self, event: events.Key) -> None:
+        if event.character and event.character in "123456789":
+            self._cursor_ui.pending_count += event.character
+            event.stop()
+            event.prevent_default()
+            return
+        if event.character == "0" and self._cursor_ui.pending_count:
+            self._cursor_ui.pending_count += "0"
+            event.stop()
+            event.prevent_default()
             return
 
-        self._flush_queued_cursor_ui_updates()
+        if event.key not in self._COUNT_MOTION_KEYS:
+            self._cursor_ui.pending_count = ""
 
-    async def action_half_page_down(self) -> None:
-        if self._all_lines:
-            await self._animated_half_page_scroll(1)
-            return
-
-        self.scroll_page_down(animate=False)
-
-    async def action_half_page_up(self) -> None:
-        if self._all_lines:
-            await self._animated_half_page_scroll(-1)
-            return
-
-        self.scroll_page_up(animate=False)
-
-    async def _animated_half_page_scroll(self, direction: int) -> None:
-        step = self._half_page_step()
-        viewport_offset = self._current_cursor_viewport_offset()
-        delay = 0.15 / step
-
-        for _ in range(step):
-            self._suppress_cursor_scroll = True
-            try:
-                moved = self._move_cursor_rows(
-                    direction,
-                    scroll_in_visual=self.visual_mode,
-                )
-            finally:
-                self._suppress_cursor_scroll = False
-            if not moved:
-                break
-            if viewport_offset is not None:
-                row = self._current_row()
-                if row is not None:
-                    self._scroll_row_to_viewport_offset(row, viewport_offset)
-            self._flush_cursor_ui_now_if_safe()
-            await asyncio.sleep(delay)
-
-    def action_cycle_active_pane(self) -> None:
-        if not self._all_lines:
-            return
-
-        line = self._current_line()
-        if line is None:
-            return
-
-        if not self.split and not line.is_modified:
-            return
-
-        target_pane: Literal["old", "new"] = (
-            "old" if self._resolve_active_pane_for_line(line) == "new" else "new"
-        )
-        self._move_cursor(pane=target_pane, scroll_in_visual=self.visual_mode)
-
-    def action_cycle_active_pane_reverse(self) -> None:
-        self.action_cycle_active_pane()
-
-    def action_toggle_visual(self) -> None:
-        if self.visual_mode and self.visual_type == "char":
-            self._exit_visual_mode()
-            return
-
-        self._enter_visual_mode("char")
-
-    def action_toggle_visual_line(self) -> None:
-        if self.visual_mode and self.visual_type == "line":
-            self._exit_visual_mode()
-            return
-
-        self._enter_visual_mode("line")
-
-    def action_yank(self) -> None:
-        if not self._all_lines:
-            return
-
-        if not self.visual_mode:
-            if not (0 <= self.cursor_line < len(self._all_lines)):
+        if event.key == "escape":
+            bar = self._search_bar_widget
+            if bar is not None and bar.display:
+                event.stop()
+                event.prevent_default()
+                bar.display = False
+                _search.clear_state(self)
+                _search._refresh_search_display(self)
+                self.focus()
+                return
+        if event.key == "enter":
+            if _comments.try_toggle_current(self):
+                event.stop()
+                event.prevent_default()
                 return
 
-            text_to_copy = self._get_cursor_text() + "\n"
-            try:
-                self._copy_to_clipboard(text_to_copy)
-                self.post_message(Flash("Copied 1 line", style="success", duration=2.0))
-            except Exception as e:
-                self.post_message(
-                    Flash(f"Failed to copy: {str(e)}", style="error", duration=3.0)
-                )
-            return
-
-        if self.visual_anchor_line is None:
-            return
-
-        start_line = min(self.visual_anchor_line, self.cursor_line)
-        end_line = max(self.visual_anchor_line, self.cursor_line)
-
-        if self.visual_type == "line":
-            selected_lines = [
-                self._get_line_text(self._all_lines[line_idx])
-                for line_idx in range(start_line, end_line + 1)
-            ]
-            text_to_copy = "\n".join(selected_lines)
-            if text_to_copy:
-                text_to_copy += "\n"
-
-            try:
-                self._copy_to_clipboard(text_to_copy)
-                line_count = end_line - start_line + 1
-                self.post_message(
-                    Flash(
-                        f"Copied {line_count} line{'s' if line_count != 1 else ''}",
-                        style="success",
-                        duration=2.0,
-                    )
-                )
-            except Exception as e:
-                self.post_message(
-                    Flash(f"Failed to copy: {str(e)}", style="error", duration=3.0)
-                )
-
-            self._exit_visual_mode()
-            return
-
-        start_col = (
-            self.visual_anchor_column if self.visual_anchor_column is not None else 0
-        )
-        end_col = self.cursor_column
-
-        if self.visual_anchor_line < self.cursor_line:
-            first_line_col = start_col
-            last_line_col = end_col
-        elif self.visual_anchor_line > self.cursor_line:
-            first_line_col = end_col
-            last_line_col = start_col
-        else:
-            first_line_col = min(start_col, end_col)
-            last_line_col = max(start_col, end_col)
-
-        selected_lines = []
-
-        if start_line == end_line:
-            line = self._all_lines[start_line]
-            text = self._get_line_text(line)
-            actual_start = min(start_col, end_col)
-            actual_end = max(start_col, end_col)
-            selected_lines.append(text[actual_start : actual_end + 1])
-        else:
-            for line_idx in range(start_line, end_line + 1):
-                line = self._all_lines[line_idx]
-                text = self._get_line_text(line)
-
-                if line_idx == start_line:
-                    selected_lines.append(text[first_line_col:])
-                elif line_idx == end_line:
-                    selected_lines.append(text[: last_line_col + 1])
-                else:
-                    selected_lines.append(text)
-
-        text_to_copy = "\n".join(selected_lines)
-
-        try:
-            self._copy_to_clipboard(text_to_copy)
-            char_count = len(text_to_copy)
-            self.post_message(
-                Flash(
-                    f"Copied {char_count} character{'s' if char_count != 1 else ''}",
-                    style="success",
-                    duration=2.0,
-                )
-            )
-        except Exception as e:
-            self.post_message(
-                Flash(f"Failed to copy: {str(e)}", style="error", duration=3.0)
-            )
-
-        self._exit_visual_mode()
-
-    @work(thread=True)
-    async def _copy_to_clipboard_async(self, text: str) -> None:
-        from rit.ui.messages import Flash
-
-        try:
-            await asyncio.to_thread(pyperclip.copy, text)
-            self.app.post_message(
-                Flash("Copied to clipboard", style="success", duration=2.0)
-            )
-        except Exception as e:
-            self.app.post_message(
-                Flash(f"Failed to copy: {str(e)}", style="error", duration=3.0)
-            )
-
-    def action_exit_visual(self) -> None:
-        if self.visual_mode:
-            self._exit_visual_mode()
-        elif self._search_query:
-            _search.clear_state(self)
-            _search._refresh_search_display(self)
-
-    def action_next_word(self) -> None:
-        if not self._all_lines or self.cursor_line >= len(self._all_lines):
-            return
-
-        text = self._get_cursor_text()
-
-        next_pos = self._find_next_word_start(text, self.cursor_column)
-
-        if next_pos is not None:
-            self._move_cursor(column=next_pos)
-            return
-
-        rows = self._rows_for_current_mode()
-        current = self._current_row_index()
-        if current >= len(rows) - 1:
-            return
-
-        target_row = rows[current + 1]
-        next_text = self._get_cursor_text_for_target(
-            target_row.line_index,
-            self.active_pane
-            if target_row.side == "auto"
-            else ("old" if target_row.side == "old" else "new"),
-        )
-        self._move_cursor(
-            line=target_row.line_index,
-            pane=None
-            if target_row.side == "auto"
-            else ("old" if target_row.side == "old" else "new"),
-            column=self._find_first_word(next_text),
-            scroll_in_visual=self.visual_mode,
-        )
-
-    def action_prev_word(self) -> None:
-        if not self._all_lines or self.cursor_line >= len(self._all_lines):
-            return
-
-        text = self._get_cursor_text()
-
-        prev_pos = self._find_prev_word_start(text, self.cursor_column)
-
-        if prev_pos is not None:
-            self._move_cursor(column=prev_pos)
-            return
-
-        rows = self._rows_for_current_mode()
-        current = self._current_row_index()
-        if current <= 0:
-            return
-
-        target_row = rows[current - 1]
-        prev_text = self._get_cursor_text_for_target(
-            target_row.line_index,
-            self.active_pane
-            if target_row.side == "auto"
-            else ("old" if target_row.side == "old" else "new"),
-        )
-        self._move_cursor(
-            line=target_row.line_index,
-            pane=None
-            if target_row.side == "auto"
-            else ("old" if target_row.side == "old" else "new"),
-            column=max(0, len(prev_text) - 1),
-            scroll_in_visual=self.visual_mode,
-        )
-
-    def action_end_word(self) -> None:
-        if not self._all_lines or self.cursor_line >= len(self._all_lines):
-            return
-
-        text = self._get_cursor_text()
-
-        end_pos = self._find_next_word_end(text, self.cursor_column)
-
-        if end_pos is not None:
-            self._move_cursor(column=end_pos)
-            return
-
-        rows = self._rows_for_current_mode()
-        current = self._current_row_index()
-        if current >= len(rows) - 1:
-            return
-
-        target_row = rows[current + 1]
-        next_text = self._get_cursor_text_for_target(
-            target_row.line_index,
-            self.active_pane
-            if target_row.side == "auto"
-            else ("old" if target_row.side == "old" else "new"),
-        )
-        first_word_pos = self._find_first_word(next_text)
-        end_pos = self._find_next_word_end(next_text, first_word_pos - 1)
-        self._move_cursor(
-            line=target_row.line_index,
-            pane=None
-            if target_row.side == "auto"
-            else ("old" if target_row.side == "old" else "new"),
-            column=end_pos if end_pos is not None else first_word_pos,
-            scroll_in_visual=self.visual_mode,
-        )
+    # ------------------------------------------------------------------
+    # Search handlers
+    # ------------------------------------------------------------------
 
     def action_start_search(self) -> None:
         bar = self._search_bar_widget
@@ -970,231 +475,32 @@ class DiffView(VerticalScroll):
         self.focus()
         _search.handle_submitted(self, event.value)
 
-    _COUNT_MOTION_KEYS = frozenset({"j", "k", "up", "down"})
-
-    def on_key(self, event: events.Key) -> None:
-        if event.character and event.character in "123456789":
-            self._pending_count += event.character
-            event.stop()
-            event.prevent_default()
-            return
-        if event.character == "0" and self._pending_count:
-            self._pending_count += "0"
-            event.stop()
-            event.prevent_default()
-            return
-
-        if event.key not in self._COUNT_MOTION_KEYS:
-            self._pending_count = ""
-
-        if event.key == "escape":
-            bar = self._search_bar_widget
-            if bar is not None and bar.display:
-                event.stop()
-                event.prevent_default()
-                bar.display = False
-                _search.clear_state(self)
-                _search._refresh_search_display(self)
-                self.focus()
-                return
-        if event.key == "enter":
-            if _comments.try_toggle_current(self):
-                event.stop()
-                event.prevent_default()
-                return
-
     def action_next_search_match(self) -> None:
         _search.jump_match(self, 1)
 
     def action_prev_search_match(self) -> None:
         _search.jump_match(self, -1)
 
-    def _copy_to_clipboard(self, text: str) -> None:
-        if sys.platform == "darwin":
-            process = subprocess.Popen(
-                ["pbcopy"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            process.communicate(text.encode("utf-8"))
-        elif sys.platform.startswith("linux"):
-            try:
-                process = subprocess.Popen(
-                    ["xclip", "-selection", "clipboard"],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-                process.communicate(text.encode("utf-8"))
-            except FileNotFoundError:
-                process = subprocess.Popen(
-                    ["xsel", "--clipboard", "--input"],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                )
-                process.communicate(text.encode("utf-8"))
-        elif sys.platform == "win32":
-            process = subprocess.Popen(
-                ["clip"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            process.communicate(text.encode("utf-8"))
+    # ------------------------------------------------------------------
+    # Comment handlers (delegate to _comments)
+    # ------------------------------------------------------------------
 
-    def _should_force_unified_for_current_file(self) -> bool:
-        if self._file is not None and self._file.status in {"added", "removed"}:
-            return True
+    def action_next_comment(self) -> None:
+        _comments.next_comment(self)
 
-        diff = self._diff
-        if diff is None:
-            return False
-        if diff.is_new or diff.is_deleted:
-            return True
+    def action_prev_comment(self) -> None:
+        _comments.prev_comment(self)
 
-        all_lines = self._all_lines
-        if not all_lines:
-            return False
-
-        return all(line.is_added for line in all_lines) or all(
-            line.is_deleted for line in all_lines
+    def action_toggle_resolve(self) -> None:
+        self.run_worker(
+            _comments.toggle_resolve(self),
+            exclusive=False,
+            name="diff-toggle-resolve",
         )
 
-    def _update_split_state(self) -> None:
-        old_split = self.split
-
-        if self.mode == "split":
-            self.split = True
-        elif self.mode == "unified":
-            self.split = False
-        else:  # auto
-            self.split = self.size.width >= self.LAYOUT.auto_split_min_width
-
-        if self.split and self._should_force_unified_for_current_file():
-            self.split = False
-
-        if old_split != self.split and self._all_lines:
-            _virtual._rebuild_virtual_layout(self)
-            if self._virtualized:
-                _virtual._set_virtual_window_from_viewport(self)
-
-        if (
-            old_split != self.split
-            and self.is_mounted
-            and self._diff is not None
-            and not self._window_render_pending
-            and not self._suspend_split_state_rerender
-        ):
-            self.run_worker(
-                self._run_render_diff_for_request(self._render_request_token),
-                exclusive=True,
-                name="diff-mode-rerender",
-            )
-
-    def _row_kind_for_line(
-        self,
-        line: DiffLine,
-        *,
-        modified_side: Literal["old", "new"] | None = None,
-    ) -> Literal[
-        "context",
-        "added",
-        "deleted",
-        "modified-old",
-        "modified-new",
-    ]:
-        if line.is_modified:
-            return "modified-old" if modified_side == "old" else "modified-new"
-        if line.is_added:
-            return "added"
-        if line.is_deleted:
-            return "deleted"
-        return "context"
-
-    def _rebuild_rendered_rows(self) -> None:
-        self._rows_unified = []
-        self._rows_split = []
-        self._row_lookup_unified = {}
-        self._row_lookup_split = {}
-
-        if self._diff is None:
-            return
-
-        for hunk_index, hunk in enumerate(self._diff.hunks):
-            for line in hunk.lines:
-                if line.is_modified:
-                    old_row = RenderedRow(
-                        mode="unified",
-                        row_index=len(self._rows_unified),
-                        line_index=line.line_index,
-                        hunk_index=hunk_index,
-                        kind=self._row_kind_for_line(line, modified_side="old"),
-                        side="old",
-                        anchor_id=f"line-{line.line_index}-old",
-                        old_line_no=line.old_line_no,
-                        new_line_no=line.new_line_no,
-                    )
-                    self._rows_unified.append(old_row)
-                    self._row_lookup_unified[(line.line_index, "old")] = (
-                        old_row.row_index
-                    )
-
-                    new_row = RenderedRow(
-                        mode="unified",
-                        row_index=len(self._rows_unified),
-                        line_index=line.line_index,
-                        hunk_index=hunk_index,
-                        kind=self._row_kind_for_line(line, modified_side="new"),
-                        side="new",
-                        anchor_id=f"line-{line.line_index}-new",
-                        old_line_no=line.old_line_no,
-                        new_line_no=line.new_line_no,
-                    )
-                    self._rows_unified.append(new_row)
-                    self._row_lookup_unified[(line.line_index, "new")] = (
-                        new_row.row_index
-                    )
-                else:
-                    side: Literal["old", "new", "auto"]
-                    if line.is_deleted:
-                        side = "old"
-                    elif line.is_added:
-                        side = "new"
-                    else:
-                        side = "auto"
-
-                    row = RenderedRow(
-                        mode="unified",
-                        row_index=len(self._rows_unified),
-                        line_index=line.line_index,
-                        hunk_index=hunk_index,
-                        kind=self._row_kind_for_line(line),
-                        side=side,
-                        anchor_id=f"line-{line.line_index}",
-                        old_line_no=line.old_line_no,
-                        new_line_no=line.new_line_no,
-                    )
-                    self._rows_unified.append(row)
-                    self._row_lookup_unified[(line.line_index, side)] = row.row_index
-
-                split_row = RenderedRow(
-                    mode="split",
-                    row_index=len(self._rows_split),
-                    line_index=line.line_index,
-                    hunk_index=hunk_index,
-                    kind=self._row_kind_for_line(line),
-                    side="auto",
-                    anchor_id=f"line-{line.line_index}",
-                    old_line_no=line.old_line_no,
-                    new_line_no=line.new_line_no,
-                )
-                self._rows_split.append(split_row)
-                self._row_lookup_split[line.line_index] = split_row.row_index
-
-    def _rows_for_current_mode(self) -> list[RenderedRow]:
-        return self._rows_split if self.split else self._rows_unified
+    # ------------------------------------------------------------------
+    # Shared utility methods (used across modules)
+    # ------------------------------------------------------------------
 
     def _current_line(self) -> DiffLine | None:
         if not self._all_lines or not (0 <= self.cursor_line < len(self._all_lines)):
@@ -1239,21 +545,14 @@ class DiffView(VerticalScroll):
         line_index: int,
         pane: Literal["old", "new"],
     ) -> str:
-        if not (0 <= line_index < len(self._all_lines)):
-            return ""
-
-        line = self._all_lines[line_index]
-        side = self._cursor_side_for_line(line, pane)
-        return self._get_line_text(line, side)
+        return _cursor._get_cursor_text_for_target(self, line_index, pane)
 
     def _current_row_index(self) -> int:
         line = self._current_line()
         if line is None:
             return 0
-
         if self.split:
             return self._row_lookup_split.get(line.line_index, 0)
-
         side = self._cursor_side_for_line(line)
         return self._row_lookup_unified.get((line.line_index, side), 0)
 
@@ -1266,234 +565,8 @@ class DiffView(VerticalScroll):
             return None
         return rows[row_index]
 
-    def _queue_cursor_ui_flush(
-        self,
-        *,
-        cursor_lines: set[int] | None = None,
-        selection_dirty_lines: set[int] | None = None,
-        selection_full_refresh: bool = False,
-        sync_search_match: bool = False,
-        update_status_line: bool = False,
-    ) -> None:
-        if not self.is_mounted:
-            if sync_search_match:
-                _search.sync_match_index_to_cursor(self)
-            if update_status_line:
-                self._update_status_line()
-            return
-
-        if cursor_lines:
-            self._queued_cursor_dirty_lines.update(
-                line_idx
-                for line_idx in cursor_lines
-                if 0 <= line_idx < len(self._all_lines)
-            )
-        if selection_dirty_lines:
-            self._queued_selection_dirty_lines.update(
-                line_idx
-                for line_idx in selection_dirty_lines
-                if 0 <= line_idx < len(self._all_lines)
-            )
-        if selection_full_refresh:
-            self._queued_selection_full_refresh = True
-        if sync_search_match:
-            self._queued_sync_search_match = True
-        if update_status_line:
-            self._queued_update_status_line = True
-
-        if self._cursor_ui_flush_pending:
-            return
-
-        self._cursor_ui_flush_pending = True
-        self.call_next(self._flush_queued_cursor_ui_updates)
-
-    def _flush_queued_cursor_ui_updates(self) -> None:
-        self._cursor_ui_flush_pending = False
-
-        cursor_lines = set(self._queued_cursor_dirty_lines)
-        selection_dirty_lines = set(self._queued_selection_dirty_lines)
-        selection_full_refresh = self._queued_selection_full_refresh
-        sync_search_match = self._queued_sync_search_match
-        update_status_line = self._queued_update_status_line
-
-        self._queued_cursor_dirty_lines.clear()
-        self._queued_selection_dirty_lines.clear()
-        self._queued_selection_full_refresh = False
-        self._queued_sync_search_match = False
-        self._queued_update_status_line = False
-
-        if not self.is_mounted:
-            return
-
-        if self.visual_mode:
-            if selection_full_refresh:
-                cursor_lines.clear()
-            elif selection_dirty_lines:
-                cursor_lines.difference_update(selection_dirty_lines)
-
-        if cursor_lines:
-            if not _blocks._refresh_grouped_blocks_for_lines(self, cursor_lines):
-                for line_idx in sorted(cursor_lines):
-                    self._update_line_cursor(line_idx)
-
-        if selection_full_refresh:
-            self._update_selection_highlighting()
-        elif selection_dirty_lines:
-            self._update_selection_highlighting(selection_dirty_lines)
-
-        if sync_search_match:
-            _search.sync_match_index_to_cursor(self)
-        if update_status_line:
-            self._update_status_line()
-
-    def _apply_cursor_move_side_effects(
-        self,
-        *,
-        old_line: int,
-        new_line: int,
-        old_column: int,
-        new_column: int,
-        old_pane: Literal["old", "new"],
-        new_pane: Literal["old", "new"],
-        scroll_in_visual: bool,
-    ) -> None:
-        line_changed = old_line != new_line
-        column_changed = old_column != new_column
-        pane_changed = old_pane != new_pane
-
-        dirty_cursor_lines = {new_line}
-        if line_changed:
-            dirty_cursor_lines.add(old_line)
-            hunk_index = self._get_hunk_index_for_line(new_line)
-            if hunk_index is not None and hunk_index != self.current_hunk_index:
-                self.current_hunk_index = hunk_index
-            _virtual._maybe_update_virtual_window(self, new_line)
-            _comments.update_cursor_highlight(self, old_line, new_line)
-
-        dirty_lines: set[int] = set()
-        if self.visual_mode:
-            dirty_lines = {new_line}
-            if line_changed:
-                dirty_lines.add(old_line)
-            if scroll_in_visual and (line_changed or pane_changed):
-                if not self._suppress_cursor_scroll:
-                    self._scroll_to_cursor()
-        else:
-            if line_changed or pane_changed:
-                if not self._suppress_cursor_scroll:
-                    self._scroll_to_cursor()
-
-        if column_changed or pane_changed:
-            if not self._suppress_cursor_scroll:
-                self._scroll_to_cursor_horizontal()
-
-        if line_changed or pane_changed or column_changed:
-            self._queue_cursor_ui_flush(
-                cursor_lines=dirty_cursor_lines,
-                selection_dirty_lines=dirty_lines if self.visual_mode else None,
-                sync_search_match=True,
-                update_status_line=(line_changed or pane_changed)
-                or (column_changed and bool(self._search_query)),
-            )
-
-    def _move_cursor(
-        self,
-        *,
-        line: int | None = None,
-        column: int | None = None,
-        pane: Literal["old", "new"] | None = None,
-        scroll_in_visual: bool = False,
-    ) -> bool:
-        if not self._all_lines:
-            return False
-
-        old_line = self.cursor_line
-        old_column = self.cursor_column
-        old_pane = self.active_pane
-
-        target_line = (
-            old_line if line is None else max(0, min(line, len(self._all_lines) - 1))
-        )
-        target_line_obj = self._all_lines[target_line]
-        requested_pane = old_pane if pane is None else pane
-        target_pane = self._resolve_active_pane_for_line(
-            target_line_obj, requested_pane
-        )
-
-        target_text = self._get_cursor_text_for_target(target_line, target_pane)
-        requested_column = old_column if column is None else column
-        if target_text:
-            target_column = max(0, min(requested_column, len(target_text) - 1))
-        else:
-            target_column = 0
-
-        if (
-            target_line == old_line
-            and target_column == old_column
-            and target_pane == old_pane
-        ):
-            return False
-
-        self._suspend_active_pane_watch = True
-        self._suspend_cursor_line_watch = True
-        self._suspend_cursor_column_watch = True
-        try:
-            self.active_pane = target_pane
-            self.cursor_line = target_line
-            self.cursor_column = target_column
-        finally:
-            self._suspend_active_pane_watch = False
-            self._suspend_cursor_line_watch = False
-            self._suspend_cursor_column_watch = False
-
-        self._apply_cursor_move_side_effects(
-            old_line=old_line,
-            new_line=target_line,
-            old_column=old_column,
-            new_column=target_column,
-            old_pane=old_pane,
-            new_pane=target_pane,
-            scroll_in_visual=scroll_in_visual,
-        )
-        return True
-
-    def _move_cursor_to_row(
-        self,
-        row: RenderedRow,
-        *,
-        scroll_in_visual: bool = False,
-    ) -> bool:
-        target_pane: Literal["old", "new"] | None
-        if row.side == "auto":
-            target_pane = None
-        else:
-            target_pane = "old" if row.side == "old" else "new"
-        return self._move_cursor(
-            line=row.line_index,
-            pane=target_pane,
-            scroll_in_visual=scroll_in_visual,
-        )
-
-    def _set_cursor_from_row(self, row: RenderedRow) -> None:
-        self._move_cursor_to_row(row)
-
-    def _move_cursor_rows(self, delta: int, *, scroll_in_visual: bool = False) -> bool:
-        rows = self._rows_for_current_mode()
-        if not rows:
-            return False
-
-        current = self._current_row_index()
-        target = max(0, min(current + delta, len(rows) - 1))
-        if target == current:
-            return False
-
-        return self._move_cursor_to_row(rows[target], scroll_in_visual=scroll_in_visual)
-
-    def _first_row_for_hunk(self, hunk_index: int) -> RenderedRow | None:
-        for row in self._rows_for_current_mode():
-            if row.hunk_index == hunk_index:
-                return row
-        return None
+    def _rows_for_current_mode(self) -> list[RenderedRow]:
+        return self._rows_split if self.split else self._rows_unified
 
     def _get_cursor_text(self) -> str:
         line = self._current_line()
@@ -1501,150 +574,73 @@ class DiffView(VerticalScroll):
             return ""
         return self._get_line_text(line, self._cursor_side_for_line(line))
 
-    def _clamp_cursor_column_to_current_row(self) -> None:
-        text = self._get_cursor_text()
-        if text:
-            self.cursor_column = min(self.cursor_column, len(text) - 1)
-        else:
-            self.cursor_column = 0
+    def _get_line_text(
+        self,
+        line: DiffLine,
+        side: Literal["old", "new", "auto"] = "auto",
+    ) -> str:
+        if side == "old":
+            return line.old_content
+        if side == "new":
+            return line.new_content
+        if line.new_content:
+            return line.new_content
+        if line.old_content:
+            return line.old_content
+        return ""
+
+    def _get_line_side_for_widget(
+        self,
+        line: DiffLine,
+        widget: Static,
+    ) -> Literal["old", "new", "auto"]:
+        if widget.has_class("-old-side"):
+            return "old"
+        if widget.has_class("-new-side"):
+            return "new"
+        if line.is_modified:
+            if widget.has_class("-removed"):
+                return "old"
+            if widget.has_class("-added"):
+                return "new"
+        if line.is_deleted:
+            return "old"
+        if line.is_added:
+            return "new"
+        return "auto"
+
+    def _widget_matches_cursor_side(self, line: DiffLine, widget: Static) -> bool:
+        cursor_side = self._cursor_side_for_line(line)
+        widget_side = self._get_line_side_for_widget(line, widget)
+        if cursor_side == "auto":
+            return True
+        return widget_side == cursor_side or widget_side == "auto"
+
+    def _get_hunk_index_for_line(self, line_index: int) -> int | None:
+        if 0 <= line_index < len(self._hunk_index_by_line):
+            return self._hunk_index_by_line[line_index]
+        return None
+
+    def _dock_header_height(self) -> int:
+        return _cursor._dock_header_height(self)
+
+    def _half_page_step(self) -> int:
+        return _cursor._half_page_step(self)
 
     def _row_vertical_bounds(self, row: RenderedRow) -> tuple[int, int] | None:
-        if not (0 <= row.line_index < len(self._all_lines)):
-            return None
+        return _cursor._row_vertical_bounds(self, row)
 
-        top = self._line_top_offsets[row.line_index]
-        bottom = self._line_bottom_offsets[row.line_index]
-        line = self._all_lines[row.line_index]
-
-        if not self.split and line.is_modified:
-            if row.side == "old":
-                return top, top + 1
-            if row.side == "new":
-                return top + 1, top + 2
-
-        return top, bottom
-
-    def _scroll_to_vertical_span(
-        self,
-        top: int,
-        bottom: int,
-        *,
-        animate: bool = False,
-        top_align: bool = False,
-    ) -> None:
-        viewport_height = max(1, self.scrollable_content_region.height)
-        current_top = int(self.scroll_y)
-        current_bottom = current_top + viewport_height
-
-        if top_align:
-            self.scroll_to(y=max(0, top), animate=animate)
-            return
-
-        if top < current_top:
-            self.scroll_to(y=max(0, top), animate=animate)
-            return
-
-        if bottom > current_bottom:
-            self.scroll_to(y=max(0, bottom - viewport_height), animate=animate)
-
-    def _comparison_heavy_ratio(self) -> float:
-        if not self._all_lines:
-            return 0.0
-        return self._modified_line_count / len(self._all_lines)
-
-    def _average_render_line_height(self) -> float:
-        if not self._all_lines or self._total_line_render_height <= 0:
-            return 1.0
-        return self._total_line_render_height / len(self._all_lines)
-
-    async def prepare(self) -> None:
-        if self._diff:
-            await asyncio.to_thread(self._precompute_diff_data)
-
-    def _precompute_diff_data(self) -> None:
-        if self._diff is not None:
-            _hl._highlight_diff_sync(self, self._diff)
-
-    def _invalidate_base_code_content_cache(
-        self, line_indices: set[int] | None = None
-    ) -> None:
-        if line_indices is None:
-            self._base_code_content_cache.clear()
-            return
-
-        for line_idx in line_indices:
-            for side in ("old", "new", "auto"):
-                self._base_code_content_cache.pop((line_idx, side, ""), None)
-                self._base_code_content_cache.pop((line_idx, side, " "), None)
-
-    def _render_height_for_line(self, line: DiffLine) -> int:
-        if not self.split and line.is_modified:
-            return 2
-        return 1
-
-    def _line_index_at_vertical_offset(self, offset: int) -> int:
-        if not self._all_lines:
-            return 0
-
-        clamped = max(0, min(offset, max(0, self._virtual_content_height - 1)))
-        index = bisect_right(self._line_top_offsets, clamped) - 1
-        if index < 0:
-            return 0
-
-        if clamped >= self._line_bottom_offsets[index] and index + 1 < len(
-            self._all_lines
-        ):
-            return index + 1
-        return index
-
-    def _viewport_center_line(self) -> int:
-        if not self._all_lines:
-            return 0
-
-        viewport_height = max(1, self.scrollable_content_region.height)
-        center_offset = int(self.scroll_y + viewport_height / 2)
-        return self._line_index_at_vertical_offset(center_offset)
-
-    def _get_rendered_line_bounds(self) -> tuple[int, int]:
-        if not self._all_lines:
-            return 0, -1
-
-        if self._virtualized:
-            start = max(0, self._rendered_window_start)
-            end = min(len(self._all_lines) - 1, self._rendered_window_end)
-            return start, end
-
-        return 0, len(self._all_lines) - 1
-
-    def _is_line_rendered(self, line_idx: int) -> bool:
-        if line_idx < 0 or line_idx >= len(self._all_lines):
-            return False
-
-        start, end = self._get_rendered_line_bounds()
-        return start <= line_idx <= end
+    # ------------------------------------------------------------------
+    # Widget registry
+    # ------------------------------------------------------------------
 
     def _get_line_container(self, line_idx: int):
         if not self._is_line_rendered(line_idx):
             return None
-
         return self._line_widgets_by_index.get(line_idx)
 
     def _get_hunk_header_widget(self, hunk_index: int):
         return self._hunk_header_widgets.get(hunk_index)
-
-    def _should_render_hunk_header(
-        self,
-        hunk_index: int,
-        window_start: int,
-        window_end: int,
-    ) -> bool:
-        if not (0 <= hunk_index < len(self._hunk_line_ranges)):
-            return False
-
-        _, hunk_start, hunk_end = self._hunk_line_ranges[hunk_index]
-        if hunk_end < window_start or hunk_start > window_end:
-            return False
-        return window_start <= hunk_start <= window_end
 
     def _register_line_widget(self, line_index: int, widget: Widget) -> None:
         self._line_widgets_by_index[line_index] = widget
