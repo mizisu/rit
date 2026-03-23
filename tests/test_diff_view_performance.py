@@ -158,7 +158,7 @@ async def test_show_diff_renders_plain_first_then_applies_highlight(
         assert render_calls["count"] == baseline_calls
         assert modified.highlighted_old_content is not None
         assert modified.highlighted_new_content is not None
-        assert (id(diff), diff_view.word_diff_enabled) in diff_view._highlight_cache
+        assert (id(diff), diff_view.word_diff_enabled) in diff_view._hl_state.cache
 
 
 @pytest.mark.asyncio
@@ -495,7 +495,7 @@ async def test_large_diff_uses_windowed_rendering_and_shifts_with_cursor() -> No
         await diff_view.show_diff("big.py", diff)
         await pilot.pause()
 
-        assert diff_view._virtualized is True
+        assert diff_view._virt.active is True
         assert len(diff_view.query(".-virtual-buffer")) > 0
 
         # Move cursor deep into the file, which should shift the virtual window.
@@ -503,8 +503,8 @@ async def test_large_diff_uses_windowed_rendering_and_shifts_with_cursor() -> No
         await pilot.pause()
         await pilot.pause()
 
-        assert diff_view._virtual_window_start > 0
-        assert diff_view._virtual_window_start <= 20 <= diff_view._virtual_window_end
+        assert diff_view._virt.window_start > 0
+        assert diff_view._virt.window_start <= 20 <= diff_view._virt.window_end
 
         rendered_line = diff_view._get_line_container(20)
         assert rendered_line is not None
@@ -679,10 +679,10 @@ async def test_visual_selection_cache_tracks_rendered_window_only() -> None:
         if diff_view._visual_selection_specs:
             assert (
                 min(diff_view._visual_selection_specs)
-                >= diff_view._virtual_window_start
+                >= diff_view._virt.window_start
             )
             assert (
-                max(diff_view._visual_selection_specs) <= diff_view._virtual_window_end
+                max(diff_view._visual_selection_specs) <= diff_view._virt.window_end
             )
 
         diff_view.cursor_line = 20
@@ -695,10 +695,10 @@ async def test_visual_selection_cache_tracks_rendered_window_only() -> None:
         if diff_view._visual_selection_specs:
             assert (
                 min(diff_view._visual_selection_specs)
-                >= diff_view._virtual_window_start
+                >= diff_view._virt.window_start
             )
             assert (
-                max(diff_view._visual_selection_specs) <= diff_view._virtual_window_end
+                max(diff_view._visual_selection_specs) <= diff_view._virt.window_end
             )
 
 
@@ -721,7 +721,7 @@ async def test_medium_unified_diff_uses_blocks_without_virtualization() -> None:
         await diff_view.show_diff("medium.py", diff)
         await pilot.pause()
 
-        assert diff_view._virtualized is False
+        assert diff_view._virt.active is False
         assert len(diff_view.query(".diff-block")) >= 1
         assert len(diff_view.query(".diff-block .code-content")) < 150
 
@@ -745,7 +745,7 @@ async def test_medium_split_diff_uses_blocks_without_virtualization() -> None:
         await diff_view.show_diff("medium.py", diff)
         await pilot.pause()
 
-        assert diff_view._virtualized is False
+        assert diff_view._virt.active is False
         assert len(diff_view.query(".split-block")) >= 1
         assert len(diff_view.query(".split-block .code-content")) < 300
 
@@ -772,7 +772,7 @@ async def test_medium_unified_diff_uses_hunk_sized_blocks_without_chunk_splittin
         await diff_view.show_diff("medium.py", diff)
         await pilot.pause()
 
-        assert diff_view._virtualized is False
+        assert diff_view._virt.active is False
         assert len(diff_view.query(".diff-block")) == 2
 
 
@@ -798,7 +798,7 @@ async def test_medium_split_diff_uses_hunk_sized_blocks_without_chunk_splitting(
         await diff_view.show_diff("medium.py", diff)
         await pilot.pause()
 
-        assert diff_view._virtualized is False
+        assert diff_view._virt.active is False
         split_blocks = list(diff_view.query(".split-block"))
         hunk_headers = list(diff_view.query(".hunk-header"))
         assert len(split_blocks) == 2
@@ -843,7 +843,7 @@ async def test_virtualized_unified_mode_groups_simple_lines_into_blocks() -> Non
         rendered_start, rendered_end = diff_view._get_rendered_line_bounds()
         rendered_line_count = rendered_end - rendered_start + 1
 
-        assert diff_view._virtualized is True
+        assert diff_view._virt.active is True
         assert len(diff_view.query(".diff-block")) >= 1
         assert len(diff_view._unified_blocks_by_line) == rendered_line_count
         assert len(diff_view.query(".diff-block .code-content")) < rendered_line_count
@@ -874,7 +874,7 @@ async def test_virtualized_unified_mode_groups_modified_lines_into_blocks() -> N
         rendered_start, rendered_end = diff_view._get_rendered_line_bounds()
         rendered_line_count = rendered_end - rendered_start + 1
 
-        assert diff_view._virtualized is True
+        assert diff_view._virt.active is True
         assert len(diff_view.query(".diff-block")) >= 1
         assert len(diff_view._unified_blocks_by_line) == rendered_line_count
 
@@ -920,7 +920,7 @@ async def test_virtualized_split_mode_groups_simple_lines_into_blocks() -> None:
         rendered_start, rendered_end = diff_view._get_rendered_line_bounds()
         rendered_line_count = rendered_end - rendered_start + 1
 
-        assert diff_view._virtualized is True
+        assert diff_view._virt.active is True
         assert len(diff_view.query(".split-block")) >= 1
         assert len(diff_view._split_blocks_by_line) == rendered_line_count
         assert (
@@ -953,7 +953,7 @@ async def test_virtualized_split_mode_groups_modified_lines_into_blocks() -> Non
         rendered_start, rendered_end = diff_view._get_rendered_line_bounds()
         rendered_line_count = rendered_end - rendered_start + 1
 
-        assert diff_view._virtualized is True
+        assert diff_view._virt.active is True
         assert len(diff_view.query(".split-block")) >= 1
         assert len(diff_view._split_blocks_by_line) == rendered_line_count
 
@@ -1034,7 +1034,7 @@ async def test_virtualized_auto_mode_groups_simple_lines_into_unified_blocks() -
         rendered_start, rendered_end = diff_view._get_rendered_line_bounds()
         rendered_line_count = rendered_end - rendered_start + 1
 
-        assert diff_view._virtualized is True
+        assert diff_view._virt.active is True
         assert diff_view.split is False
         assert len(diff_view.query(".diff-block")) >= 1
         assert len(diff_view._unified_blocks_by_line) == rendered_line_count
@@ -1066,7 +1066,7 @@ async def test_virtualized_auto_mode_groups_simple_lines_into_split_blocks() -> 
         rendered_start, rendered_end = diff_view._get_rendered_line_bounds()
         rendered_line_count = rendered_end - rendered_start + 1
 
-        assert diff_view._virtualized is True
+        assert diff_view._virt.active is True
         assert diff_view.split is True
         assert len(diff_view.query(".split-block")) >= 1
         assert len(diff_view._split_blocks_by_line) == rendered_line_count
@@ -1181,7 +1181,7 @@ async def test_grouped_unified_virtual_window_shift_avoids_full_rerender() -> No
         await pilot.pause()
 
         assert render_calls["count"] == baseline_calls
-        assert diff_view._rendered_window_start == diff_view._virtual_window_start
+        assert diff_view._virt.rendered_start == diff_view._virt.window_start
 
 
 @pytest.mark.asyncio
@@ -1224,7 +1224,7 @@ async def test_grouped_split_virtual_window_shift_avoids_full_rerender() -> None
         await pilot.pause()
 
         assert render_calls["count"] == baseline_calls
-        assert diff_view._rendered_window_start == diff_view._virtual_window_start
+        assert diff_view._virt.rendered_start == diff_view._virt.window_start
 
 
 @pytest.mark.asyncio
@@ -1292,7 +1292,7 @@ async def test_cursor_ui_flush_coalesces_multiple_requests_in_same_tick(
             update_status_line=True,
         )
 
-        assert diff_view._cursor_ui_flush_pending is True
+        assert diff_view._cursor_ui.flush_pending is True
 
         await pilot.pause()
         await pilot.pause()
@@ -1344,7 +1344,7 @@ async def test_half_page_scroll_flushes_cursor_ui_immediately_after_scroll_adjus
         object.__setattr__(diff_view, "_flush_queued_cursor_ui_updates", counted_flush)
         await diff_view.action_half_page_down()
 
-        assert diff_view._cursor_ui_flush_pending is False
+        assert diff_view._cursor_ui.flush_pending is False
         assert flush_calls["count"] >= 1
 
         object.__setattr__(diff_view, "_flush_queued_cursor_ui_updates", original_flush)
@@ -1367,7 +1367,7 @@ async def test_half_page_scroll_flushes_cursor_ui_immediately_after_scroll_adjus
         )
         await diff_view.action_half_page_up()
 
-        assert diff_view._cursor_ui_flush_pending is False
+        assert diff_view._cursor_ui.flush_pending is False
         assert flush_calls["count"] >= 1
 
         object.__setattr__(diff_view, "_flush_queued_cursor_ui_updates", original_flush)
@@ -1555,7 +1555,7 @@ async def test_scroll_coalesces_pending_virtual_window_updates(
         await pilot.pause()
         await pilot.pause()
 
-        queued_center = diff_view._coalesced_scroll_center_line
+        queued_center = diff_view._virt.coalesced_center
         assert queued_center is not None
 
         unblock.set()
@@ -1566,9 +1566,9 @@ async def test_scroll_coalesces_pending_virtual_window_updates(
 
         assert calls["count"] == 2
         assert (
-            diff_view._rendered_window_start
+            diff_view._virt.rendered_start
             <= queued_center
-            <= diff_view._rendered_window_end
+            <= diff_view._virt.rendered_end
         )
 
 
@@ -1610,7 +1610,7 @@ async def test_medium_windowed_highlight_tracks_scroll_position(
             await pilot.pause()
 
             initial_calls = range_calls["count"]
-            assert diff_view._virtualized is False
+            assert diff_view._virt.active is False
             assert initial_calls >= 1
 
             diff_view.scroll_to(y=140, animate=False)
@@ -1649,7 +1649,7 @@ async def test_virtualized_large_diff_preserves_scroll_height_with_spacer_buffer
         await pilot.pause()
         await pilot.pause()
 
-        assert diff_view._virtualized is True
+        assert diff_view._virt.active is True
         assert diff_view.max_scroll_y > 1000
         bottom_buffer = diff_view.query_one("#virtual-buffer-bottom", Static)
         bottom_height = getattr(bottom_buffer.styles.height, "value", 0)
@@ -1681,7 +1681,7 @@ async def test_virtualized_window_tracks_scroll_position_without_cursor_moves() 
         await pilot.pause()
 
         assert diff_view.cursor_line == 0
-        assert diff_view._virtual_window_start == 0
+        assert diff_view._virt.window_start == 0
 
         diff_view.scroll_to(y=120, animate=False)
         await pilot.pause()
@@ -1691,7 +1691,7 @@ async def test_virtualized_window_tracks_scroll_position_without_cursor_moves() 
 
         assert diff_view.cursor_line == 0
         assert diff_view.scroll_y > 0
-        assert diff_view._virtual_window_start > 0
+        assert diff_view._virt.window_start > 0
         top_buffer = diff_view.query_one("#virtual-buffer-top", Static)
         top_height = getattr(top_buffer.styles.height, "value", 0)
         assert top_height > 0

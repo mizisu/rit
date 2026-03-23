@@ -1,50 +1,45 @@
 from __future__ import annotations
 
 import asyncio
-import subprocess
-import sys
-from bisect import bisect_right
 from contextvars import ContextVar
 from dataclasses import dataclass
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import pyperclip
 from textual import events, on, work
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 from textual.content import Content
 from textual.message import Message
 from textual.reactive import reactive, var
 from textual.widget import Widget
-from textual.widgets import Input, OptionList, Static
-from textual.widgets.option_list import Option
+from textual.widgets import Input, Static
 
-from rit.core.highlighting import (
-    highlight_lines_for_diff,
-    highlight_lines_for_diff_range,
-    prewarm_highlighter,
-)
-from rit.core.types import DiffHunk, DiffLine, FileDiff
+from rit.core.types import DiffLine, FileDiff
 from rit.state.models import PRFile, ReviewThread
-from rit.ui.icons import get_file_icon
 from rit.ui.messages import Flash
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_comments as _comments
+from rit.ui.widgets import diff_cursor as _cursor
 from rit.ui.widgets import diff_highlight as _hl
+from rit.ui.widgets import diff_render as _render
 from rit.ui.widgets import diff_search as _search
+from rit.ui.widgets import diff_selection as _selection
 from rit.ui.widgets import diff_virtual as _virtual
 from rit.ui.widgets.diff_types import (
     DEFAULT_DIFF_LAYOUT,
-    DiffLayout,
+    CursorUIState,
     DiffSearchMatch,
+    HighlightState,
     RenderedRow,
     SplitBlockLineStaticData,
     SplitDiffBlock,
     UnifiedBlockRowStaticData,
+    VirtualState,
     UnifiedDiffBlock,
 )
-from rit.ui.widgets.diff_visual import DiffCode, LineAnnotations, LineContent
 
 if TYPE_CHECKING:
     from rit.state.store import PRStore
@@ -71,213 +66,7 @@ class DiffView(VerticalScroll):
     DYNAMIC_WINDOW_SHIFT_DIVISOR = 7
     MIN_DYNAMIC_WINDOW_RADIUS = 12
 
-    DEFAULT_CSS = """
-    DiffView {
-        width: 1fr;
-        overflow-x: auto;
-        overflow-y: auto;
-        layers: base search;
-    }
-
-    DiffView .diff-header {
-        dock: top;
-        text-style: bold;
-        padding: 0 1;
-        background: $surface;
-        height: 3;
-        content-align: left middle;
-    }
-
-
-
-    DiffView #diff-content {
-        width: 1fr;
-        height: auto;
-        overflow-x: auto;
-        overflow-y: auto;
-    }
-
-    DiffView .placeholder {
-        color: $text-disabled;
-        text-align: center;
-        margin: 2;
-    }
-
-    DiffView .hunk-header {
-        background: $surface;
-        color: $text-disabled;
-        padding: 0 1;
-        height: 1;
-        margin: 0;
-    }
-
-    /* ===== Line Structure: Horizontal(line-prefix, code-content) ===== */
-    
-    /* Horizontal container for each line */
-    DiffView Horizontal.diff-line {
-        height: 1;
-        width: auto;
-        min-width: 100%;
-        margin: 0;
-        padding: 0;
-    }
-    
-    /* Vertical container for modified lines (contains 2 Horizontals) */
-    DiffView Vertical.diff-line {
-        height: auto;
-        margin: 0;
-        padding: 0;
-    }
-
-    /* Line number + prefix area (fixed width) */
-    DiffView .line-prefix {
-        width: __UNIFIED_PREFIX_WIDTH__;
-        height: 1;
-        color: $text-disabled;
-        padding: 0;
-        margin: 0;
-    }
-
-    /* Code content area (flexible width) */
-    DiffView .code-content {
-        width: auto;
-        min-width: 1fr;
-        height: 1;
-        padding: 0;
-        margin: 0;
-    }
-
-    /* Added/Removed backgrounds on code-content */
-    DiffView .code-content.-added {
-        background: $success 10%;
-    }
-
-    DiffView .code-content.-removed {
-        background: $error 10%;
-    }
-
-    /* ===== Cursor & Visual Mode Styles (Vim-style) ===== */
-
-    DiffView.-visual {
-    }
-
-    /* Visual mode selection */
-    DiffView.-visual .code-content.-selected {
-        background: $accent 25%;
-    }
-
-    DiffView.-visual .code-content.-selected.-added {
-        background: $success 30%;
-    }
-
-    DiffView.-visual .code-content.-selected.-removed {
-        background: $error 30%;
-    }
-
-    /* Visual mode anchor */
-    DiffView.-visual .code-content.-anchor {
-        background: $accent 35%;
-        outline-left: thick $accent;
-    }
-
-    /* Split mode styles */
-    DiffView.-split .split-container {
-        layout: horizontal;
-    }
-
-    DiffView.-split .split-pane {
-        width: 50%;
-    }
-
-    DiffView.-split .split-pane .line-prefix {
-        width: __SPLIT_PREFIX_WIDTH__;
-    }
-
-    DiffView.-split .split-pane .code-content {
-        min-width: 1fr;
-    }
-
-    DiffView .code-content.-placeholder {
-        color: $text-disabled;
-    }
-
-    DiffView .-virtual-buffer {
-        text-align: center;
-    }
-
-    DiffView .diff-block {
-        height: auto;
-        width: auto;
-        min-width: 100%;
-        margin: 0;
-        padding: 0;
-    }
-
-    /* Block renderers contain multiple lines; override single-line height */
-    DiffView .diff-block .line-prefix {
-        height: auto;
-    }
-
-    DiffView .diff-block .code-content {
-        height: auto;
-    }
-
-    DiffView .split-block {
-        layout: horizontal;
-    }
-
-    DiffView .diff-block-anchors {
-        width: 0;
-        height: auto;
-        margin: 0;
-        padding: 0;
-    }
-
-    DiffView .diff-block-anchor {
-        width: 0;
-        height: 1;
-        margin: 0;
-        padding: 0;
-    }
-
-    DiffView .diff-header,
-    DiffView #diff-thread-inspector-shell,
-    DiffView #diff-content {
-        layer: base;
-    }
-
-    DiffView #diff-search-bar {
-        layer: search;
-        dock: bottom;
-        height: 1;
-        min-height: 1;
-        display: none;
-    }
-
-    DiffView #diff-search-bar Input {
-        width: 1fr;
-        height: 1;
-        min-height: 1;
-        border: none;
-        padding: 0 1;
-        background: $surface;
-    }
-
-    DiffView #diff-search-bar Input:focus {
-        border: none;
-    }
-
-    DiffView #diff-search-bar .search-prompt {
-        width: 1;
-        height: 1;
-        min-height: 1;
-        padding: 0;
-        background: $surface;
-    }
-
-    """.replace("__UNIFIED_PREFIX_WIDTH__", str(LAYOUT.unified_prefix_width)).replace(
-        "__SPLIT_PREFIX_WIDTH__", str(LAYOUT.split_prefix_width)
-    )
+    DEFAULT_CSS = Path(__file__).with_suffix(".tcss").read_text()
 
     BINDINGS = [
         Binding("j", "scroll_down", "Scroll Down", show=False),
@@ -364,15 +153,7 @@ class DiffView(VerticalScroll):
         self._search_match_index: int = -1
         self._prev_search_match_lines: set[int] = set()
 
-        self._highlight_cache: set[tuple[int, bool]] = set()
-        self._highlight_request_token: int = 0
-        self._window_highlight_inflight: tuple[int, int, bool] | None = None
-        self._queued_window_highlight: (
-            tuple[str, FileDiff, int, int, bool, int] | None
-        ) = None
-        self._window_highlight_worker_active: bool = False
-        self._queued_full_highlight: tuple[str, FileDiff, bool, int] | None = None
-        self._full_highlight_worker_active: bool = False
+        self._hl_state = HighlightState()
         self._unified_block_static_rows_by_line: dict[
             int, tuple[UnifiedBlockRowStaticData, ...]
         ] = {}
@@ -393,14 +174,7 @@ class DiffView(VerticalScroll):
         self._line_bottom_offsets: list[int] = []
         self._virtual_content_height: int = 0
 
-        self._virtualized: bool = False
-        self._virtual_window_start: int = 0
-        self._virtual_window_end: int = -1
-        self._rendered_window_start: int = 0
-        self._rendered_window_end: int = -1
-        self._window_render_pending: bool = False
-        self._cursor_shift_pending: bool = False
-        self._coalesced_scroll_center_line: int | None = None
+        self._virt = VirtualState()
         self._render_request_token: int = 0
         self._suspend_split_state_rerender: bool = False
         self._suspend_scroll_virtual_window_watch: bool = False
@@ -418,25 +192,14 @@ class DiffView(VerticalScroll):
 
         self._content_widget: VerticalScroll | None = None
 
-        self._top_virtual_buffer_widget: Static | None = None
-        self._bottom_virtual_buffer_widget: Static | None = None
         self._center_padding_widget: Static | None = None
         self._center_padding_height: int = 0
 
+        self._showing_full_file: bool = False
+        self._saved_diff: FileDiff | None = None
+
         self._highlighter_prewarm_started: bool = False
-        self._suspend_active_pane_watch: bool = False
-        self._suspend_cursor_line_watch: bool = False
-        self._suspend_cursor_column_watch: bool = False
-        self._suppress_cursor_scroll: bool = False
-        self._pending_count: str = ""
-
-        self._cursor_ui_flush_pending: bool = False
-        self._queued_cursor_dirty_lines: set[int] = set()
-        self._queued_selection_dirty_lines: set[int] = set()
-        self._queued_selection_full_refresh: bool = False
-
-        self._queued_sync_search_match: bool = False
-        self._queued_update_status_line: bool = False
+        self._cursor_ui = CursorUIState()
 
         self._visual_selection_specs: dict[
             int,
@@ -472,25 +235,29 @@ class DiffView(VerticalScroll):
                 pass
         return region
 
+    # ------------------------------------------------------------------
+    # Watchers
+    # ------------------------------------------------------------------
+
     def watch_mode(self, new_mode: Literal["split", "unified", "auto"]) -> None:
-        self._update_split_state()
+        _render._update_split_state(self)
         _search.refresh_matches(self)
-        self._queue_cursor_ui_flush(update_status_line=True)
+        _cursor._queue_cursor_ui_flush(self, update_status_line=True)
 
     def watch_current_hunk_index(self, _old_index: int, _new_index: int) -> None:
-        self._queue_cursor_ui_flush(update_status_line=True)
+        _cursor._queue_cursor_ui_flush(self, update_status_line=True)
 
     def on_resize(self) -> None:
-        self._update_split_state()
+        _render._update_split_state(self)
         _search.refresh_matches(self)
-        self._queue_cursor_ui_flush(update_status_line=True)
+        _cursor._queue_cursor_ui_flush(self, update_status_line=True)
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
         if old_value == new_value or self._suspend_scroll_virtual_window_watch:
             return
         _virtual._maybe_update_virtual_window_from_viewport(self)
-        if not self._virtualized and _hl._use_windowed_highlight_strategy(
+        if not self._virt.active and _hl._use_windowed_highlight_strategy(
             self, self._diff
         ):
             _hl._ensure_visible_highlight(self)
@@ -520,16 +287,17 @@ class DiffView(VerticalScroll):
             not self._all_lines
             or not self.is_mounted
             or old_pane == new_pane
-            or self._suspend_active_pane_watch
+            or self._cursor_ui.suspend_pane_watch
         ):
             return
 
-        self._clamp_cursor_column_to_current_row()
+        _cursor._clamp_cursor_column_to_current_row(self)
 
         if not self.visual_mode:
-            self._scroll_to_cursor()
+            _cursor._scroll_to_cursor(self)
 
-        self._queue_cursor_ui_flush(
+        _cursor._queue_cursor_ui_flush(
+            self,
             cursor_lines={self.cursor_line},
             selection_dirty_lines={self.cursor_line} if self.visual_mode else None,
             sync_search_match=True,
@@ -540,11 +308,11 @@ class DiffView(VerticalScroll):
         if (
             not self._all_lines
             or not self.is_mounted
-            or self._suspend_cursor_line_watch
+            or self._cursor_ui.suspend_line_watch
         ):
             return
 
-        self._clamp_cursor_column_to_current_row()
+        _cursor._clamp_cursor_column_to_current_row(self)
 
         hunk_index = self._get_hunk_index_for_line(new_line)
         if hunk_index is not None and hunk_index != self.current_hunk_index:
@@ -554,9 +322,10 @@ class DiffView(VerticalScroll):
         _comments.update_cursor_highlight(self, old_line, new_line)
 
         if not self.visual_mode:
-            self._scroll_to_cursor()
+            _cursor._scroll_to_cursor(self)
 
-        self._queue_cursor_ui_flush(
+        _cursor._queue_cursor_ui_flush(
+            self,
             cursor_lines={old_line, new_line},
             selection_dirty_lines={old_line, new_line} if self.visual_mode else None,
             sync_search_match=True,
@@ -567,7 +336,7 @@ class DiffView(VerticalScroll):
         if (
             not self._all_lines
             or not self.is_mounted
-            or self._suspend_cursor_column_watch
+            or self._cursor_ui.suspend_column_watch
         ):
             return
 
@@ -583,23 +352,24 @@ class DiffView(VerticalScroll):
                 self.cursor_column = max_col
                 return
 
-            self._queue_cursor_ui_flush(
+            _cursor._queue_cursor_ui_flush(
+                self,
                 cursor_lines={self.cursor_line},
                 selection_dirty_lines={self.cursor_line} if self.visual_mode else None,
                 sync_search_match=True,
             )
-            self._scroll_to_cursor_horizontal()
+            _cursor._scroll_to_cursor_horizontal(self)
 
     def watch_visual_mode(self, old_mode: bool, new_mode: bool) -> None:
         if new_mode:
             self.app.sub_title = (
                 "-- VISUAL LINE --" if self.visual_type == "line" else "-- VISUAL --"
             )
-            self._update_selection_highlighting({self.cursor_line})
+            _selection._update_selection_highlighting(self, {self.cursor_line})
         else:
             self.app.sub_title = ""
             for line_idx in list(self._visual_selection_specs):
-                self._clear_line_selection(line_idx)
+                _selection._clear_line_selection(self, line_idx)
             self._visual_selection_specs = {}
 
         self._update_status_line()
@@ -1913,20 +1683,21 @@ class DiffView(VerticalScroll):
     ) -> list[tuple[int, int]]:
         if not ranges:
             return []
-
         merged: list[tuple[int, int]] = []
         for start, end in sorted(ranges):
             if not merged:
                 merged.append((start, end))
                 continue
-
             prev_start, prev_end = merged[-1]
             if start <= prev_end + 1:
                 merged[-1] = (prev_start, max(prev_end, end))
             else:
                 merged.append((start, end))
-
         return merged
+
+    # ------------------------------------------------------------------
+    # Render orchestration
+    # ------------------------------------------------------------------
 
     async def _remount_grouped_visible_window(
         self,
@@ -1951,7 +1722,7 @@ class DiffView(VerticalScroll):
     def _finalize_render_state_if_current(self, request_token: int) -> None:
         if not self._is_current_render_request(request_token):
             return
-        self._finalize_render_state()
+        _render._finalize_render_state(self)
 
     async def _run_render_diff_for_request(self, request_token: int) -> None:
         token = _RENDER_REQUEST_CONTEXT.set(request_token)
@@ -1996,16 +1767,10 @@ class DiffView(VerticalScroll):
             self._line_heights = []
             self._line_bottom_offsets = []
             self._virtual_content_height = 0
-            self._virtualized = False
-            self._virtual_window_start = 0
-            self._virtual_window_end = -1
-            self._rendered_window_start = 0
-            self._rendered_window_end = -1
-            self._coalesced_scroll_center_line = None
-            self._window_render_pending = False
-            self._window_highlight_inflight = None
-            self._queued_window_highlight = None
-            self._queued_full_highlight = None
+            self._virt = VirtualState()
+            self._hl_state.window_inflight = None
+            self._hl_state.queued_window = None
+            self._hl_state.queued_full = None
             self._unified_block_static_rows_by_line.clear()
             self._split_block_static_rows_by_line.clear()
             self._base_code_content_cache.clear()

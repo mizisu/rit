@@ -1,0 +1,192 @@
+DiffView {
+    width: 1fr;
+    overflow-x: auto;
+    overflow-y: auto;
+    layers: base search;
+}
+
+DiffView .diff-header {
+    dock: top;
+    text-style: bold;
+    padding: 0 1;
+    background: $surface;
+    height: 3;
+    content-align: left middle;
+}
+
+DiffView #diff-content {
+    width: 1fr;
+    height: auto;
+    overflow-x: auto;
+    overflow-y: auto;
+}
+
+DiffView .placeholder {
+    color: $text-disabled;
+    text-align: center;
+    margin: 2;
+}
+
+DiffView .hunk-header {
+    background: $surface;
+    color: $text-disabled;
+    padding: 0 1;
+    height: 1;
+    margin: 0;
+}
+
+/* ===== Line Structure: Horizontal(line-prefix, code-content) ===== */
+
+DiffView Horizontal.diff-line {
+    height: 1;
+    width: auto;
+    min-width: 100%;
+    margin: 0;
+    padding: 0;
+}
+
+DiffView Vertical.diff-line {
+    height: auto;
+    margin: 0;
+    padding: 0;
+}
+
+DiffView .line-prefix {
+    width: 18;
+    height: 1;
+    color: $text-disabled;
+    padding: 0;
+    margin: 0;
+}
+
+DiffView .code-content {
+    width: auto;
+    min-width: 1fr;
+    height: 1;
+    padding: 0;
+    margin: 0;
+}
+
+DiffView .code-content.-added {
+    background: $success 10%;
+}
+
+DiffView .code-content.-removed {
+    background: $error 10%;
+}
+
+/* ===== Cursor & Visual Mode Styles (Vim-style) ===== */
+
+DiffView.-visual {
+}
+
+DiffView.-visual .code-content.-selected {
+    background: $accent 25%;
+}
+
+DiffView.-visual .code-content.-selected.-added {
+    background: $success 30%;
+}
+
+DiffView.-visual .code-content.-selected.-removed {
+    background: $error 30%;
+}
+
+DiffView.-visual .code-content.-anchor {
+    background: $accent 35%;
+    outline-left: thick $accent;
+}
+
+/* Split mode styles */
+DiffView.-split .split-container {
+    layout: horizontal;
+}
+
+DiffView.-split .split-pane {
+    width: 50%;
+}
+
+DiffView.-split .split-pane .line-prefix {
+    width: 8;
+}
+
+DiffView.-split .split-pane .code-content {
+    min-width: 1fr;
+}
+
+DiffView .code-content.-placeholder {
+    color: $text-disabled;
+}
+
+DiffView .-virtual-buffer {
+    text-align: center;
+}
+
+DiffView .diff-block {
+    height: auto;
+    width: auto;
+    min-width: 100%;
+    margin: 0;
+    padding: 0;
+}
+
+DiffView .diff-block .line-prefix {
+    height: auto;
+}
+
+DiffView .diff-block .code-content {
+    height: auto;
+}
+
+DiffView .split-block {
+    layout: horizontal;
+}
+
+DiffView .diff-block-anchors {
+    width: 0;
+    height: auto;
+    margin: 0;
+    padding: 0;
+}
+
+DiffView .diff-block-anchor {
+    width: 0;
+    height: 1;
+    margin: 0;
+    padding: 0;
+}
+
+DiffView .diff-header,
+DiffView #diff-thread-inspector-shell,
+DiffView #diff-content {
+    layer: base;
+}
+
+DiffView #diff-search-bar {
+    layer: search;
+    dock: bottom;
+    height: 1;
+    min-height: 1;
+    display: none;
+}
+
+DiffView #diff-search-bar Input {
+    width: 1fr;
+    height: 1;
+    min-height: 1;
+    border: none;
+    padding: 0 1;
+    background: $surface;
+}
+
+DiffView #diff-search-bar Input:focus {
+    border: none;
+}
+
+DiffView #diff-search-bar .search-prompt {
+    width: 1;
+    height: 1;
+    min-height: 1;
+    padding: 0;
+    background: $surface;
+}

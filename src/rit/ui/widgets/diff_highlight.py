@@ -43,7 +43,7 @@ def _highlight_cache_key(
 def _has_highlighted_diff(
     view, diff: FileDiff, *, use_word_diff: bool | None = None
 ) -> bool:
-    return _highlight_cache_key(view, diff, use_word_diff) in view._highlight_cache
+    return _highlight_cache_key(view, diff, use_word_diff) in view._hl_state.cache
 
 
 def _clear_highlighted_content(view, diff: FileDiff) -> None:
@@ -65,19 +65,19 @@ def _highlight_diff_sync(
 
     highlight_lines_for_diff(diff, include_word_diff=include_word_diff)
     view._invalidate_base_code_content_cache()
-    view._highlight_cache.add(_highlight_cache_key(view, diff, include_word_diff))
+    view._hl_state.cache.add(_highlight_cache_key(view, diff, include_word_diff))
 
 
 def _queue_highlight_diff(view, filename: str, diff: FileDiff) -> None:
-    view._highlight_request_token += 1
-    request_token = view._highlight_request_token
+    view._hl_state.request_token += 1
+    request_token = view._hl_state.request_token
     use_word_diff = view.word_diff_enabled
-    view._queued_full_highlight = (filename, diff, use_word_diff, request_token)
+    view._hl_state.queued_full = (filename, diff, use_word_diff, request_token)
 
-    if view._full_highlight_worker_active:
+    if view._hl_state.full_worker_active:
         return
 
-    view._full_highlight_worker_active = True
+    view._hl_state.full_worker_active = True
     view.run_worker(
         _drain_queued_full_highlights(view),
         exclusive=False,
@@ -88,8 +88,8 @@ def _queue_highlight_diff(view, filename: str, diff: FileDiff) -> None:
 async def _drain_queued_full_highlights(view) -> None:
     try:
         while True:
-            request = view._queued_full_highlight
-            view._queued_full_highlight = None
+            request = view._hl_state.queued_full
+            view._hl_state.queued_full = None
             if request is None:
                 return
 
@@ -102,7 +102,7 @@ async def _drain_queued_full_highlights(view) -> None:
                 use_word_diff=use_word_diff,
             )
     finally:
-        view._full_highlight_worker_active = False
+        view._hl_state.full_worker_active = False
 
 
 async def _highlight_diff_async(
@@ -118,9 +118,9 @@ async def _highlight_diff_async(
         diff,
         include_word_diff=use_word_diff,
     )
-    view._highlight_cache.add(_highlight_cache_key(view, diff, use_word_diff))
+    view._hl_state.cache.add(_highlight_cache_key(view, diff, use_word_diff))
 
-    if request_token != view._highlight_request_token:
+    if request_token != view._hl_state.request_token:
         return
     if view.current_file != filename or view._diff is not diff:
         return
@@ -135,7 +135,7 @@ async def _highlight_diff_async(
 
 
 def _should_use_windowed_highlight_strategy(view) -> bool:
-    return view._virtualized or len(view._all_lines) >= view.BLOCK_RENDER_LINE_THRESHOLD
+    return view._virt.active or len(view._all_lines) >= view.BLOCK_RENDER_LINE_THRESHOLD
 
 
 def _use_windowed_highlight_strategy(view, diff: FileDiff | None = None) -> bool:
@@ -163,7 +163,7 @@ def _current_highlight_window(view) -> tuple[int, int]:
 
     buffer = _effective_window_highlight_buffer(view)
 
-    if view._virtualized:
+    if view._virt.active:
         return (
             max(0, start - buffer),
             min(len(view._all_lines) - 1, end + buffer),
@@ -218,10 +218,10 @@ def _queue_highlight_diff_range(
 ) -> None:
     use_word_diff = view.word_diff_enabled
     request_signature = (start_line, end_line, use_word_diff)
-    if view._window_highlight_inflight == request_signature:
+    if view._hl_state.window_inflight == request_signature:
         return
 
-    queued_request = view._queued_window_highlight
+    queued_request = view._hl_state.queued_window
     if queued_request is not None:
         (
             queued_filename,
@@ -240,9 +240,9 @@ def _queue_highlight_diff_range(
         ):
             return
 
-    view._highlight_request_token += 1
-    request_token = view._highlight_request_token
-    view._queued_window_highlight = (
+    view._hl_state.request_token += 1
+    request_token = view._hl_state.request_token
+    view._hl_state.queued_window = (
         filename,
         diff,
         start_line,
@@ -251,10 +251,10 @@ def _queue_highlight_diff_range(
         request_token,
     )
 
-    if view._window_highlight_worker_active:
+    if view._hl_state.window_worker_active:
         return
 
-    view._window_highlight_worker_active = True
+    view._hl_state.window_worker_active = True
     view.run_worker(
         _drain_queued_window_highlights(view),
         exclusive=False,
@@ -265,8 +265,8 @@ def _queue_highlight_diff_range(
 async def _drain_queued_window_highlights(view) -> None:
     try:
         while True:
-            request = view._queued_window_highlight
-            view._queued_window_highlight = None
+            request = view._hl_state.queued_window
+            view._hl_state.queued_window = None
             if request is None:
                 return
 
@@ -278,7 +278,7 @@ async def _drain_queued_window_highlights(view) -> None:
                 use_word_diff,
                 request_token,
             ) = request
-            view._window_highlight_inflight = (
+            view._hl_state.window_inflight = (
                 start_line,
                 end_line,
                 use_word_diff,
@@ -293,7 +293,7 @@ async def _drain_queued_window_highlights(view) -> None:
                 use_word_diff=use_word_diff,
             )
     finally:
-        view._window_highlight_worker_active = False
+        view._hl_state.window_worker_active = False
 
 
 async def _highlight_diff_range_async(
@@ -315,14 +315,14 @@ async def _highlight_diff_range_async(
             include_word_diff=use_word_diff,
         )
     finally:
-        if view._window_highlight_inflight == (
+        if view._hl_state.window_inflight == (
             start_line,
             end_line,
             use_word_diff,
         ):
-            view._window_highlight_inflight = None
+            view._hl_state.window_inflight = None
 
-    if request_token != view._highlight_request_token:
+    if request_token != view._hl_state.request_token:
         return
     if view.current_file != filename or view._diff is not diff:
         return

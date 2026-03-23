@@ -92,36 +92,36 @@ def _rebuild_virtual_layout(view) -> None:
 
 
 def _set_virtual_window_from_viewport(view) -> bool:
-    if not view._virtualized or not view._all_lines:
+    if not view._virt.active or not view._all_lines:
         return False
 
-    old_start = view._virtual_window_start
-    old_end = view._virtual_window_end
+    old_start = view._virt.window_start
+    old_end = view._virt.window_end
     _set_virtual_window_around(view, view._viewport_center_line())
     return (
-        view._virtual_window_start != old_start or view._virtual_window_end != old_end
+        view._virt.window_start != old_start or view._virt.window_end != old_end
     )
 
 
 def _maybe_update_virtual_window_from_viewport(view) -> None:
-    if not view._virtualized or not view.is_mounted or not view._all_lines:
+    if not view._virt.active or not view.is_mounted or not view._all_lines:
         return
 
     center_line = view._viewport_center_line()
     margin = _effective_virtual_window_shift_margin(view)
-    start = view._virtual_window_start
-    end = view._virtual_window_end
+    start = view._virt.window_start
+    end = view._virt.window_end
 
     if not (center_line < start + margin or center_line > end - margin):
         return
 
-    if view._window_render_pending:
-        view._coalesced_scroll_center_line = center_line
+    if view._virt.render_pending:
+        view._virt.coalesced_center = center_line
         return
 
-    view._coalesced_scroll_center_line = None
+    view._virt.coalesced_center = None
     _set_virtual_window_around(view, center_line)
-    view._window_render_pending = True
+    view._virt.render_pending = True
     view.run_worker(
         _run_virtual_window_render_for_request(view, view._render_request_token),
         exclusive=True,
@@ -131,17 +131,17 @@ def _maybe_update_virtual_window_from_viewport(view) -> None:
 
 def _configure_virtual_window(view) -> None:
     total_lines = len(view._all_lines)
-    view._virtualized = total_lines > view.VIRTUALIZE_LINE_THRESHOLD
-    view._window_render_pending = False
+    view._virt.active = total_lines > view.VIRTUALIZE_LINE_THRESHOLD
+    view._virt.render_pending = False
 
     if total_lines == 0:
-        view._virtual_window_start = 0
-        view._virtual_window_end = -1
+        view._virt.window_start = 0
+        view._virt.window_end = -1
         return
 
-    if not view._virtualized:
-        view._virtual_window_start = 0
-        view._virtual_window_end = total_lines - 1
+    if not view._virt.active:
+        view._virt.window_start = 0
+        view._virt.window_end = total_lines - 1
         return
 
     if view.is_mounted and view.scroll_y > 0:
@@ -154,8 +154,8 @@ def _configure_virtual_window(view) -> None:
 def _set_virtual_window_around(view, center_line: int) -> None:
     total_lines = len(view._all_lines)
     if total_lines == 0:
-        view._virtual_window_start = 0
-        view._virtual_window_end = -1
+        view._virt.window_start = 0
+        view._virt.window_end = -1
         return
 
     radius = _effective_virtual_window_radius(view)
@@ -173,22 +173,22 @@ def _set_virtual_window_around(view, center_line: int) -> None:
         if deficit > 0:
             start = max(0, start - deficit)
 
-    view._virtual_window_start = start
-    view._virtual_window_end = end
+    view._virt.window_start = start
+    view._virt.window_end = end
 
 
 def _maybe_update_virtual_window(view, line_index: int) -> None:
-    if not view._virtualized or view._window_render_pending:
+    if not view._virt.active or view._virt.render_pending:
         return
 
     margin = _effective_virtual_window_shift_margin(view)
-    start = view._virtual_window_start
-    end = view._virtual_window_end
+    start = view._virt.window_start
+    end = view._virt.window_end
 
     if line_index < start + margin or line_index > end - margin:
         _set_virtual_window_around(view, line_index)
-        view._cursor_shift_pending = True
-        view._window_render_pending = True
+        view._virt.cursor_shift_pending = True
+        view._virt.render_pending = True
         view.run_worker(
             _run_virtual_window_render_for_request(view, view._render_request_token),
             exclusive=True,
@@ -319,8 +319,8 @@ async def _sync_visible_virtual_hunk_headers(
         anchor = view._get_line_container(hunk_start)
         if anchor is not None:
             container.mount(header_widget, before=anchor)
-        elif view._bottom_virtual_buffer_widget is not None:
-            container.mount(header_widget, before=view._bottom_virtual_buffer_widget)
+        elif view._virt.bottom_buffer is not None:
+            container.mount(header_widget, before=view._virt.bottom_buffer)
         else:
             container.mount(header_widget)
         view._register_hunk_header_widget(hunk_index, header_widget)
@@ -335,7 +335,7 @@ async def _sync_virtual_buffers(
     top_height = _virtual_top_buffer_height(view, window_start, window_end)
     bottom_height = _virtual_bottom_buffer_height(view, window_end)
 
-    top_buffer = view._top_virtual_buffer_widget
+    top_buffer = view._virt.top_buffer
     if top_height > 0:
         if isinstance(top_buffer, Static):
             _set_virtual_buffer_height(view, top_buffer, top_height)
@@ -351,12 +351,12 @@ async def _sync_virtual_buffers(
                 container.mount(widget, before=first_child)
             else:
                 container.mount(widget)
-            view._top_virtual_buffer_widget = widget
+            view._virt.top_buffer = widget
     elif top_buffer is not None:
         await top_buffer.remove()
-        view._top_virtual_buffer_widget = None
+        view._virt.top_buffer = None
 
-    bottom_buffer = view._bottom_virtual_buffer_widget
+    bottom_buffer = view._virt.bottom_buffer
     if bottom_height > 0:
         if isinstance(bottom_buffer, Static):
             _set_virtual_buffer_height(view, bottom_buffer, bottom_height)
@@ -368,10 +368,10 @@ async def _sync_virtual_buffers(
             )
             _set_virtual_buffer_height(view, widget, bottom_height)
             container.mount(widget)
-            view._bottom_virtual_buffer_widget = widget
+            view._virt.bottom_buffer = widget
     elif bottom_buffer is not None:
         await bottom_buffer.remove()
-        view._bottom_virtual_buffer_widget = None
+        view._virt.bottom_buffer = None
 
 
 def _mount_virtualized_lines_at_bottom(
@@ -383,7 +383,7 @@ def _mount_virtualized_lines_at_bottom(
     if view._diff is None or start > end:
         return
 
-    bottom_buffer = view._bottom_virtual_buffer_widget
+    bottom_buffer = view._virt.bottom_buffer
 
     for hunk in view._diff.hunks:
         lines = [line for line in hunk.lines if start <= line.line_index <= end]
@@ -442,17 +442,17 @@ def _mount_virtualized_ranges_at_bottom(
 
 
 async def _try_shift_virtual_window_incremental(view) -> bool:
-    if not view._virtualized or view._diff is None or not view.is_mounted:
+    if not view._virt.active or view._diff is None or not view.is_mounted:
         return False
 
     grouped_blocks_active = _blocks._should_use_unified_block_renderer(
         view
     ) or _blocks._should_use_split_block_renderer(view)
 
-    old_start = view._rendered_window_start
-    old_end = view._rendered_window_end
-    new_start = view._virtual_window_start
-    new_end = view._virtual_window_end
+    old_start = view._virt.rendered_start
+    old_end = view._virt.rendered_end
+    new_start = view._virt.window_start
+    new_end = view._virt.window_end
 
     if old_end < old_start or new_end < new_start:
         return False
@@ -470,8 +470,8 @@ async def _try_shift_virtual_window_incremental(view) -> bool:
                 new_start,
                 new_end,
             )
-            view._rendered_window_start = new_start
-            view._rendered_window_end = new_end
+            view._virt.rendered_start = new_start
+            view._virt.rendered_end = new_end
             view._visual_selection_specs = {}
             return True
 
@@ -505,8 +505,8 @@ async def _try_shift_virtual_window_incremental(view) -> bool:
 
         await _sync_virtual_buffers(view, content, new_start, new_end)
 
-        view._rendered_window_start = new_start
-        view._rendered_window_end = new_end
+        view._virt.rendered_start = new_start
+        view._virt.rendered_end = new_end
         view._visual_selection_specs = {}
         return True
 
@@ -539,8 +539,8 @@ async def _try_shift_virtual_window_incremental(view) -> bool:
 
         await _sync_virtual_buffers(view, content, new_start, new_end)
 
-        view._rendered_window_start = new_start
-        view._rendered_window_end = new_end
+        view._virt.rendered_start = new_start
+        view._virt.rendered_end = new_end
         view._visual_selection_specs = {}
         return True
 
@@ -575,33 +575,33 @@ async def _render_virtual_window_and_finalize(view) -> None:
             await view._render_diff()
     finally:
         if view._is_current_render_request(request_token):
-            view._window_render_pending = False
+            view._virt.render_pending = False
 
     if not view._is_current_render_request(request_token):
         return
 
-    cursor_driven = view._cursor_shift_pending
-    view._cursor_shift_pending = False
+    cursor_driven = view._virt.cursor_shift_pending
+    view._virt.cursor_shift_pending = False
 
-    queued_center = view._coalesced_scroll_center_line
-    view._coalesced_scroll_center_line = None
+    queued_center = view._virt.coalesced_center
+    view._virt.coalesced_center = None
     if (
         cursor_driven
         or queued_center is None
-        or not view._virtualized
+        or not view._virt.active
         or not view.is_mounted
     ):
         return
 
     margin = _effective_virtual_window_shift_margin(view)
     if not (
-        queued_center < view._virtual_window_start + margin
-        or queued_center > view._virtual_window_end - margin
+        queued_center < view._virt.window_start + margin
+        or queued_center > view._virt.window_end - margin
     ):
         return
 
     _set_virtual_window_around(view, queued_center)
-    view._window_render_pending = True
+    view._virt.render_pending = True
     view.run_worker(
         _run_virtual_window_render_for_request(view, view._render_request_token),
         exclusive=True,
@@ -617,8 +617,8 @@ def _render_virtual_window(view, container: VerticalScroll) -> None:
     if total_lines == 0:
         return
 
-    start = max(0, view._virtual_window_start)
-    end = min(total_lines - 1, view._virtual_window_end)
+    start = max(0, view._virt.window_start)
+    end = min(total_lines - 1, view._virt.window_end)
 
     top_buffer_height = _virtual_top_buffer_height(view, start, end)
     if top_buffer_height > 0:
@@ -629,7 +629,7 @@ def _render_virtual_window(view, container: VerticalScroll) -> None:
         )
         _set_virtual_buffer_height(view, top_buffer, top_buffer_height)
         container.mount(top_buffer)
-        view._top_virtual_buffer_widget = top_buffer
+        view._virt.top_buffer = top_buffer
 
     for hunk_index, hunk in enumerate(view._diff.hunks):
         if hunk_index < len(view._hunk_line_ranges):
@@ -655,4 +655,4 @@ def _render_virtual_window(view, container: VerticalScroll) -> None:
         )
         _set_virtual_buffer_height(view, bottom_buffer, bottom_buffer_height)
         container.mount(bottom_buffer)
-        view._bottom_virtual_buffer_widget = bottom_buffer
+        view._virt.bottom_buffer = bottom_buffer

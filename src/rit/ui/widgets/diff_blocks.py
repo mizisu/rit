@@ -37,7 +37,7 @@ def _invalidate_block_static_row_cache(
 
 def _should_use_unified_block_renderer(view) -> bool:
     return (
-        (view._virtualized or len(view._all_lines) >= view.BLOCK_RENDER_LINE_THRESHOLD)
+        (view._virt.active or len(view._all_lines) >= view.BLOCK_RENDER_LINE_THRESHOLD)
         and not view.split
         and view.mode in {"unified", "auto"}
     )
@@ -45,7 +45,7 @@ def _should_use_unified_block_renderer(view) -> bool:
 
 def _should_use_split_block_renderer(view) -> bool:
     return (
-        (view._virtualized or len(view._all_lines) >= view.BLOCK_RENDER_LINE_THRESHOLD)
+        (view._virt.active or len(view._all_lines) >= view.BLOCK_RENDER_LINE_THRESHOLD)
         and view.split
         and view.mode in {"split", "auto"}
     )

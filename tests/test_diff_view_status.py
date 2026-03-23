@@ -101,7 +101,7 @@ async def test_virtualized_diff_uses_windowed_highlight_path(
         await pilot.pause()
 
         assert highlighted.wait(timeout=1.0) is True
-        assert diff_view._virtualized is True
+        assert diff_view._virt.active is True
         assert range_calls["count"] >= 1
         assert full_calls["count"] == 0
 
@@ -152,7 +152,7 @@ async def test_medium_block_diff_uses_windowed_highlight_path(
         await pilot.pause()
 
         assert highlighted.wait(timeout=1.0) is True
-        assert diff_view._virtualized is False
+        assert diff_view._virt.active is False
         assert len(diff_view._all_lines) >= diff_view.BLOCK_RENDER_LINE_THRESHOLD
         assert range_calls["count"] >= 1
         assert full_calls["count"] == 0
