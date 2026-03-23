@@ -16,6 +16,8 @@ from rit.app import RitApp
 from rit.state.store import PRStore
 from rit.ui.components.file_changes import FileChanges
 from rit.ui.components.pr_info import PRInfo
+from rit.ui.messages import Flash
+from rit.ui.screens.branch_picker import BranchPickerScreen
 from rit.ui.widgets import DiffView, Header
 
 
@@ -32,6 +34,7 @@ _COMMON_BINDINGS = [
     Binding("ctrl+u", "scroll_half_page_up", "Half Page Up", show=False),
     Binding("g", "scroll_to_top", "Top", show=False),
     Binding("G", "scroll_to_bottom", "Bottom", key_display="shift+g", show=False),
+    Binding("ctrl+b", "copy_branch", "Copy Branch", show=False),
     Binding("enter", "toggle_item", "Toggle", show=False),
     Binding("space", "toggle_item", "Toggle", show=False),
 ]
@@ -206,6 +209,42 @@ class MainScreen(Screen):
     def on_store_error(self, event: PRStore.ErrorOccurred) -> None:
         self.notify(event.error, title="Error", severity="error")
 
+    def _copy_branch(self, branch: str | None, *, label: str) -> None:
+        if not branch:
+            self.post_message(
+                Flash(f"No {label} branch available", style="warning", duration=2.0)
+            )
+            return
+
+        self.app.copy_to_clipboard(branch)
+        self.post_message(
+            Flash(
+                f"Copied {label} branch: {branch}",
+                style="success",
+                duration=2.0,
+            )
+        )
+
+    def _handle_branch_pick(self, selection: str | None) -> None:
+        pr = self.store.state.pr
+        if selection == "head":
+            self._copy_branch(pr.head_ref if pr else None, label="head")
+        elif selection == "base":
+            self._copy_branch(pr.base_ref if pr else None, label="base")
+
+    def action_copy_branch(self) -> None:
+        pr = self.store.state.pr
+        if pr is None or (not pr.head_ref and not pr.base_ref):
+            self.post_message(
+                Flash("No branches available", style="warning", duration=2.0)
+            )
+            return
+
+        self.app.push_screen(
+            BranchPickerScreen(head=pr.head_ref, base=pr.base_ref),
+            self._handle_branch_pick,
+        )
+
     def action_cursor_down(self) -> None:
         if self.current_tab == 0:
             self.pr_info.next_item()
@@ -375,8 +414,6 @@ class MainScreen(Screen):
                         sync_tree_selection=True,
                     )
                 return
-
-        from rit.ui.messages import Flash
 
         self.app.post_message(
             Flash("No more files with comments", style="warning", duration=2.0)

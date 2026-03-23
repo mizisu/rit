@@ -14,6 +14,7 @@ from textual.widgets import Input, Static, Tree
 from textual.widgets.tree import TreeNode
 
 from rit.state.models import PRFile
+from rit.ui.messages import Flash
 from rit.ui.protocols import NavigableProtocol
 
 if TYPE_CHECKING:
@@ -83,6 +84,8 @@ class FileTree(Vertical):
         Binding("l", "expand_or_child", "Expand", show=False),
         Binding("ctrl+d", "half_page_down", "Half Page Down", show=False),
         Binding("ctrl+u", "half_page_up", "Half Page Up", show=False),
+        Binding("y", "copy_filename", "Copy Filename", show=False),
+        Binding("Y", "copy_path", "Copy Path", show=False),
         Binding("/", "start_search", "Search", show=False),
     ]
 
@@ -181,6 +184,11 @@ class FileTree(Vertical):
 
         self._close_search(clear_query=True)
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action in {"copy_filename", "copy_path"} and self._search_open:
+            return False
+        return super().check_action(action, parameters)
+
     def action_cursor_down(self) -> None:
         tree = self.query_one("#file-tree", Tree)
         tree.action_cursor_down()
@@ -216,6 +224,30 @@ class FileTree(Vertical):
                 tree.cursor_node.expand()
             elif tree.cursor_node.is_expanded and tree.cursor_node.children:
                 tree.select_node(tree.cursor_node.children[0])
+
+    def _copy_current_file(self, *, basename_only: bool) -> None:
+        tree = self.query_one("#file-tree", Tree)
+        node = tree.cursor_node
+        if node is None or not node.data:
+            self.post_message(Flash("No file selected", style="warning", duration=2.0))
+            return
+
+        filename = node.data.split("/")[-1] if basename_only else node.data
+        label = "filename" if basename_only else "file path"
+        self.app.copy_to_clipboard(filename)
+        self.post_message(
+            Flash(
+                f"Copied {label}: {filename}",
+                style="success",
+                duration=2.0,
+            )
+        )
+
+    def action_copy_filename(self) -> None:
+        self._copy_current_file(basename_only=True)
+
+    def action_copy_path(self) -> None:
+        self._copy_current_file(basename_only=False)
 
     def next_item(self) -> None:
         current = self.get_current_index()

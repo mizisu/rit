@@ -5,6 +5,8 @@ from textual.pilot import Pilot
 
 from rit.app import RitApp
 from rit.cli import parse_pr_reference
+from rit.state.models import PR
+from rit.ui.screens.branch_picker import BranchPickerScreen
 
 
 class TestPRReferenceParsing:
@@ -104,20 +106,6 @@ class TestRitApp:
             await pilot.press("H")
             assert tabbed.active == "pr-info"
 
-    async def test_tab_switching_with_tab_key(self, app: RitApp) -> None:
-        """Test cycling through tabs with Tab key."""
-        async with app.run_test() as pilot:
-            from textual.widgets import TabbedContent
-
-            tabbed = app.screen.query_one(TabbedContent)
-            assert tabbed.active == "pr-info"
-
-            await pilot.press("tab")
-            assert tabbed.active == "files"
-
-            await pilot.press("tab")
-            assert tabbed.active == "pr-info"
-
     async def test_files_tab_focuses_tree_by_default(self, app: RitApp) -> None:
         """Test that entering Files tab focuses the file tree."""
         async with app.run_test() as pilot:
@@ -138,3 +126,51 @@ class TestRitApp:
         async with app.run_test() as pilot:
             await pilot.press("q")
             assert not app.is_running
+
+    async def test_ctrl_b_opens_picker_and_copies_head_branch(
+        self, app: RitApp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that ctrl+b opens the branch picker and Enter copies head."""
+
+        async def fake_load_all(_self) -> None:
+            return None
+
+        monkeypatch.setattr("rit.state.store.PRStore.load_all", fake_load_all)
+
+        async with app.run_test() as pilot:
+            screen = app.screen
+            screen.store.state.pr = PR(head_ref="feature/test", base_ref="main")
+            await pilot.pause()
+
+            await pilot.press("ctrl+b")
+            await pilot.pause()
+            assert isinstance(app.screen, BranchPickerScreen)
+
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app.clipboard == "feature/test"
+
+    async def test_ctrl_b_picker_copies_base_branch_on_files_tab(
+        self, app: RitApp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Test that the picker can copy base branch from the Files tab."""
+
+        async def fake_load_all(_self) -> None:
+            return None
+
+        monkeypatch.setattr("rit.state.store.PRStore.load_all", fake_load_all)
+
+        async with app.run_test() as pilot:
+            screen = app.screen
+            screen.store.state.pr = PR(head_ref="feature/test", base_ref="main")
+            await pilot.pause()
+
+            await pilot.press("L")
+            await pilot.pause()
+            await pilot.press("ctrl+b")
+            await pilot.pause()
+            assert isinstance(app.screen, BranchPickerScreen)
+
+            await pilot.press("down", "enter")
+            await pilot.pause()
+            assert app.clipboard == "main"

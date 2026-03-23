@@ -208,7 +208,9 @@ async def test_search_enter_with_no_cursor_does_not_auto_select_first_match(
 
 
 @pytest.mark.asyncio
-async def test_escape_cancels_search_and_restores_list(sample_files: list[PRFile]) -> None:
+async def test_escape_cancels_search_and_restores_list(
+    sample_files: list[PRFile],
+) -> None:
     """Escape should close search mode and restore the full file list."""
 
     class TestApp(App):
@@ -239,3 +241,86 @@ async def test_escape_cancels_search_and_restores_list(sample_files: list[PRFile
         assert search.display is False
         assert tree.has_focus
         assert file_tree.file_count == len(sample_files)
+
+
+@pytest.mark.asyncio
+async def test_y_copies_basename_of_current_file(sample_files: list[PRFile]) -> None:
+    """Pressing `y` should copy the basename of the current file."""
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileTree(id="file-tree-sidebar")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_tree = app.query_one(FileTree)
+        file_tree.refresh_files(sample_files)
+        await pilot.pause()
+
+        tree = file_tree.query_one("#file-tree", Tree)
+        tree.focus()
+        tree.select_node(file_tree._file_nodes["src/utils/file_tree.py"])
+        await pilot.pause()
+
+        await pilot.press("y")
+        await pilot.pause()
+
+        assert app.clipboard == "file_tree.py"
+
+
+@pytest.mark.asyncio
+async def test_Y_copies_repo_relative_path_of_current_file(
+    sample_files: list[PRFile],
+) -> None:
+    """Pressing `Y` should copy the repo-relative path of the current file."""
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileTree(id="file-tree-sidebar")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_tree = app.query_one(FileTree)
+        file_tree.refresh_files(sample_files)
+        await pilot.pause()
+
+        tree = file_tree.query_one("#file-tree", Tree)
+        tree.focus()
+        tree.select_node(file_tree._file_nodes["src/utils/file_tree.py"])
+        await pilot.pause()
+
+        await pilot.press("Y")
+        await pilot.pause()
+
+        assert app.clipboard == "src/utils/file_tree.py"
+
+
+@pytest.mark.asyncio
+async def test_search_input_keeps_y_text_instead_of_copying(
+    sample_files: list[PRFile],
+) -> None:
+    """Typing `y` in search mode should update the input instead of copying."""
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileTree(id="file-tree-sidebar")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_tree = app.query_one(FileTree)
+        file_tree.refresh_files(sample_files)
+        await pilot.pause()
+
+        tree = file_tree.query_one("#file-tree", Tree)
+        tree.focus()
+        tree.select_node(file_tree._file_nodes["src/utils/file_tree.py"])
+        await pilot.pause()
+
+        await pilot.press("/")
+        await pilot.pause()
+        await pilot.press("y")
+        await pilot.pause()
+
+        search = file_tree.query_one("#file-search", Input)
+        assert search.value == "y"
+        assert app.clipboard == ""
