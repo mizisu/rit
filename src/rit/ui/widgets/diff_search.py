@@ -184,6 +184,7 @@ def activate_match(view: DiffView, index: int) -> None:
         column=match.column,
         scroll_in_visual=view.visual_mode,
     )
+    view._scroll_to_cursor_horizontal()
     view._update_status_line()
 
 

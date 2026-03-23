@@ -188,7 +188,8 @@ async def test_hunk_jump_places_target_near_top_of_viewport() -> None:
         assert row is not None
         top, _ = diff_view._row_vertical_bounds(row) or (None, None)
         assert top is not None
-        assert abs(top - int(diff_view.scroll_y)) <= 1
+        header_h = diff_view._dock_header_height()
+        assert abs(top - int(diff_view.scroll_y) - header_h) <= 1
 
 
 @pytest.mark.asyncio
