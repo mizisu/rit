@@ -119,6 +119,80 @@ class TestParsePatch:
         assert modified.old_segments == []
         assert modified.new_segments == []
 
+    def test_multi_line_replace_aligns_matching_pairs_before_extra_adds(self):
+        """Replace blocks should pair matching old/new lines before trailing adds."""
+        patch = """@@ -1,4 +1,5 @@
+ line1
+-old alpha
+-old beta
++new alpha
++new beta
++new gamma
+ line2"""
+
+        diff = parse_patch(patch, "test.py")
+
+        hunk = diff.hunks[0]
+        assert len(hunk.lines) == 5
+
+        first_change = hunk.lines[1]
+        second_change = hunk.lines[2]
+        trailing_add = hunk.lines[3]
+
+        assert first_change.is_modified
+        assert first_change.old_line_no == 2
+        assert first_change.new_line_no == 2
+        assert first_change.old_content == "old alpha"
+        assert first_change.new_content == "new alpha"
+
+        assert second_change.is_modified
+        assert second_change.old_line_no == 3
+        assert second_change.new_line_no == 3
+        assert second_change.old_content == "old beta"
+        assert second_change.new_content == "new beta"
+
+        assert trailing_add.is_added
+        assert trailing_add.old_line_no is None
+        assert trailing_add.new_line_no == 4
+        assert trailing_add.new_content == "new gamma"
+
+    def test_multi_line_replace_aligns_matching_pairs_before_extra_deletes(self):
+        """Replace blocks should pair matching old/new lines before trailing deletes."""
+        patch = """@@ -1,5 +1,4 @@
+ line1
+-old alpha
+-old beta
+-old gamma
++new alpha
++new beta
+ line2"""
+
+        diff = parse_patch(patch, "test.py")
+
+        hunk = diff.hunks[0]
+        assert len(hunk.lines) == 5
+
+        first_change = hunk.lines[1]
+        second_change = hunk.lines[2]
+        trailing_delete = hunk.lines[3]
+
+        assert first_change.is_modified
+        assert first_change.old_line_no == 2
+        assert first_change.new_line_no == 2
+        assert first_change.old_content == "old alpha"
+        assert first_change.new_content == "new alpha"
+
+        assert second_change.is_modified
+        assert second_change.old_line_no == 3
+        assert second_change.new_line_no == 3
+        assert second_change.old_content == "old beta"
+        assert second_change.new_content == "new beta"
+
+        assert trailing_delete.is_deleted
+        assert trailing_delete.old_line_no == 4
+        assert trailing_delete.new_line_no is None
+        assert trailing_delete.old_content == "old gamma"
+
 
 class TestComputeWordDiff:
     """Tests for word-level diff."""
@@ -139,6 +213,56 @@ class TestComputeWordDiff:
         assert any(s.type == SegmentType.UNCHANGED for s in old_segments)
         assert any(s.type == SegmentType.DELETED for s in old_segments)
         assert any(s.type == SegmentType.ADDED for s in new_segments)
+
+    def test_single_token_replace_preserves_shared_substrings(self):
+        """Single-token replacements should keep shared prefix/suffix unhighlighted."""
+        old_segments, new_segments = compute_word_diff("old_value", "new_value")
+
+        assert any(
+            s.type == SegmentType.DELETED and s.text == "old" for s in old_segments
+        )
+        assert any(
+            s.type == SegmentType.ADDED and s.text == "new" for s in new_segments
+        )
+        assert any(
+            s.type == SegmentType.UNCHANGED and s.text == "_value" for s in old_segments
+        )
+        assert any(
+            s.type == SegmentType.UNCHANGED and s.text == "_value" for s in new_segments
+        )
+
+    def test_single_token_replace_avoids_weird_middle_substring_matches(self):
+        """Single-token replacements should prefer clean boundary matches."""
+        old_segments, new_segments = compute_word_diff("@classmethod", "@staticmethod")
+
+        assert [(segment.text, segment.type) for segment in old_segments] == [
+            ("@", SegmentType.UNCHANGED),
+            ("class", SegmentType.DELETED),
+            ("method", SegmentType.UNCHANGED),
+        ]
+        assert [(segment.text, segment.type) for segment in new_segments] == [
+            ("@", SegmentType.UNCHANGED),
+            ("static", SegmentType.ADDED),
+            ("method", SegmentType.UNCHANGED),
+        ]
+
+    def test_multi_token_replace_keeps_code_changes_grouped_naturally(self):
+        """Code-oriented replacements should avoid single-character carryover."""
+        old_segments, new_segments = compute_word_diff(
+            "def get_cache_key(cls, company_id: int) -> str:",
+            "def get_cache_key(company_id: int, version_id: int | None) -> str:",
+        )
+
+        assert [(segment.text, segment.type) for segment in old_segments] == [
+            ("def get_cache_key(", SegmentType.UNCHANGED),
+            ("cls, company_id: int)", SegmentType.DELETED),
+            (" -> str:", SegmentType.UNCHANGED),
+        ]
+        assert [(segment.text, segment.type) for segment in new_segments] == [
+            ("def get_cache_key(", SegmentType.UNCHANGED),
+            ("company_id: int, version_id: int | None)", SegmentType.ADDED),
+            (" -> str:", SegmentType.UNCHANGED),
+        ]
 
     def test_insertion(self):
         """Test insertion."""
@@ -211,6 +335,44 @@ class TestComputeLineDiff:
         assert len(modified) == 1
         assert modified[0].old_segments == []
         assert modified[0].new_segments == []
+
+    def test_compute_line_diff_distinguishes_blank_line_from_missing_line(self):
+        """Real blank lines in replace blocks should not be treated as missing lines."""
+        old = ["@classmethod", ""]
+        new = ["def method(self):"]
+
+        result = compute_line_diff(old, new)
+
+        assert len(result) == 2
+        assert result[0].is_modified
+        assert result[0].old_content == "@classmethod"
+        assert result[0].new_content == "def method(self):"
+        assert result[1].is_deleted
+        assert result[1].old_content == ""
+        assert all(not (line.is_added and line.new_content == "") for line in result)
+
+    def test_parse_patch_handles_replace_block_with_deleted_blank_line(self):
+        """Patch parsing should not crash when a shorter replace run ends with a blank deleted line."""
+        patch = """@@ -1,3 +1,1 @@
+-@classmethod
+-def method(cls):
+-
++def method(self):"""
+
+        diff = parse_patch(patch, "test.py")
+
+        hunk = diff.hunks[0]
+        assert len(hunk.lines) == 3
+        assert hunk.lines[0].is_modified
+        assert hunk.lines[0].old_content == "@classmethod"
+        assert hunk.lines[0].new_content == "def method(self):"
+        assert hunk.lines[1].is_deleted
+        assert hunk.lines[1].old_content == "def method(cls):"
+        assert hunk.lines[2].is_deleted
+        assert hunk.lines[2].old_content == ""
+        assert all(
+            not (line.is_added and line.new_content == "") for line in hunk.lines
+        )
 
 
 class TestDiffHighlighting:

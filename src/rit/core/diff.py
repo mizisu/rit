@@ -13,6 +13,7 @@ from rit.core.types import (
 
 WORD_DIFF_THRESHOLD = 0.2
 WORD_DIFF_MAX_LINE_LENGTH = 1000
+TOKEN_REFINEMENT_MAX_LENGTH = 200
 TAB_SIZE = 4
 
 
@@ -102,63 +103,56 @@ def parse_patch(patch: str, filename: str) -> FileDiff:
     return FileDiff(filename=filename, hunks=hunks)
 
 
-def _identify_modified_lines(hunk: DiffHunk) -> None:
-    """Identify modified lines (delete immediately followed by add).
+def _realign_replace_block(
+    deleted_lines: list[DiffLine],
+    added_lines: list[DiffLine],
+) -> list[DiffLine]:
+    realigned_lines = compute_line_diff(
+        [line.old_content for line in deleted_lines],
+        [line.new_content for line in added_lines],
+    )
 
-    This converts adjacent delete+add pairs into "modified" lines
-    that can show side-by-side with word-level diff.
-    """
+    old_index = 0
+    new_index = 0
+
+    for line in realigned_lines:
+        if line.old_line_no is not None:
+            line.old_line_no = deleted_lines[old_index].old_line_no
+            old_index += 1
+        if line.new_line_no is not None:
+            line.new_line_no = added_lines[new_index].new_line_no
+            new_index += 1
+
+    return realigned_lines
+
+
+def _identify_modified_lines(hunk: DiffHunk) -> None:
+    """Identify modified lines within contiguous delete/add replace blocks."""
     i = 0
     new_lines: list[DiffLine] = []
 
     while i < len(hunk.lines):
         line = hunk.lines[i]
+        if not line.is_deleted:
+            new_lines.append(line)
+            i += 1
+            continue
 
-        if line.is_deleted and i + 1 < len(hunk.lines):
-            next_line = hunk.lines[i + 1]
-            if next_line.is_added:
-                max_line_length = max(
-                    len(line.old_content),
-                    len(next_line.new_content),
-                )
+        deleted_start = i
+        while i < len(hunk.lines) and hunk.lines[i].is_deleted:
+            i += 1
 
-                if max_line_length > WORD_DIFF_MAX_LINE_LENGTH:
-                    new_lines.append(
-                        DiffLine(
-                            old_line_no=line.old_line_no,
-                            new_line_no=next_line.new_line_no,
-                            old_content=line.old_content,
-                            new_content=next_line.new_content,
-                            is_modified=True,
-                        )
-                    )
-                    i += 2
-                    continue
+        added_start = i
+        while i < len(hunk.lines) and hunk.lines[i].is_added:
+            i += 1
 
-                similarity = _compute_similarity(
-                    line.old_content, next_line.new_content
-                )
+        deleted_lines = hunk.lines[deleted_start:added_start]
+        added_lines = hunk.lines[added_start:i]
 
-                if similarity >= WORD_DIFF_THRESHOLD:
-                    old_segments, new_segments = compute_word_diff(
-                        line.old_content, next_line.new_content
-                    )
-                    new_lines.append(
-                        DiffLine(
-                            old_line_no=line.old_line_no,
-                            new_line_no=next_line.new_line_no,
-                            old_content=line.old_content,
-                            new_content=next_line.new_content,
-                            is_modified=True,
-                            old_segments=old_segments,
-                            new_segments=new_segments,
-                        )
-                    )
-                    i += 2
-                    continue
-
-        new_lines.append(line)
-        i += 1
+        if added_lines:
+            new_lines.extend(_realign_replace_block(deleted_lines, added_lines))
+        else:
+            new_lines.extend(deleted_lines)
 
     hunk.lines = new_lines
 
@@ -209,6 +203,105 @@ def _merge_segments(segments: list[InlineSegment]) -> list[InlineSegment]:
     return result
 
 
+def _can_refine_token_replace(old_words: list[str], new_words: list[str]) -> bool:
+    if len(old_words) != 1 or len(new_words) != 1:
+        return False
+
+    old_text = old_words[0]
+    new_text = new_words[0]
+    if old_text.isspace() or new_text.isspace():
+        return False
+
+    return max(len(old_text), len(new_text)) <= TOKEN_REFINEMENT_MAX_LENGTH
+
+
+def _is_word_char(char: str) -> bool:
+    return char.isalnum() or char == "_"
+
+
+def _trim_weak_prefix_match(prefix_len: int, text: str) -> int:
+    if prefix_len == 0:
+        return 0
+
+    fragment_len = 0
+    index = prefix_len - 1
+    while index >= 0 and _is_word_char(text[index]):
+        fragment_len += 1
+        index -= 1
+
+    if fragment_len == 1 and index >= 0 and not _is_word_char(text[index]):
+        return prefix_len - 1
+
+    return prefix_len
+
+
+def _trim_weak_suffix_match(suffix_len: int, text: str) -> int:
+    if suffix_len == 0:
+        return 0
+
+    start = len(text) - suffix_len
+    fragment_len = 0
+    index = start
+    while index < len(text) and _is_word_char(text[index]):
+        fragment_len += 1
+        index += 1
+
+    if fragment_len == 1 and index < len(text) and not _is_word_char(text[index]):
+        return suffix_len - 1
+
+    return suffix_len
+
+
+def _compute_char_diff_segments(
+    old_text: str,
+    new_text: str,
+) -> tuple[list[InlineSegment], list[InlineSegment]]:
+    prefix_len = 0
+    max_prefix = min(len(old_text), len(new_text))
+    while prefix_len < max_prefix and old_text[prefix_len] == new_text[prefix_len]:
+        prefix_len += 1
+
+    prefix_len = _trim_weak_prefix_match(prefix_len, old_text)
+
+    old_remaining = len(old_text) - prefix_len
+    new_remaining = len(new_text) - prefix_len
+    suffix_len = 0
+    max_suffix = min(old_remaining, new_remaining)
+    while (
+        suffix_len < max_suffix
+        and old_text[len(old_text) - suffix_len - 1]
+        == new_text[len(new_text) - suffix_len - 1]
+    ):
+        suffix_len += 1
+
+    suffix_len = _trim_weak_suffix_match(suffix_len, old_text)
+
+    old_middle_end = len(old_text) - suffix_len
+    new_middle_end = len(new_text) - suffix_len
+
+    old_segments: list[InlineSegment] = []
+    new_segments: list[InlineSegment] = []
+
+    prefix = old_text[:prefix_len]
+    if prefix:
+        old_segments.append(InlineSegment(text=prefix, type=SegmentType.UNCHANGED))
+        new_segments.append(InlineSegment(text=prefix, type=SegmentType.UNCHANGED))
+
+    old_middle = old_text[prefix_len:old_middle_end]
+    new_middle = new_text[prefix_len:new_middle_end]
+    if old_middle:
+        old_segments.append(InlineSegment(text=old_middle, type=SegmentType.DELETED))
+    if new_middle:
+        new_segments.append(InlineSegment(text=new_middle, type=SegmentType.ADDED))
+
+    suffix = old_text[old_middle_end:]
+    if suffix:
+        old_segments.append(InlineSegment(text=suffix, type=SegmentType.UNCHANGED))
+        new_segments.append(InlineSegment(text=suffix, type=SegmentType.UNCHANGED))
+
+    return _merge_segments(old_segments), _merge_segments(new_segments)
+
+
 def compute_word_diff(
     old_text: str, new_text: str
 ) -> tuple[list[InlineSegment], list[InlineSegment]]:
@@ -243,12 +336,30 @@ def compute_word_diff(
             old_segments.append(InlineSegment(text=text, type=SegmentType.UNCHANGED))
             new_segments.append(InlineSegment(text=text, type=SegmentType.UNCHANGED))
         elif tag == "replace":
-            old_segments.append(
-                InlineSegment(text="".join(old_words[i1:i2]), type=SegmentType.DELETED)
-            )
-            new_segments.append(
-                InlineSegment(text="".join(new_words[j1:j2]), type=SegmentType.ADDED)
-            )
+            replaced_old_words = old_words[i1:i2]
+            replaced_new_words = new_words[j1:j2]
+            if _can_refine_token_replace(replaced_old_words, replaced_new_words):
+                refined_old_segments, refined_new_segments = (
+                    _compute_char_diff_segments(
+                        replaced_old_words[0],
+                        replaced_new_words[0],
+                    )
+                )
+                old_segments.extend(refined_old_segments)
+                new_segments.extend(refined_new_segments)
+            else:
+                old_segments.append(
+                    InlineSegment(
+                        text="".join(replaced_old_words),
+                        type=SegmentType.DELETED,
+                    )
+                )
+                new_segments.append(
+                    InlineSegment(
+                        text="".join(replaced_new_words),
+                        type=SegmentType.ADDED,
+                    )
+                )
         elif tag == "delete":
             old_segments.append(
                 InlineSegment(text="".join(old_words[i1:i2]), type=SegmentType.DELETED)
@@ -287,27 +398,22 @@ def compute_line_diff(old_lines: list[str], new_lines: list[str]) -> list[DiffLi
             new_chunk = new_lines[j1:j2]
             max_len = max(len(old_chunk), len(new_chunk))
             for idx in range(max_len):
-                old_text = old_chunk[idx] if idx < len(old_chunk) else ""
-                new_text = new_chunk[idx] if idx < len(new_chunk) else ""
+                old_text = old_chunk[idx] if idx < len(old_chunk) else None
+                new_text = new_chunk[idx] if idx < len(new_chunk) else None
 
-                if old_text and new_text:
-                    max_line_length = max(len(old_text), len(new_text))
-                    if max_line_length > WORD_DIFF_MAX_LINE_LENGTH:
+                if old_text is not None and new_text is not None:
+                    if old_text == new_text:
                         result.append(
                             DiffLine(
                                 old_line_no=old_line_no,
                                 new_line_no=new_line_no,
                                 old_content=old_text,
                                 new_content=new_text,
-                                is_modified=True,
                             )
                         )
                     else:
-                        similarity = _compute_similarity(old_text, new_text)
-                        if similarity >= WORD_DIFF_THRESHOLD:
-                            old_segments, new_segments = compute_word_diff(
-                                old_text, new_text
-                            )
+                        max_line_length = max(len(old_text), len(new_text))
+                        if max_line_length > WORD_DIFF_MAX_LINE_LENGTH:
                             result.append(
                                 DiffLine(
                                     old_line_no=old_line_no,
@@ -315,30 +421,45 @@ def compute_line_diff(old_lines: list[str], new_lines: list[str]) -> list[DiffLi
                                     old_content=old_text,
                                     new_content=new_text,
                                     is_modified=True,
-                                    old_segments=old_segments,
-                                    new_segments=new_segments,
                                 )
                             )
                         else:
-                            result.append(
-                                DiffLine(
-                                    old_line_no=old_line_no,
-                                    new_line_no=None,
-                                    old_content=old_text,
-                                    is_deleted=True,
+                            similarity = _compute_similarity(old_text, new_text)
+                            if similarity >= WORD_DIFF_THRESHOLD:
+                                old_segments, new_segments = compute_word_diff(
+                                    old_text, new_text
                                 )
-                            )
-                            result.append(
-                                DiffLine(
-                                    old_line_no=None,
-                                    new_line_no=new_line_no,
-                                    new_content=new_text,
-                                    is_added=True,
+                                result.append(
+                                    DiffLine(
+                                        old_line_no=old_line_no,
+                                        new_line_no=new_line_no,
+                                        old_content=old_text,
+                                        new_content=new_text,
+                                        is_modified=True,
+                                        old_segments=old_segments,
+                                        new_segments=new_segments,
+                                    )
                                 )
-                            )
+                            else:
+                                result.append(
+                                    DiffLine(
+                                        old_line_no=old_line_no,
+                                        new_line_no=None,
+                                        old_content=old_text,
+                                        is_deleted=True,
+                                    )
+                                )
+                                result.append(
+                                    DiffLine(
+                                        old_line_no=None,
+                                        new_line_no=new_line_no,
+                                        new_content=new_text,
+                                        is_added=True,
+                                    )
+                                )
                     old_line_no += 1
                     new_line_no += 1
-                elif old_text:
+                elif old_text is not None:
                     result.append(
                         DiffLine(
                             old_line_no=old_line_no,
