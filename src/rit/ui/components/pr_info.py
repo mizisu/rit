@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -8,8 +10,8 @@ from textual.reactive import var
 from textual.widgets import Static, Rule
 from textual import events, on
 
+from rit.state.reviewer_status import ReviewerDisplayState, derive_reviewer_states
 from rit.state.store import PRStore
-from rit.state.models import PRReview
 from rit.ui.components.pr_timeline import PRTimeline
 
 _CSS_PATH = Path(__file__).parent / "pr_info.tcss"
@@ -180,43 +182,30 @@ class PRInfo(Container):
             return
 
         reviewers_widget = self.query_one("#pr-reviewers", Static)
-
-        lines = []
-
-        author_login = pr.user.login if pr.user else ""
-        latest_reviews: dict[str, PRReview] = {}
-        for review in state.reviews:
-            login = review.user.login if review.user else "unknown"
-            if login == author_login:
-                continue
-            if login not in latest_reviews or review.state.value != "PENDING":
-                latest_reviews[login] = review
-
-        requested_logins = {req.display_name for req in pr.requested_reviewers}
-        for req in pr.requested_reviewers:
-            if req.display_name not in latest_reviews:
-                lines.append(f"[#eed49f]●[/] @{req.display_name}")
-
-        for login, review in latest_reviews.items():
-            state_value = review.state.value
-            if state_value == "APPROVED":
-                lines.append(f"[#a6da95]✓[/] @{login}")
-            elif state_value == "CHANGES_REQUESTED":
-                lines.append(f"[#ed8796]●[/] @{login}")
-            elif state_value == "COMMENTED":
-                lines.append(f"[#6e738d]○[/] @{login}")
-            elif state_value == "PENDING":
-                if login in requested_logins:
-                    lines.append(f"[#eed49f]●[/] @{login}")
-                else:
-                    lines.append(f"[#6e738d]○[/] @{login}")
-            elif state_value == "DISMISSED":
-                lines.append(f"[#6e738d]—[/] @{login}")
-
-        if lines:
-            reviewers_widget.update("\n".join(lines))
-        else:
+        reviewers = derive_reviewer_states(pr, state.reviews)
+        if not reviewers:
             reviewers_widget.update("[#6e738d]None yet[/]")
+            return
+
+        reviewers_widget.update(
+            "\n".join(self._format_reviewer_line(reviewer) for reviewer in reviewers)
+        )
+
+    def _format_reviewer_line(self, reviewer: ReviewerDisplayState) -> str:
+        name = (
+            reviewer.display_name if reviewer.is_team else f"@{reviewer.display_name}"
+        )
+        if reviewer.kind == "approved":
+            return f"[#a6da95]✓[/] {name}"
+        if reviewer.kind == "changes_requested":
+            return f"[#ed8796]●[/] {name}"
+        if reviewer.kind == "commented":
+            return f"[#6e738d]○[/] {name}"
+        if reviewer.kind == "dismissed":
+            return f"[#6e738d]—[/] {name}"
+        if reviewer.kind == "pending":
+            return f"[#6e738d]○[/] {name}"
+        return f"[#eed49f]●[/] {name}"
 
     def next_item(self) -> None:
         self.query_one(PRTimeline).next_item()
