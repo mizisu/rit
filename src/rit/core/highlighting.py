@@ -4,12 +4,17 @@ from collections.abc import Iterable
 
 from textual import highlight
 from textual.content import Content, Span
+from textual.highlight import HighlightTheme
 
+from rit.core.highlight_theme import RitHighlightTheme, RitLightHighlightTheme
 from rit.core.types import DiffLine, FileDiff
-from rit.core.highlight_theme import RitHighlightTheme
 
 
 _HIGHLIGHTER_PREWARMED = False
+
+
+def _syntax_theme_class(dark_mode: bool) -> type[HighlightTheme]:
+    return RitHighlightTheme if dark_mode else RitLightHighlightTheme
 
 
 def prewarm_highlighter() -> None:
@@ -20,12 +25,13 @@ def prewarm_highlighter() -> None:
 
     sample = "def warmup():\n    return 1\n"
     language = highlight.guess_language(sample, "warmup.py")
-    highlight.highlight(
-        sample,
-        language=language,
-        path="warmup.py",
-        theme=RitHighlightTheme,
-    )
+    for dark_mode in (True, False):
+        highlight.highlight(
+            sample,
+            language=language,
+            path="warmup.py",
+            theme=_syntax_theme_class(dark_mode),
+        )
     _HIGHLIGHTER_PREWARMED = True
 
 
@@ -48,11 +54,16 @@ def _collect_line_text(lines: Iterable[DiffLine]) -> tuple[list[str], list[str]]
 
 
 def _highlight_text_lines(
-    *, filename: str, old_lines_text: list[str], new_lines_text: list[str]
+    *,
+    filename: str,
+    old_lines_text: list[str],
+    new_lines_text: list[str],
+    dark_mode: bool = True,
 ) -> tuple[list[Content], list[Content]]:
     language = highlight.guess_language(
         "\n".join(old_lines_text or new_lines_text), filename
     )
+    theme = _syntax_theme_class(dark_mode)
 
     old_highlighted = Content.empty()
     if old_lines_text:
@@ -60,7 +71,7 @@ def _highlight_text_lines(
             "\n".join(old_lines_text),
             language=language,
             path=filename,
-            theme=RitHighlightTheme,
+            theme=theme,
         )
 
     new_highlighted = Content.empty()
@@ -69,7 +80,7 @@ def _highlight_text_lines(
             "\n".join(new_lines_text),
             language=language,
             path=filename,
-            theme=RitHighlightTheme,
+            theme=theme,
         )
 
     old_content_lines = old_highlighted.split("\n") if old_lines_text else []
@@ -78,12 +89,15 @@ def _highlight_text_lines(
     return old_content_lines, new_content_lines
 
 
-def highlight_diff(diff: FileDiff) -> tuple[list[Content], list[Content]]:
+def highlight_diff(
+    diff: FileDiff, *, dark_mode: bool = True
+) -> tuple[list[Content], list[Content]]:
     old_lines_text, new_lines_text = _collect_line_text(_iter_diff_lines(diff))
     return _highlight_text_lines(
         filename=diff.filename,
         old_lines_text=old_lines_text,
         new_lines_text=new_lines_text,
+        dark_mode=dark_mode,
     )
 
 
@@ -137,7 +151,12 @@ def _apply_highlighted_content_to_lines(
             new_idx += 1
 
 
-def highlight_lines_for_diff(diff: FileDiff, *, include_word_diff: bool = True) -> None:
+def highlight_lines_for_diff(
+    diff: FileDiff,
+    *,
+    include_word_diff: bool = True,
+    dark_mode: bool = True,
+) -> None:
     """Apply syntax highlighting to all lines in a FileDiff in-place."""
     lines = list(_iter_diff_lines(diff))
     old_lines_text, new_lines_text = _collect_line_text(lines)
@@ -145,6 +164,7 @@ def highlight_lines_for_diff(diff: FileDiff, *, include_word_diff: bool = True) 
         filename=diff.filename,
         old_lines_text=old_lines_text,
         new_lines_text=new_lines_text,
+        dark_mode=dark_mode,
     )
     _apply_highlighted_content_to_lines(
         lines,
@@ -160,6 +180,7 @@ def highlight_lines_for_diff_range(
     end_line: int,
     *,
     include_word_diff: bool = True,
+    dark_mode: bool = True,
 ) -> None:
     """Apply syntax highlighting to a contiguous diff-line window in-place."""
     if start_line > end_line:
@@ -178,6 +199,7 @@ def highlight_lines_for_diff_range(
         filename=diff.filename,
         old_lines_text=old_lines_text,
         new_lines_text=new_lines_text,
+        dark_mode=dark_mode,
     )
     _apply_highlighted_content_to_lines(
         selected_lines,

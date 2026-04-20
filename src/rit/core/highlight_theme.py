@@ -1,100 +1,123 @@
-"""Catppuccin Macchiato syntax highlighting theme.
-
-This module provides a HighlightTheme using exact Catppuccin Macchiato hex colors
-following the official style guide.
-
-Based on: https://github.com/catppuccin/catppuccin/blob/main/docs/style-guide.md
-"""
+"""Syntax highlighting themes for dark and light UI themes."""
 
 from textual.highlight import HighlightTheme, TokenType
 from pygments.token import Token
 
 
-class RitHighlightTheme(HighlightTheme):
-    """Syntax highlighting theme using official Catppuccin Macchiato colors.
-
-    Uses exact hex color values from the Catppuccin Macchiato palette,
-    ensuring perfect color accuracy matching the official Catppuccin style guide.
-
-    Color Palette:
-    - Mauve (#c6a0f6): Keywords
-    - Green (#a6da95): Strings
-    - Peach (#f5a97f): Numbers, Constants
-    - Yellow (#eed49f): Classes, Types
-    - Blue (#8aadf4): Functions, Methods
-    - Sky (#91d7e3): Operators
-    - Pink (#f5bde6): Escape sequences, Regex
-    - Red (#ed8796): Errors, Builtins
-    - Rosewater (#f4dbd6): Decorators
-    - Overlay2 (#939ab7): Comments, Punctuation
-    - Text (#cad3f5): Default text
-    """
-
-    STYLES: dict[TokenType, str] = {
-        Token.Keyword: "#c6a0f6",
-        Token.Keyword.Declaration: "#c6a0f6",
-        Token.Keyword.Namespace: "#c6a0f6",
-        Token.Keyword.Reserved: "#c6a0f6",
-        Token.Keyword.Type: "#eed49f",
-        Token.Keyword.Pseudo: "#f5bde6",
-        Token.Keyword.Constant: "#f5a97f",
-        Token.String: "#a6da95",
-        Token.Literal.String: "#a6da95",
-        Token.Literal.String.Single: "#a6da95",
-        Token.Literal.String.Double: "#a6da95",
-        Token.Literal.String.Doc: "#a6da95 italic",
-        Token.Literal.String.Heredoc: "#a6da95",
-        Token.Literal.String.Interpol: "#a6da95",
-        Token.Literal.String.Other: "#a6da95",
-        Token.Literal.String.Affix: "#a6da95",
-        Token.Literal.String.Char: "#a6da95",
-        Token.Literal.String.Delimiter: "#a6da95",
-        Token.Literal.String.Symbol: "#a6da95",
-        Token.Literal.String.Backtick: "#a6da95",
-        Token.Literal.String.Escape: "#f5bde6",
-        Token.Literal.String.Regex: "#f5bde6",
-        Token.Number: "#f5a97f",
-        Token.Literal.Number: "#f5a97f",
-        Token.Literal.Number.Integer: "#f5a97f",
-        Token.Literal.Number.Float: "#f5a97f",
-        Token.Literal.Number.Hex: "#f5a97f",
-        Token.Literal.Number.Bin: "#f5a97f",
-        Token.Literal.Number.Oct: "#f5a97f",
-        Token.Operator: "#91d7e3",
-        Token.Operator.Word: "#c6a0f6",
-        Token.Name.Function: "#8aadf4",
-        Token.Name.Function.Magic: "#8aadf4",
-        Token.Name.Class: "#eed49f",
-        Token.Name.Variable: "#cad3f5",
-        Token.Name.Variable.Class: "#cad3f5",
-        Token.Name.Variable.Global: "#cad3f5",
-        Token.Name.Variable.Instance: "#cad3f5",
-        Token.Name.Variable.Magic: "#cad3f5",
-        # Red (#ed8796) + italic - Builtins
-        Token.Name.Builtin: "#ed8796 italic",
-        Token.Name.Builtin.Pseudo: "#ed8796 italic",
-        Token.Name.Attribute: "#8aadf4",
-        Token.Name.Tag: "#8aadf4",
-        Token.Name.Decorator: "#f4dbd6",
-        Token.Name.Constant: "#f5a97f",
-        Token.Name.Exception: "#ed8796",
-        Token.Name.Label: "#b7bdf8",
-        Token.Name.Namespace: "#cad3f5",
-        Token.Name.Entity: "#cad3f5",
-        Token.Name: "#cad3f5",
-        Token.Comment: "#939ab7",
-        Token.Comment.Single: "#939ab7",
-        Token.Comment.Multiline: "#939ab7",
-        Token.Comment.Special: "#939ab7",
-        Token.Comment.Hashbang: "#939ab7",
-        Token.Comment.Preproc: "#f5bde6",
-        Token.Comment.PreprocFile: "#f5bde6",
-        Token.Punctuation: "#939ab7",
-        Token.Error: "#ed8796",
-        Token.Generic.Error: "#ed8796",
+def _build_theme_styles(
+    *,
+    mauve: str,
+    green: str,
+    peach: str,
+    yellow: str,
+    blue: str,
+    sky: str,
+    pink: str,
+    red: str,
+    rosewater: str,
+    overlay2: str,
+    text: str,
+) -> dict[TokenType, str]:
+    return {
+        Token.Keyword: mauve,
+        Token.Keyword.Declaration: mauve,
+        Token.Keyword.Namespace: mauve,
+        Token.Keyword.Reserved: mauve,
+        Token.Keyword.Type: yellow,
+        Token.Keyword.Pseudo: pink,
+        Token.Keyword.Constant: peach,
+        Token.String: green,
+        Token.Literal.String: green,
+        Token.Literal.String.Single: green,
+        Token.Literal.String.Double: green,
+        Token.Literal.String.Doc: f"{green} italic",
+        Token.Literal.String.Heredoc: green,
+        Token.Literal.String.Interpol: green,
+        Token.Literal.String.Other: green,
+        Token.Literal.String.Affix: green,
+        Token.Literal.String.Char: green,
+        Token.Literal.String.Delimiter: green,
+        Token.Literal.String.Symbol: green,
+        Token.Literal.String.Backtick: green,
+        Token.Literal.String.Escape: pink,
+        Token.Literal.String.Regex: pink,
+        Token.Number: peach,
+        Token.Literal.Number: peach,
+        Token.Literal.Number.Integer: peach,
+        Token.Literal.Number.Float: peach,
+        Token.Literal.Number.Hex: peach,
+        Token.Literal.Number.Bin: peach,
+        Token.Literal.Number.Oct: peach,
+        Token.Operator: sky,
+        Token.Operator.Word: mauve,
+        Token.Name.Function: blue,
+        Token.Name.Function.Magic: blue,
+        Token.Name.Class: yellow,
+        Token.Name.Variable: text,
+        Token.Name.Variable.Class: text,
+        Token.Name.Variable.Global: text,
+        Token.Name.Variable.Instance: text,
+        Token.Name.Variable.Magic: text,
+        Token.Name.Builtin: f"{red} italic",
+        Token.Name.Builtin.Pseudo: f"{red} italic",
+        Token.Name.Attribute: blue,
+        Token.Name.Tag: blue,
+        Token.Name.Decorator: rosewater,
+        Token.Name.Constant: peach,
+        Token.Name.Exception: red,
+        Token.Name.Label: mauve,
+        Token.Name.Namespace: text,
+        Token.Name.Entity: text,
+        Token.Name: text,
+        Token.Comment: overlay2,
+        Token.Comment.Single: overlay2,
+        Token.Comment.Multiline: overlay2,
+        Token.Comment.Special: overlay2,
+        Token.Comment.Hashbang: overlay2,
+        Token.Comment.Preproc: pink,
+        Token.Comment.PreprocFile: pink,
+        Token.Punctuation: overlay2,
+        Token.Error: red,
+        Token.Generic.Error: red,
         Token.Generic.Strong: "bold",
         Token.Generic.Emph: "italic",
-        Token.Generic.Heading: "#cad3f5 underline",
-        Token.Generic.Subheading: "#cad3f5",
+        Token.Generic.Heading: f"{text} underline",
+        Token.Generic.Subheading: text,
         Token.Whitespace: "",
     }
+
+
+class RitHighlightTheme(HighlightTheme):
+    """Dark syntax highlighting theme based on Catppuccin Macchiato."""
+
+    STYLES: dict[TokenType, str] = _build_theme_styles(
+        mauve="#c6a0f6",
+        green="#a6da95",
+        peach="#f5a97f",
+        yellow="#eed49f",
+        blue="#8aadf4",
+        sky="#91d7e3",
+        pink="#f5bde6",
+        red="#ed8796",
+        rosewater="#f4dbd6",
+        overlay2="#939ab7",
+        text="#cad3f5",
+    )
+
+
+class RitLightHighlightTheme(HighlightTheme):
+    """Light syntax highlighting theme based on Catppuccin Latte."""
+
+    STYLES: dict[TokenType, str] = _build_theme_styles(
+        mauve="#8839ef",
+        green="#40a02b",
+        peach="#fe640b",
+        yellow="#df8e1d",
+        blue="#1e66f5",
+        sky="#04a5e5",
+        pink="#ea76cb",
+        red="#d20f39",
+        rosewater="#dc8a78",
+        overlay2="#7c7f93",
+        text="#4c4f69",
+    )
