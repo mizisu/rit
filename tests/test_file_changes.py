@@ -5,6 +5,7 @@ import threading
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.signal import Signal
 
 from rit.core.diff import parse_patch
 from rit.state.models import PRFile

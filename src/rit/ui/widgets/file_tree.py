@@ -13,7 +13,7 @@ from textual.reactive import reactive, var
 from textual.widgets import Input, Static, Tree
 from textual.widgets.tree import TreeNode
 
-from rit.state.models import PRFile
+from rit.state.models import FileViewedState, PRFile
 from rit.ui.messages import Flash
 from rit.ui.protocols import NavigableProtocol
 
@@ -459,6 +459,14 @@ class FileTree(Vertical):
         color = status_colors.get(file.status, "white")
 
         text = Text()
+
+        if file.viewer_viewed_state == FileViewedState.VIEWED:
+            text.append("✓ ", style="green")
+        elif file.viewer_viewed_state == FileViewedState.DISMISSED:
+            text.append("! ", style="yellow")
+        else:
+            text.append("○ ", style="dim")
+
         text.append(f"{file.status_icon} ", style=color)
         text.append(name)
         text.append(f" +{file.additions}", style="green")
@@ -468,3 +476,14 @@ class FileTree(Vertical):
             text.append(f" [{len(file.comments)}]", style="cyan")
 
         return text
+
+    def update_view_state(self, filename: str) -> None:
+        """Re-render the label for a single file node (no tree rebuild)."""
+        node = self._file_nodes.get(filename)
+        if node is None:
+            return
+        file = next((f for f in self._all_files if f.filename == filename), None)
+        if file is None:
+            return
+        show_path = "/" not in filename
+        node.set_label(self._file_label(file, show_path=show_path))

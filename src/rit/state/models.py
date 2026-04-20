@@ -37,6 +37,12 @@ class ReviewState(Enum):
     DISMISSED = "DISMISSED"
 
 
+class FileViewedState(Enum):
+    UNVIEWED = "UNVIEWED"
+    VIEWED = "VIEWED"
+    DISMISSED = "DISMISSED"
+
+
 class PRUser(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -198,6 +204,9 @@ class PRFile(BaseModel):
     contents_url: str = Field(default="", alias="contentsUrl")
 
     comments: list[PRComment] = Field(default_factory=list, exclude=True)
+    viewer_viewed_state: FileViewedState = Field(
+        default=FileViewedState.UNVIEWED, exclude=True
+    )
 
     @property
     def display_name(self) -> str:

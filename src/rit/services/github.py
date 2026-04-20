@@ -157,6 +157,42 @@ query($owner: String!, $repo: String!, $number: Int!) {
 """
 
 
+_FILE_VIEW_STATES_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!, $after: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      files(first: 100, after: $after) {
+        nodes {
+          path
+          viewerViewedState
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
+        }
+      }
+    }
+  }
+}
+"""
+
+_MARK_FILE_VIEWED_MUTATION = """
+mutation($pullRequestId: ID!, $path: String!) {
+  markFileAsViewed(input: {pullRequestId: $pullRequestId, path: $path}) {
+    clientMutationId
+  }
+}
+"""
+
+_UNMARK_FILE_VIEWED_MUTATION = """
+mutation($pullRequestId: ID!, $path: String!) {
+  unmarkFileAsViewed(input: {pullRequestId: $pullRequestId, path: $path}) {
+    clientMutationId
+  }
+}
+"""
+
+
 class GitHubService:
     """Interacts with GitHub API via gh CLI."""
 
@@ -290,6 +326,85 @@ class GitHubService:
 
     async def unresolve_thread(self, thread_id: str) -> bool:
         return await self._set_thread_resolved(thread_id, resolve=False)
+
+    async def get_pr_file_view_states(self, pr_number: int) -> dict[str, str]:
+        """Fetch viewerViewedState for all files via paginated GraphQL."""
+        repo = await self.get_repo()
+        result: dict[str, str] = {}
+        cursor: str | None = None
+
+        while True:
+            args = [
+                "api",
+                "graphql",
+                "-f",
+                f"query={_FILE_VIEW_STATES_QUERY}",
+                "-F",
+                f"owner={repo.owner}",
+                "-F",
+                f"repo={repo.name}",
+                "-F",
+                f"number={pr_number}",
+            ]
+            if cursor:
+                args.extend(["-f", f"after={cursor}"])
+
+            output = await self._run_gh(args)
+            data = json.loads(output)
+
+            if "errors" in data:
+                raise GitHubError(f"GraphQL error: {data['errors']}")
+
+            pr_data = data.get("data", {}).get("repository", {}).get("pullRequest")
+            if not pr_data:
+                break
+
+            files_data = pr_data.get("files", {})
+            for node in files_data.get("nodes", []):
+                result[node["path"]] = node["viewerViewedState"]
+
+            page_info = files_data.get("pageInfo", {})
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+
+        return result
+
+    async def mark_file_as_viewed(self, pull_request_id: str, path: str) -> None:
+        """Mark a file as viewed via GraphQL mutation."""
+        result = await self._run_gh(
+            [
+                "api",
+                "graphql",
+                "-f",
+                f"query={_MARK_FILE_VIEWED_MUTATION}",
+                "-F",
+                f"pullRequestId={pull_request_id}",
+                "-f",
+                f"path={path}",
+            ]
+        )
+        data = json.loads(result)
+        if "errors" in data:
+            raise GitHubError(f"Failed to mark file as viewed: {data['errors']}")
+
+    async def unmark_file_as_viewed(self, pull_request_id: str, path: str) -> None:
+        """Unmark a file as viewed via GraphQL mutation."""
+        result = await self._run_gh(
+            [
+                "api",
+                "graphql",
+                "-f",
+                f"query={_UNMARK_FILE_VIEWED_MUTATION}",
+                "-F",
+                f"pullRequestId={pull_request_id}",
+                "-f",
+                f"path={path}",
+            ]
+        )
+        data = json.loads(result)
+        if "errors" in data:
+            raise GitHubError(f"Failed to unmark file as viewed: {data['errors']}")
 
     async def _run_gh(self, args: list[str]) -> str:
         cmd = ["gh", *args]

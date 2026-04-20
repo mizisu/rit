@@ -30,8 +30,6 @@ class RitApp(App):
         Binding("q", "quit", "Quit", show=False),
         Binding("f2", "settings", "Settings", show=False),
         Binding("o", "open_pr", "Open PR", tooltip="Open PR in web browser"),
-        Binding("L", "next_tab", "Next Tab", show=False),
-        Binding("H", "prev_tab", "Prev Tab", show=False),
     ]
 
     _settings_dict: var[dict] = var({})

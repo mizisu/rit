@@ -1,18 +1,21 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import os
+import subprocess
+from pathlib import Path
 
-from textual import getters, on, work
+from textual import events, getters, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
-from textual.message import Message
 from textual.reactive import reactive
 from textual.screen import Screen
-from textual.widgets import Footer, Static, TabbedContent, TabPane, Tree
+from textual.widgets import Footer, Input, TabbedContent, TabPane, Tree
 from textual.worker import Worker, WorkerState
 
 from rit.app import RitApp
+from rit.state.models import FileViewedState
 from rit.state.store import PRStore
 from rit.ui.components.file_changes import FileChanges
 from rit.ui.components.pr_info import PRInfo
@@ -28,6 +31,60 @@ _TAB_GROUP = Binding.Group("Move Tab", compact=True)
 
 _TAB_IDS = ("pr-info", "files")
 _TAB_INDEX_BY_ID = {tab_id: index for index, tab_id in enumerate(_TAB_IDS)}
+_SUBPROCESS_ERRORS = (OSError, subprocess.CalledProcessError)
+
+
+def _resolve_repo_root() -> Path | None:
+    if configured_root := os.environ.get("RIT_REPO_PATH"):
+        return Path(configured_root).expanduser()
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except _SUBPROCESS_ERRORS:
+        return None
+
+    repo_root = result.stdout.strip()
+    return Path(repo_root) if repo_root else None
+
+
+def _open_in_parent_nvim(path: Path, *, line: int, column: int) -> None:
+    server = os.environ.get("NVIM") or os.environ.get("NVIM_LISTEN_ADDRESS")
+    if not server:
+        raise RuntimeError("Parent Neovim server not available")
+
+    target_path = json.dumps(str(path))
+    target_line = max(1, line)
+    target_column = max(0, column - 1)
+    remote_command = (
+        "<C-\\><C-N>:lua "
+        f"local path = {target_path}; "
+        f"local target_line = {target_line}; "
+        f"local target_column = {target_column}; "
+        "local origin = vim.api.nvim_get_current_win(); "
+        "local origin_cfg = vim.api.nvim_win_get_config(origin); "
+        "vim.cmd('tabnew'); "
+        "vim.cmd('edit ' .. vim.fn.fnameescape(path)); "
+        "local last_line = math.max(1, vim.api.nvim_buf_line_count(0)); "
+        "local line_number = math.min(target_line, last_line); "
+        "local line_text = vim.api.nvim_buf_get_lines(0, line_number - 1, line_number, true)[1] or ''; "
+        "local column_number = math.min(target_column, #line_text); "
+        "vim.api.nvim_win_set_cursor(0, { line_number, column_number }); "
+        "vim.cmd('normal! zz'); "
+        "if origin_cfg.relative ~= '' and vim.api.nvim_win_is_valid(origin) then vim.api.nvim_win_close(origin, true) end"
+        "<CR>"
+    )
+
+    subprocess.run(
+        ["nvim", "--server", server, "--remote-send", remote_command],
+        check=True,
+        capture_output=True,
+    )
+
 
 _COMMON_BINDINGS = [
     Binding("ctrl+d", "scroll_half_page_down", "Half Page Down", show=False),
@@ -37,6 +94,15 @@ _COMMON_BINDINGS = [
     Binding("ctrl+b", "copy_branch", "Copy Branch", show=False),
     Binding("enter", "toggle_item", "Toggle", show=False),
     Binding("space", "toggle_item", "Toggle", show=False),
+    Binding(
+        "tab",
+        "next_tab",
+        "Move Tab",
+        key_display="tab/shift+tab",
+        group=_TAB_GROUP,
+        priority=True,
+    ),
+    Binding("shift+tab", "prev_tab", "", group=_TAB_GROUP, show=False, priority=True),
 ]
 
 
@@ -48,16 +114,18 @@ _PR_INFO_BINDINGS = [
     ),
     Binding("K", "prev_comment", "", group=_COMMENT_GROUP, show=False),
     Binding("r", "toggle_resolve", "Resolve", tooltip="Toggle thread resolution"),
-    Binding("L", "next_tab", "Move Tab", key_display="shift+l/h", group=_TAB_GROUP),
-    Binding("H", "prev_tab", "", group=_TAB_GROUP, show=False),
 ]
 
 _FILES_BINDINGS = [
-    Binding("tab", "switch_pane", "Next Pane", group=_NAVIGATION_GROUP),
     Binding(
-        "shift+tab", "switch_pane", "Prev Pane", group=_NAVIGATION_GROUP, show=False
+        "H",
+        "focus_left",
+        "Move Focus",
+        key_display="shift+h/l",
+        group=_NAVIGATION_GROUP,
     ),
-    Binding("e", "focus_file_tree", "Explorer", group=_NAVIGATION_GROUP),
+    Binding("L", "focus_right", "", group=_NAVIGATION_GROUP, show=False),
+    Binding("e", "open_file_in_editor", "Edit", group=_FILE_GROUP),
     Binding(
         "E",
         "toggle_file_tree",
@@ -78,8 +146,7 @@ _FILES_BINDINGS = [
     ),
     Binding("{", "prev_comment", "", group=_COMMENT_GROUP, show=False),
     Binding("r", "toggle_resolve_file", "Resolve", group=_COMMENT_GROUP),
-    Binding("L", "next_tab", "Move Tab", key_display="shift+l/h", group=_TAB_GROUP),
-    Binding("H", "prev_tab", "", group=_TAB_GROUP, show=False),
+    Binding("m", "toggle_file_viewed", "Mark Viewed", group=_FILE_GROUP),
 ]
 
 
@@ -130,6 +197,8 @@ class MainScreen(Screen):
     async def _load_data(self) -> None:
         await self.store.load_all()
         self._update_ui_after_load()
+        await self.store.load_file_view_states()
+        self._apply_viewed_states()
 
     def _update_ui_after_load(self) -> None:
         state = self.store.state
@@ -309,11 +378,14 @@ class MainScreen(Screen):
         if self.current_tab == 0:
             thread_info = self.pr_info.get_current_thread_info()
             if thread_info:
-                self._toggle_resolve()
+                self.run_worker(
+                    self._toggle_resolve(),
+                    exclusive=False,
+                    name="_toggle_resolve",
+                )
             else:
                 self.notify("No thread selected", severity="warning")
 
-    @work
     async def _toggle_resolve(self) -> tuple[bool, bool]:
         return await self.pr_info.toggle_resolve()
 
@@ -328,28 +400,130 @@ class MainScreen(Screen):
                 if not success:
                     self.notify("Failed to toggle resolve status", severity="error")
 
-    def action_switch_pane(self) -> None:
-        if self.current_tab == 1:
-            try:
-                tree = self.query_one("#file-tree")
-                if tree.has_focus:
-                    self.query_one("#diff-view-main").focus()
-                else:
-                    tree.focus()
-            except Exception:
-                pass
+    def on_key(self, event: events.Key) -> None:
+        if isinstance(self.focused, Input):
+            return
+        if event.key == "tab":
+            self.next_tab()
+            event.stop()
+            event.prevent_default()
+            return
+        if event.key == "shift+tab":
+            self.prev_tab()
+            event.stop()
+            event.prevent_default()
 
-    def action_focus_file_tree(self) -> None:
-        if self.current_tab == 1:
-            try:
-                tree = self.file_changes.file_tree.query_one("#file-tree")
-                if tree.has_focus:
-                    self.file_changes.diff_view.focus()
-                    return
-            except Exception:
-                pass
-            self.file_changes.show_file_tree()
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action in {
+            "next_tab",
+            "prev_tab",
+            "focus_left",
+            "focus_right",
+        } and isinstance(self.focused, Input):
+            return False
+        return super().check_action(action, parameters)
+
+    def _current_files_focus_target(self) -> str | None:
+        if self.current_tab != 1:
+            return None
+
+        diff_view = self.file_changes.diff_view
+        if diff_view.has_focus:
+            return diff_view.active_pane if diff_view.split else "diff"
+
+        try:
+            tree = self.file_changes.file_tree.query_one("#file-tree", Tree)
+        except Exception:
+            return None
+        return "tree" if tree.has_focus else None
+
+    def action_focus_left(self) -> None:
+        target = self._current_files_focus_target()
+        if target is None:
+            return
+
+        diff_view = self.file_changes.diff_view
+        if target == "new":
+            diff_view.active_pane = "old"
+            diff_view.focus()
+            return
+
+        if target in {"old", "diff"} and self.file_changes.file_tree.display:
             self._focus_files_tree()
+
+    def action_focus_right(self) -> None:
+        target = self._current_files_focus_target()
+        if target is None:
+            return
+
+        diff_view = self.file_changes.diff_view
+        if target == "tree":
+            if diff_view.split:
+                diff_view.active_pane = "old"
+            diff_view.focus()
+            return
+
+        if target == "old" and diff_view.split:
+            diff_view.active_pane = "new"
+            diff_view.focus()
+
+    def action_open_file_in_editor(self) -> None:
+        if self.current_tab != 1:
+            return
+
+        filename = (
+            self.file_changes.diff_view.current_file or self.store.state.selected_file
+        )
+        if not filename:
+            self.post_message(Flash("No file selected", style="warning", duration=2.0))
+            return
+
+        repo_root = _resolve_repo_root()
+        if repo_root is None:
+            self.post_message(
+                Flash(
+                    "Could not determine local repository path",
+                    style="warning",
+                    duration=3.0,
+                )
+            )
+            return
+
+        path = repo_root / filename
+        if not path.exists():
+            self.post_message(
+                Flash(
+                    f"Local file not found: {filename}", style="warning", duration=3.0
+                )
+            )
+            return
+
+        current_line = self.file_changes.diff_view._current_line()
+        line = current_line.new_line_no if current_line else None
+        if line is None and current_line is not None:
+            line = current_line.old_line_no
+        column = self.file_changes.diff_view.cursor_column + 1
+
+        try:
+            _open_in_parent_nvim(
+                path,
+                line=line or 1,
+                column=max(1, column),
+            )
+        except RuntimeError:
+            self.post_message(
+                Flash(
+                    "Open in editor requires running rit inside Neovim terminal",
+                    style="warning",
+                    duration=3.0,
+                )
+            )
+            return
+        except _SUBPROCESS_ERRORS:
+            self.post_message(
+                Flash("Failed to open file in Neovim", style="error", duration=3.0)
+            )
+            return
 
     def action_toggle_file_tree(self) -> None:
         if self.current_tab == 1:
@@ -418,3 +592,83 @@ class MainScreen(Screen):
         self.app.post_message(
             Flash("No more files with comments", style="warning", duration=2.0)
         )
+
+    def _apply_viewed_states(self) -> None:
+        """Refresh tree and diff header after background viewed-state load."""
+        self.file_changes.file_tree.refresh_files()
+        self.file_changes.diff_view.refresh_header()
+
+    def _resolve_file_view_target(self) -> str | None:
+        diff_view = self.file_changes.diff_view
+        if diff_view.has_focus and diff_view.current_file:
+            return diff_view.current_file
+
+        file_tree = self.file_changes.file_tree
+        tree = file_tree.query_one("#file-tree", Tree)
+        search = file_tree.query_one("#file-search", Input)
+        if tree.has_focus or search.has_focus:
+            node = tree.cursor_node
+            if node is not None and node.data:
+                return node.data
+
+        return self.store.state.selected_file or diff_view.current_file
+
+    def action_toggle_file_viewed(self) -> None:
+        if self.current_tab != 1:
+            return
+        filename = self._resolve_file_view_target()
+        if not filename:
+            self.post_message(Flash("No file selected", style="warning", duration=2.0))
+            return
+
+        file = next((f for f in self.store.state.files if f.filename == filename), None)
+        if file is None:
+            return
+
+        if self.store.state.pr is None:
+            self.post_message(Flash("PR not loaded yet", style="warning", duration=2.0))
+            return
+
+        old_state = file.viewer_viewed_state
+        new_state = (
+            FileViewedState.UNVIEWED
+            if old_state == FileViewedState.VIEWED
+            else FileViewedState.VIEWED
+        )
+
+        file.viewer_viewed_state = new_state
+        self.file_changes.update_file_view_state(filename)
+
+        self.run_worker(
+            self._sync_file_viewed(filename, old_state, new_state),
+            exclusive=False,
+            name="sync-file-viewed",
+        )
+
+    async def _sync_file_viewed(
+        self,
+        filename: str,
+        old_state: FileViewedState,
+        new_state: FileViewedState,
+    ) -> None:
+        try:
+            await self.store.set_file_viewed(
+                filename, viewed=new_state == FileViewedState.VIEWED
+            )
+            label = "Viewed" if new_state == FileViewedState.VIEWED else "Unviewed"
+            self.post_message(Flash(f"Marked {label}", style="success", duration=1.5))
+        except Exception:
+            file = next(
+                (f for f in self.store.state.files if f.filename == filename),
+                None,
+            )
+            if file:
+                file.viewer_viewed_state = old_state
+            self.file_changes.update_file_view_state(filename)
+            self.post_message(
+                Flash(
+                    "Failed to update viewed state",
+                    style="error",
+                    duration=3.0,
+                )
+            )

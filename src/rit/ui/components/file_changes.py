@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, cast
 
 from textual import getters, on
 from textual.app import ComposeResult
@@ -78,11 +78,49 @@ class FileChanges(Horizontal):
         yield DiffView(store=self.store, id="diff-view-main")
         yield GhostHandle(id="ghost-handle")
 
+    def on_mount(self) -> None:
+        self._apply_diff_settings_from_app()
+        signal = getattr(self.app, "settings_changed_signal", None)
+        if signal is not None:
+            signal.subscribe(self, self._on_settings_changed)
+
+    def on_unmount(self) -> None:
+        signal = getattr(self.app, "settings_changed_signal", None)
+        if signal is not None:
+            signal.unsubscribe(self)
+
     def watch_sidebar_width(self, width: int) -> None:
         try:
             self.file_tree.styles.width = width
         except Exception:
             pass
+
+    def _apply_diff_settings_from_app(self) -> None:
+        settings = getattr(self.app, "settings", None)
+        if settings is None:
+            return
+
+        self._apply_setting("ui.diff_mode", settings.diff_mode)
+        self._apply_setting("ui.show_line_numbers", settings.show_line_numbers)
+        self._apply_setting("ui.word_diff", settings.word_diff)
+
+    def _on_settings_changed(self, data: tuple[str, object, object | None]) -> None:
+        key, value, _old_value = data
+        self._apply_setting(key, value)
+
+    def _apply_setting(self, key: str, value: object) -> None:
+        if (
+            key == "ui.diff_mode"
+            and isinstance(value, str)
+            and value in {"auto", "split", "unified"}
+        ):
+            self.diff_view.mode = cast(Literal["auto", "split", "unified"], value)
+        elif key == "ui.show_line_numbers" and isinstance(value, bool):
+            self.diff_view.show_line_numbers = value
+        elif key == "ui.word_diff" and isinstance(value, bool):
+            self.diff_view.word_diff_enabled = value
+        elif key == "ui.theme" and isinstance(value, str):
+            self.diff_view.refresh_syntax_theme()
 
     def refresh_files(self) -> None:
         self.file_tree.refresh_files()
@@ -243,6 +281,12 @@ class FileChanges(Horizontal):
 
     def action_collapse_sidebar(self) -> None:
         self._update_sidebar_width(self.sidebar_width - 2)
+
+    def update_file_view_state(self, filename: str) -> None:
+        """Update viewed badge for a single file (no full tree rebuild)."""
+        self.file_tree.update_view_state(filename)
+        if self.diff_view.current_file == filename:
+            self.diff_view.refresh_header()
 
     def _update_sidebar_width(self, new_width: int) -> None:
         MIN_WIDTH = 20

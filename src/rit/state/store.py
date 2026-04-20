@@ -10,6 +10,7 @@ from rit.core.types import FileDiff
 from rit.services.github import GitHubService, ReviewThreadInfo
 from rit.state.models import (
     PR,
+    FileViewedState,
     LoadingState,
     PRComment,
     PRFile,
@@ -257,6 +258,30 @@ class PRStore:
                 )
             )
         return result
+
+    async def load_file_view_states(self) -> None:
+        """Load viewed states from GitHub. Non-critical — failures are silently ignored."""
+        try:
+            states = await self._service.get_pr_file_view_states(self.pr_number)
+            for file in self._state.files:
+                raw = states.get(file.filename)
+                if raw:
+                    try:
+                        file.viewer_viewed_state = FileViewedState(raw)
+                    except ValueError:
+                        pass
+        except Exception:
+            pass
+
+    async def set_file_viewed(self, filename: str, *, viewed: bool) -> None:
+        """Sync viewed state to GitHub."""
+        pr = self._state.pr
+        if pr is None:
+            return
+        if viewed:
+            await self._service.mark_file_as_viewed(pr.node_id, filename)
+        else:
+            await self._service.unmark_file_as_viewed(pr.node_id, filename)
 
     def _update_thread_resolved_state(
         self, root_comment_id: int, *, is_resolved: bool
