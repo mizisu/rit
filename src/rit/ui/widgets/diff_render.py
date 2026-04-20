@@ -821,93 +821,167 @@ def _build_split_prefix(
     line_no: int | None,
     prefix: str,
     *,
+    side: Literal["old", "new"],
     line_index: int,
 ) -> Content:
     parts: list[Content] = []
     if view.show_line_numbers:
         line_text = str(line_no) if line_no is not None else ""
-        parts.append(Content.styled(f"{line_text:>4} ", "$text-disabled"))
+        line_width = (
+            _old_line_number_width(view)
+            if side == "old"
+            else _new_line_number_width(view)
+        )
+        parts.append(Content.styled(f"{line_text:>{line_width}} ", "$text-disabled"))
     parts.append(Content(prefix + " "))
     return Content("").join(parts)
 
 
-def _render_line_split(view: DiffView, line: DiffLine) -> Horizontal:
-    if line.is_deleted or line.is_modified:
-        left_prefix = _build_split_prefix(
-            view,
-            line.old_line_no,
-            "-" if line.is_deleted or line.is_modified else " ",
-            line_index=line.line_index,
-        )
-        left_content = (
-            line.highlighted_old_content
-            if line.highlighted_old_content
-            else Content(line.old_content)
-        )
-        left_classes = "code-content -old-side"
+def _build_split_prefix_content(
+    view: DiffView,
+    line: DiffLine,
+    *,
+    side: Literal["old", "new"],
+) -> Content:
+    if side == "old":
+        prefix = "-" if line.is_deleted or line.is_modified else " "
+        line_no = line.old_line_no
+    else:
+        prefix = "+" if line.is_added or line.is_modified else " "
+        line_no = line.new_line_no
+
+    return _build_split_prefix(
+        view,
+        line_no,
+        prefix,
+        side=side,
+        line_index=line.line_index,
+    )
+
+
+def _split_code_classes(
+    line: DiffLine,
+    *,
+    side: Literal["old", "new"],
+) -> str:
+    classes = f"code-content -{side}-side"
+
+    if side == "old":
         if line.is_deleted or line.is_modified:
-            left_classes += " -removed"
+            classes += " -removed"
+        if line.is_added:
+            classes += " -placeholder"
     else:
-        left_prefix = _build_split_prefix(
-            view,
-            line.old_line_no,
-            " ",
-            line_index=line.line_index,
-        )
-        left_content = line.highlighted_old_content or Content(line.old_content)
-        left_classes = "code-content -old-side"
-
-    if line.is_added or line.is_modified:
-        right_prefix = _build_split_prefix(
-            view,
-            line.new_line_no,
-            "+" if line.is_added or line.is_modified else " ",
-            line_index=line.line_index,
-        )
-        right_content = (
-            line.highlighted_new_content
-            if line.highlighted_new_content
-            else Content(line.new_content)
-        )
-        right_classes = "code-content -new-side"
         if line.is_added or line.is_modified:
-            right_classes += " -added"
-    else:
-        right_prefix = _build_split_prefix(
-            view,
-            line.new_line_no,
-            " ",
-            line_index=line.line_index,
-        )
-        right_content = line.highlighted_new_content or Content(line.new_content)
-        right_classes = "code-content -new-side"
+            classes += " -added"
+        if line.is_deleted:
+            classes += " -placeholder"
 
-    if line.is_added:
-        left_content = Content(" ")
-        left_classes += " -placeholder"
-    if line.is_deleted:
-        right_content = Content(" ")
-        right_classes += " -placeholder"
+    return classes
+
+
+def _build_split_code_content(
+    view: DiffView,
+    line: DiffLine,
+    *,
+    side: Literal["old", "new"],
+    placeholder_when_missing: bool,
+) -> Content | None:
+    text = line.old_content if side == "old" else line.new_content
+    if not text:
+        if placeholder_when_missing:
+            return _split_placeholder_content(view)
+        return None
+
+    spec = view._compute_selection_spec_for_line(line.line_index)
+    has_cursor = line.line_index == view.cursor_line and view.active_pane == side
+    cursor_col = view.cursor_column if has_cursor else None
+
+    if spec is not None:
+        sel_start, sel_end, _ = spec
+        actual_end = sel_end if sel_end is not None else max(0, len(text) - 1)
+        return view._build_code_content_with_selection(
+            line,
+            has_cursor,
+            cursor_col,
+            sel_start,
+            actual_end,
+            side=side,
+        )
+
+    return view._build_code_content_with_cursor(
+        line,
+        has_cursor,
+        cursor_col,
+        side=side,
+    )
+
+
+def _render_line_split(
+    view: DiffView,
+    line: DiffLine,
+    *,
+    old_code_width: int | None = None,
+    new_code_width: int | None = None,
+) -> Horizontal:
+    left_prefix = _build_split_prefix_content(view, line, side="old")
+    left_content = _build_split_code_content(
+        view,
+        line,
+        side="old",
+        placeholder_when_missing=True,
+    )
+    if left_content is None:
+        left_content = Content.empty()
+    left_classes = _split_code_classes(line, side="old")
+
+    right_prefix = _build_split_prefix_content(view, line, side="new")
+    right_content = _build_split_code_content(
+        view,
+        line,
+        side="new",
+        placeholder_when_missing=True,
+    )
+    if right_content is None:
+        right_content = Content.empty()
+    right_classes = _split_code_classes(line, side="new")
 
     left_prefix_widget = Static(left_prefix, classes="line-prefix")
+    left_prefix_widget.styles.width = _split_prefix_width_for_layout(view, "old")
     left_code_widget = Static(left_content, classes=left_classes)
+    if old_code_width is not None:
+        left_code_widget.styles.width = old_code_width
+    left_scroll = SyncedCodeScroll(
+        left_code_widget,
+        classes="split-code-scroll -old-side",
+        on_scroll_x=view._sync_split_horizontal_scroll,
+    )
     left_row = Horizontal(
         left_prefix_widget,
-        left_code_widget,
+        left_scroll,
         classes="split-pane split-pane-left",
         id=f"line-{line.line_index}-old",
     )
 
     right_prefix_widget = Static(right_prefix, classes="line-prefix")
+    right_prefix_widget.styles.width = _split_prefix_width_for_layout(view, "new")
     right_code_widget = Static(right_content, classes=right_classes)
+    if new_code_width is not None:
+        right_code_widget.styles.width = new_code_width
+    right_scroll = SyncedCodeScroll(
+        right_code_widget,
+        classes="split-code-scroll -new-side",
+        on_scroll_x=view._sync_split_horizontal_scroll,
+    )
     right_row = Horizontal(
         right_prefix_widget,
-        right_code_widget,
+        right_scroll,
         classes="split-pane split-pane-right",
         id=f"line-{line.line_index}-new",
     )
 
     view._register_code_widgets(line.line_index, left_code_widget, right_code_widget)
+    view._register_split_scroll_widgets(line.line_index, left_scroll, right_scroll)
     container = Horizontal(
         left_row,
         right_row,
@@ -924,24 +998,45 @@ def _render_line_split(view: DiffView, line: DiffLine) -> Horizontal:
 # ---------------------------------------------------------------------------
 
 
-def _render_modified_line(view: DiffView, line: DiffLine) -> Vertical:
-    old_prefix_parts: list[Content] = []
+def _build_unified_modified_prefix_content(
+    view: DiffView,
+    line: DiffLine,
+    *,
+    side: Literal["old", "new"],
+) -> Content:
+    prefix_parts: list[Content] = []
     if view.show_line_numbers:
-        old_prefix_parts.append(
-            Content.styled(f"{line.old_line_no:>4} ", "$text-disabled")
-        )
-        old_prefix_parts.append(Content.styled("     ", "$text-disabled"))
-    old_prefix_parts.append(Content("- "))
-    old_prefix_content = Content("").join(old_prefix_parts)
+        old_width = _old_line_number_width(view)
+        new_width = _new_line_number_width(view)
+        if side == "old":
+            prefix_parts.append(
+                Content.styled(f"{line.old_line_no:>{old_width}} ", "$text-disabled")
+            )
+            prefix_parts.append(Content.styled(" " * (new_width + 1), "$text-disabled"))
+        else:
+            prefix_parts.append(Content.styled(" " * (old_width + 1), "$text-disabled"))
+            prefix_parts.append(
+                Content.styled(f"{line.new_line_no:>{new_width}} ", "$text-disabled")
+            )
+    prefix_parts.append(Content("- " if side == "old" else "+ "))
+    return Content("").join(prefix_parts)
 
-    old_code_content = (
-        line.highlighted_old_content
-        if line.highlighted_old_content
-        else Content(line.old_content)
+
+def _render_modified_line(view: DiffView, line: DiffLine) -> Vertical:
+    old_prefix_content = _build_unified_modified_prefix_content(
+        view,
+        line,
+        side="old",
     )
 
+    old_code_content = _build_unified_code_content(view, line, side="old")
+
     old_prefix_widget = Static(old_prefix_content, classes="line-prefix")
-    old_code_widget = Static(old_code_content, classes="code-content -removed")
+    old_prefix_widget.styles.width = _unified_prefix_width_for_layout(view)
+    old_code_widget = Static(
+        old_code_content,
+        classes=_unified_code_classes(line, side="old"),
+    )
     old_horizontal = Horizontal(
         old_prefix_widget,
         old_code_widget,
@@ -949,23 +1044,20 @@ def _render_modified_line(view: DiffView, line: DiffLine) -> Vertical:
         id=f"line-{line.line_index}-old",
     )
 
-    new_prefix_parts: list[Content] = []
-    if view.show_line_numbers:
-        new_prefix_parts.append(Content.styled("     ", "$text-disabled"))
-        new_prefix_parts.append(
-            Content.styled(f"{line.new_line_no:>4} ", "$text-disabled")
-        )
-    new_prefix_parts.append(Content("+ "))
-    new_prefix_content = Content("").join(new_prefix_parts)
-
-    new_code_content = (
-        line.highlighted_new_content
-        if line.highlighted_new_content
-        else Content(line.new_content)
+    new_prefix_content = _build_unified_modified_prefix_content(
+        view,
+        line,
+        side="new",
     )
 
+    new_code_content = _build_unified_code_content(view, line, side="new")
+
     new_prefix_widget = Static(new_prefix_content, classes="line-prefix")
-    new_code_widget = Static(new_code_content, classes="code-content -added")
+    new_prefix_widget.styles.width = _unified_prefix_width_for_layout(view)
+    new_code_widget = Static(
+        new_code_content,
+        classes=_unified_code_classes(line, side="new"),
+    )
     new_horizontal = Horizontal(
         new_prefix_widget,
         new_code_widget,
