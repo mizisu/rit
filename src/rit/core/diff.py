@@ -469,7 +469,7 @@ def compute_line_diff(old_lines: list[str], new_lines: list[str]) -> list[DiffLi
                         )
                     )
                     old_line_no += 1
-                else:
+                elif new_text is not None:
                     result.append(
                         DiffLine(
                             old_line_no=None,

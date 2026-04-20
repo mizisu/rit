@@ -1,6 +1,5 @@
 """Tests for diff algorithm."""
 
-import pytest
 from rit.core.diff import parse_patch, compute_word_diff, compute_line_diff
 from rit.core.highlighting import highlight_lines_for_diff_range
 from rit.core.types import SegmentType
