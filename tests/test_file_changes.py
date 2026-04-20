@@ -13,6 +13,132 @@ from rit.state.store import PRStore
 from rit.ui.components.file_changes import FileChanges
 
 
+class DummySettings:
+    def __init__(
+        self,
+        *,
+        diff_mode: str = "auto",
+        show_line_numbers: bool = True,
+        word_diff: bool = True,
+        theme: str = "catppuccin-macchiato",
+    ) -> None:
+        self.diff_mode = diff_mode
+        self.show_line_numbers = show_line_numbers
+        self.word_diff = word_diff
+        self.theme = theme
+
+
+@pytest.mark.asyncio
+async def test_file_changes_applies_initial_diff_settings_from_app() -> None:
+    store = PRStore()
+
+    class TestApp(App):
+        def __init__(self) -> None:
+            super().__init__()
+            self.settings = DummySettings(
+                diff_mode="unified",
+                show_line_numbers=False,
+                word_diff=False,
+            )
+            self.settings_changed_signal = Signal(self, "settings-changed")
+
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        await pilot.pause()
+
+        assert file_changes.diff_view.mode == "unified"
+        assert file_changes.diff_view.show_line_numbers is False
+        assert file_changes.diff_view.word_diff_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_file_changes_updates_diff_settings_from_app_signal() -> None:
+    store = PRStore()
+
+    class TestApp(App):
+        def __init__(self) -> None:
+            super().__init__()
+            self.settings = DummySettings()
+            self.settings_changed_signal = Signal(self, "settings-changed")
+
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        await pilot.pause()
+
+        app.settings_changed_signal.publish(("ui.diff_mode", "split", "auto"))
+        app.settings_changed_signal.publish(("ui.show_line_numbers", False, True))
+        app.settings_changed_signal.publish(("ui.word_diff", False, True))
+        await pilot.pause()
+        await pilot.pause()
+
+        assert file_changes.diff_view.mode == "split"
+        assert file_changes.diff_view.show_line_numbers is False
+        assert file_changes.diff_view.word_diff_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_theme_change_rehighlights_current_diff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch = "@@ -1,2 +1,2 @@\n-old\n+new"
+
+    store = PRStore()
+    store.state.file_diffs = {"one.py": parse_patch(patch, "one.py")}
+
+    class TestApp(App):
+        def __init__(self) -> None:
+            super().__init__()
+            self.settings = DummySettings(theme="dracula")
+            self.settings_changed_signal = Signal(self, "settings-changed")
+            self.theme = "dracula"
+
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+
+    import rit.ui.widgets.diff_highlight as diff_highlight_module
+
+    calls = {"count": 0}
+    original = diff_highlight_module.highlight_lines_for_diff
+
+    def counted_highlight(*args, **kwargs):
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(
+        diff_highlight_module,
+        "highlight_lines_for_diff",
+        counted_highlight,
+    )
+
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        diff = store.state.file_diffs["one.py"]
+
+        await file_changes.diff_view.show_diff("one.py", diff)
+        await pilot.pause()
+        await pilot.pause()
+
+        baseline_calls = calls["count"]
+        assert baseline_calls >= 1
+
+        app.theme = "textual-light"
+        app.settings_changed_signal.publish(("ui.theme", "textual-light", "dracula"))
+        await pilot.pause()
+        await pilot.pause()
+
+        assert calls["count"] == baseline_calls + 1
+
+
 @pytest.mark.asyncio
 async def test_rapid_file_tree_selection_coalesces_to_latest_pending_diff() -> None:
     """Rapid file-tree selection should skip intermediate pending diff renders."""
