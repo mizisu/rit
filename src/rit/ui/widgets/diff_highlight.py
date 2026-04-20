@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
-from textual import work
 
 from rit.core.highlighting import (
     highlight_lines_for_diff,
@@ -18,11 +17,21 @@ from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_virtual as _virtual
 
 if TYPE_CHECKING:
-    from rit.ui.widgets.diff_view import DiffView
+    pass
 
 
 async def _prewarm_highlighter(view) -> None:
     await asyncio.to_thread(prewarm_highlighter)
+
+
+def _current_highlight_dark_mode(view) -> bool:
+    try:
+        theme = view.app.available_themes.get(view.app.theme)
+    except Exception:
+        return True
+    if theme is None:
+        return True
+    return theme.dark
 
 
 def _effective_window_highlight_buffer(view) -> int:
@@ -32,18 +41,29 @@ def _effective_window_highlight_buffer(view) -> int:
 
 
 def _highlight_cache_key(
-    view, diff: FileDiff, use_word_diff: bool | None = None
-) -> tuple[int, bool]:
+    view,
+    diff: FileDiff,
+    use_word_diff: bool | None = None,
+    dark_mode: bool | None = None,
+) -> tuple[int, bool, bool]:
     return (
         id(diff),
         view.word_diff_enabled if use_word_diff is None else use_word_diff,
+        _current_highlight_dark_mode(view) if dark_mode is None else dark_mode,
     )
 
 
 def _has_highlighted_diff(
-    view, diff: FileDiff, *, use_word_diff: bool | None = None
+    view,
+    diff: FileDiff,
+    *,
+    use_word_diff: bool | None = None,
+    dark_mode: bool | None = None,
 ) -> bool:
-    return _highlight_cache_key(view, diff, use_word_diff) in view._hl_state.cache
+    return (
+        _highlight_cache_key(view, diff, use_word_diff, dark_mode)
+        in view._hl_state.cache
+    )
 
 
 def _clear_highlighted_content(view, diff: FileDiff) -> None:
@@ -60,12 +80,24 @@ def _highlight_diff_sync(
     include_word_diff = (
         view.word_diff_enabled if use_word_diff is None else use_word_diff
     )
-    if _has_highlighted_diff(view, diff, use_word_diff=include_word_diff):
+    dark_mode = _current_highlight_dark_mode(view)
+    if _has_highlighted_diff(
+        view,
+        diff,
+        use_word_diff=include_word_diff,
+        dark_mode=dark_mode,
+    ):
         return
 
-    highlight_lines_for_diff(diff, include_word_diff=include_word_diff)
+    highlight_lines_for_diff(
+        diff,
+        include_word_diff=include_word_diff,
+        dark_mode=dark_mode,
+    )
     view._invalidate_base_code_content_cache()
-    view._hl_state.cache.add(_highlight_cache_key(view, diff, include_word_diff))
+    view._hl_state.cache.add(
+        _highlight_cache_key(view, diff, include_word_diff, dark_mode)
+    )
 
 
 def _queue_highlight_diff(view, filename: str, diff: FileDiff) -> None:
@@ -113,12 +145,14 @@ async def _highlight_diff_async(
     request_token: int,
     use_word_diff: bool,
 ) -> None:
+    dark_mode = _current_highlight_dark_mode(view)
     await asyncio.to_thread(
         highlight_lines_for_diff,
         diff,
         include_word_diff=use_word_diff,
+        dark_mode=dark_mode,
     )
-    view._hl_state.cache.add(_highlight_cache_key(view, diff, use_word_diff))
+    view._hl_state.cache.add(_highlight_cache_key(view, diff, use_word_diff, dark_mode))
 
     if request_token != view._hl_state.request_token:
         return
@@ -313,6 +347,7 @@ async def _highlight_diff_range_async(
             start_line,
             end_line,
             include_word_diff=use_word_diff,
+            dark_mode=_current_highlight_dark_mode(view),
         )
     finally:
         if view._hl_state.window_inflight == (

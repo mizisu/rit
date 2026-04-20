@@ -11,7 +11,6 @@ from rit.core.diff import parse_patch
 from rit.ui.widgets import diff_search as _search_mod
 from rit.ui.widgets import diff_blocks as _blocks_mod
 from rit.ui.widgets import diff_highlight as _hl_mod
-from rit.ui.widgets import diff_search as _search_mod
 from rit.ui.widgets import diff_virtual as _virtual_mod
 from rit.ui.widgets.diff_view import DiffView, SplitDiffBlock, UnifiedDiffBlock
 from rit.ui.widgets.diff_visual import LineContent
@@ -158,7 +157,10 @@ async def test_show_diff_renders_plain_first_then_applies_highlight(
         assert render_calls["count"] == baseline_calls
         assert modified.highlighted_old_content is not None
         assert modified.highlighted_new_content is not None
-        assert (id(diff), diff_view.word_diff_enabled) in diff_view._hl_state.cache
+        assert any(
+            cache_key[:2] == (id(diff), diff_view.word_diff_enabled)
+            for cache_key in diff_view._hl_state.cache
+        )
 
 
 @pytest.mark.asyncio
@@ -678,12 +680,9 @@ async def test_visual_selection_cache_tracks_rendered_window_only() -> None:
 
         if diff_view._visual_selection_specs:
             assert (
-                min(diff_view._visual_selection_specs)
-                >= diff_view._virt.window_start
+                min(diff_view._visual_selection_specs) >= diff_view._virt.window_start
             )
-            assert (
-                max(diff_view._visual_selection_specs) <= diff_view._virt.window_end
-            )
+            assert max(diff_view._visual_selection_specs) <= diff_view._virt.window_end
 
         diff_view.cursor_line = 20
         await pilot.pause()
@@ -694,12 +693,9 @@ async def test_visual_selection_cache_tracks_rendered_window_only() -> None:
 
         if diff_view._visual_selection_specs:
             assert (
-                min(diff_view._visual_selection_specs)
-                >= diff_view._virt.window_start
+                min(diff_view._visual_selection_specs) >= diff_view._virt.window_start
             )
-            assert (
-                max(diff_view._visual_selection_specs) <= diff_view._virt.window_end
-            )
+            assert max(diff_view._visual_selection_specs) <= diff_view._virt.window_end
 
 
 @pytest.mark.asyncio

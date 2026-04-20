@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Literal
 from textual.containers import VerticalScroll
 from textual.content import Content
 from textual.widget import Widget
-from textual.widgets import Static
 
 from rit.core.types import DiffLine
 from rit.ui.widgets.diff_types import (
@@ -16,10 +15,9 @@ from rit.ui.widgets.diff_types import (
     UnifiedBlockRowStaticData,
     UnifiedDiffBlock,
 )
-from rit.ui.widgets.diff_visual import DiffCode, LineAnnotations, LineContent
 
 if TYPE_CHECKING:
-    from rit.ui.widgets.diff_view import DiffView
+    pass
 
 
 def _invalidate_block_static_row_cache(
@@ -140,23 +138,7 @@ def _build_unified_modified_block_prefix_content(
     *,
     side: Literal["old", "new"],
 ) -> Content:
-    prefix_parts: list[Content] = []
-
-    if view.show_line_numbers:
-        if side == "old":
-            prefix_parts.append(
-                Content.styled(f"{line.old_line_no:>4} ", "$text-disabled")
-            )
-            prefix_parts.append(Content.styled("     ", "$text-disabled"))
-        else:
-            prefix_parts.append(Content.styled("     ", "$text-disabled"))
-            prefix_parts.append(
-                Content.styled(f"{line.new_line_no:>4} ", "$text-disabled")
-            )
-
-    prefix_parts.append(Content("- " if side == "old" else "+ "))
-
-    return Content("").join(prefix_parts)
+    return view._build_unified_modified_prefix_content(line, side=side)
 
 
 def _build_unified_block_row_data(
@@ -215,18 +197,7 @@ def _build_split_block_prefix_content(
     *,
     side: Literal["old", "new"],
 ) -> Content:
-    if side == "old":
-        prefix = "-" if line.is_deleted or line.is_modified else " "
-        line_no = line.old_line_no
-    else:
-        prefix = "+" if line.is_added or line.is_modified else " "
-        line_no = line.new_line_no
-
-    return view._build_split_prefix(
-        line_no,
-        prefix,
-        line_index=line.line_index,
-    )
+    return view._build_split_prefix_content(line, side=side)
 
 
 def _build_split_block_code_content(
@@ -234,38 +205,18 @@ def _build_split_block_code_content(
     line: DiffLine,
     *,
     side: Literal["old", "new"],
-) -> Content:
-    text = line.old_content if side == "old" else line.new_content
-    if not text:
-        return Content(" ")
-
-    spec = view._compute_selection_spec_for_line(line.line_index)
-    has_cursor = line.line_index == view.cursor_line and view.active_pane == side
-
-    if spec is not None:
-        sel_start, sel_end, _ = spec
-        actual_end = sel_end if sel_end is not None else max(0, len(text) - 1)
-        return view._build_code_content_with_selection(
-            line,
-            has_cursor,
-            view.cursor_column if has_cursor else None,
-            sel_start,
-            actual_end,
-            side=side,
-        )
-
-    return view._build_code_content_with_cursor(
+) -> Content | None:
+    return view._build_split_code_content(
         line,
-        has_cursor,
-        view.cursor_column if has_cursor else None,
         side=side,
+        placeholder_when_missing=False,
     )
 
 
 def _build_split_block_row_data(
     view,
     line: DiffLine,
-) -> tuple[Content, Content, str, Content, Content, str]:
+) -> tuple[Content, Content | None, str, Content, Content | None, str]:
     static_row = _split_block_static_row(view, line)
     return (
         static_row.left_annotation,
@@ -331,9 +282,17 @@ def _register_split_block(
     block: SplitDiffBlock,
     lines: list[DiffLine],
 ) -> None:
+    block._left_scroll.set_on_scroll_x(view._sync_split_horizontal_scroll)
+    block._right_scroll.set_on_scroll_x(view._sync_split_horizontal_scroll)
+
     for line in lines:
         view._split_blocks_by_line[line.line_index] = block
         view._register_line_widget(line.line_index, block)
+        view._register_split_scroll_widgets(
+            line.line_index,
+            block._left_scroll,
+            block._right_scroll,
+        )
 
 
 def _refresh_split_blocks_for_lines(view, line_indices: set[int]) -> bool:
@@ -385,6 +344,8 @@ def _refresh_split_blocks_for_lines(view, line_indices: set[int]) -> bool:
             right_annotations=right_annotations,
             right_code_lines=right_code_lines,
             right_styles=right_styles,
+            left_width=view._split_old_code_width,
+            right_width=view._split_new_code_width,
         )
 
     return True
@@ -448,6 +409,8 @@ def _render_split_line_block(
         right_annotations=right_annotations,
         right_code_lines=right_code_lines,
         right_styles=right_styles,
+        left_width=view._split_old_code_width,
+        right_width=view._split_new_code_width,
     )
     if before is not None:
         container.mount(block, before=before)
@@ -479,7 +442,7 @@ def _render_unified_line_block(
         classes="diff-block",
     )
     if view._showing_full_file:
-        block._annotations.styles.width = view.PREVIEW_PREFIX_WIDTH
+        block._annotations.styles.width = view._unified_prefix_width_for_layout()
     block.update_block(
         annotations=annotations,
         code_lines=code_lines,

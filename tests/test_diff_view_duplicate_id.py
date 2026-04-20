@@ -5,6 +5,7 @@ from textual.app import App, ComposeResult
 
 from rit.ui.widgets.diff_view import DiffView
 from rit.core.diff import parse_patch
+from rit.ui.widgets.diff_render import _build_full_file_diff
 
 
 @pytest.fixture
@@ -166,3 +167,25 @@ class TestDiffViewDuplicateId:
 
             hunk_headers = [node.id for node in diff_view.query(".hunk-header")]
             assert hunk_headers.count("hunk-0") == 1
+
+    @pytest.mark.asyncio
+    async def test_full_file_preview_uses_unified_blocks_without_missing_preview_width(
+        self,
+    ):
+        """Full-file preview should render unified blocks without attribute errors."""
+
+        class TestApp(App):
+            def compose(self) -> ComposeResult:
+                yield DiffView(mode="unified", id="diff-view")
+
+        app = TestApp()
+        async with app.run_test() as pilot:
+            diff_view = app.query_one(DiffView)
+            content = "\n".join(f"line {i}" for i in range(1, 151))
+            diff = _build_full_file_diff("preview.py", content)
+
+            diff_view._showing_full_file = True
+            await diff_view.show_diff("preview.py", diff)
+            await pilot.pause()
+
+            assert len(diff_view.query(".diff-block")) >= 1

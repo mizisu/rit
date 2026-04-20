@@ -1,11 +1,16 @@
 """Tests for DiffView in-diff search navigation."""
 
 from textual.app import App, ComposeResult
-from textual.widgets import Input
+from textual.widgets import Input, Static
 import pytest
 
 from rit.core.diff import parse_patch
 from rit.ui.widgets.diff_view import DiffView
+
+
+def _as_plain(widget: Static) -> str:
+    content = getattr(widget, "content", "")
+    return str(getattr(content, "plain", content))
 
 
 @pytest.mark.asyncio
@@ -147,6 +152,119 @@ async def test_split_search_targets_matching_pane_for_modified_line() -> None:
         assert diff_view.cursor_line == 0
         assert diff_view.active_pane == "new"
         assert diff_view.cursor_column == 0
+
+
+@pytest.mark.asyncio
+async def test_search_counter_tracks_active_match_and_total() -> None:
+    """The header should show the active search hit index and total matches."""
+
+    patch = """@@ -1,3 +1,3 @@
+ foo bar foo
+ baz
+ foo end"""
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff = parse_patch(patch, "test.py")
+
+        await diff_view.show_diff("test.py", diff)
+        await pilot.pause()
+        diff_view.focus()
+        await pilot.pause()
+
+        await pilot.press("/")
+        await pilot.pause()
+        search_input = diff_view.query_one("#diff-search-input", Input)
+        search_input.value = "foo"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+
+        header = diff_view.query_one("#diff-header", Static)
+        assert "search 2/3" in _as_plain(header)
+
+        await pilot.press("n")
+        await pilot.pause()
+        assert "search 3/3" in _as_plain(header)
+
+        await pilot.press("n")
+        await pilot.pause()
+        assert "search 1/3" in _as_plain(header)
+
+
+@pytest.mark.asyncio
+async def test_search_counter_updates_live_and_clears_when_query_is_empty() -> None:
+    """Typing in the search input should update the header counter immediately."""
+
+    patch = """@@ -1,3 +1,3 @@
+ foo bar foo
+ baz
+ foo end"""
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff = parse_patch(patch, "test.py")
+
+        await diff_view.show_diff("test.py", diff)
+        await pilot.pause()
+        diff_view.focus()
+        await pilot.pause()
+
+        await pilot.press("/")
+        await pilot.pause()
+        search_input = diff_view.query_one("#diff-search-input", Input)
+        header = diff_view.query_one("#diff-header", Static)
+
+        search_input.value = "foo"
+        await pilot.pause()
+        assert "search 2/3" in _as_plain(header)
+
+        search_input.value = ""
+        await pilot.pause()
+        assert "search" not in _as_plain(header)
+
+
+@pytest.mark.asyncio
+async def test_search_counter_shows_zero_zero_when_no_matches() -> None:
+    """Searches with no hits should still surface a 0/0 counter."""
+
+    patch = """@@ -1,2 +1,2 @@
+ alpha
+ beta"""
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff = parse_patch(patch, "test.py")
+
+        await diff_view.show_diff("test.py", diff)
+        await pilot.pause()
+        diff_view.focus()
+        await pilot.pause()
+
+        await pilot.press("/")
+        await pilot.pause()
+        search_input = diff_view.query_one("#diff-search-input", Input)
+        search_input.value = "missing"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        header = diff_view.query_one("#diff-header", Static)
+        assert "search 0/0" in _as_plain(header)
 
 
 @pytest.mark.asyncio

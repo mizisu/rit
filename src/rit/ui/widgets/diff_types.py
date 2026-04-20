@@ -12,7 +12,12 @@ if TYPE_CHECKING:
 from textual.containers import Horizontal
 from textual.content import Content
 
-from rit.ui.widgets.diff_visual import DiffCode, LineAnnotations, LineContent
+from rit.ui.widgets.diff_visual import (
+    DiffCode,
+    LineAnnotations,
+    LineContent,
+    SyncedCodeScroll,
+)
 
 
 @dataclass(frozen=True)
@@ -95,17 +100,25 @@ class SplitDiffBlock(Horizontal):
         self.line_indices = tuple(line_indices)
         self._left_annotations = LineAnnotations([], classes="line-prefix")
         self._left_code = DiffCode(classes="code-content -old-side")
+        self._left_scroll = SyncedCodeScroll(
+            self._left_code,
+            classes="split-code-scroll -old-side",
+        )
         self._right_annotations = LineAnnotations([], classes="line-prefix")
         self._right_code = DiffCode(classes="code-content -new-side")
+        self._right_scroll = SyncedCodeScroll(
+            self._right_code,
+            classes="split-code-scroll -new-side",
+        )
         self._left_pane = Horizontal(
             self._left_annotations,
-            self._left_code,
+            self._left_scroll,
             classes="split-pane split-pane-left",
         )
         self._left_pane.styles.height = "auto"
         self._right_pane = Horizontal(
             self._right_annotations,
-            self._right_code,
+            self._right_scroll,
             classes="split-pane split-pane-right",
         )
         self._right_pane.styles.height = "auto"
@@ -125,11 +138,17 @@ class SplitDiffBlock(Horizontal):
         right_annotations: list[Content],
         right_code_lines: list[Content | None],
         right_styles: list[str],
+        left_width: int | None = None,
+        right_width: int | None = None,
     ) -> None:
         self._left_annotations.numbers = left_annotations
-        self._left_code.update(LineContent(left_code_lines, left_styles))
+        self._left_code.update(
+            LineContent(left_code_lines, left_styles, width=left_width)
+        )
         self._right_annotations.numbers = right_annotations
-        self._right_code.update(LineContent(right_code_lines, right_styles))
+        self._right_code.update(
+            LineContent(right_code_lines, right_styles, width=right_width)
+        )
 
 
 @dataclass(frozen=True)

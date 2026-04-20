@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Iterable
+from collections.abc import Callable, Iterable
 
 from rich.segment import Segment
 from rich.style import Style as RichStyle
@@ -14,6 +14,7 @@ from textual.style import Style
 from textual.visual import RenderOptions, Visual
 from textual.widget import Widget
 from textual.widgets import Static
+from textual.containers import HorizontalScroll
 
 
 class LineContent(Visual):
@@ -85,7 +86,6 @@ class LineContent(Visual):
 
 
 class LineAnnotations(Widget):
-
     DEFAULT_CSS = """
     LineAnnotations {
         width: auto;
@@ -138,8 +138,48 @@ class LineAnnotations(Widget):
         return strip
 
 
-class DiffCode(Static):
+class SyncedCodeScroll(HorizontalScroll):
+    DEFAULT_CSS = """
+    SyncedCodeScroll {
+        width: 1fr;
+        height: auto;
+        overflow: scroll hidden;
+        scrollbar-size: 0 0;
+    }
+    """
 
+    def __init__(
+        self,
+        *children,
+        on_scroll_x: Callable[[float, "SyncedCodeScroll | None"], None] | None = None,
+        name: str | None = None,
+        id: str | None = None,
+        classes: str | None = None,
+        disabled: bool = False,
+    ) -> None:
+        super().__init__(
+            *children,
+            name=name,
+            id=id,
+            classes=classes,
+            disabled=disabled,
+        )
+        self._on_scroll_x = on_scroll_x
+
+    def set_on_scroll_x(
+        self,
+        callback: Callable[[float, "SyncedCodeScroll | None"], None] | None,
+    ) -> None:
+        self._on_scroll_x = callback
+
+    def watch_scroll_x(self, old_value: float, new_value: float) -> None:
+        super().watch_scroll_x(old_value, new_value)
+        if old_value == new_value or self._on_scroll_x is None:
+            return
+        self._on_scroll_x(new_value, self)
+
+
+class DiffCode(Static):
     DEFAULT_CSS = """
     DiffCode {
         width: auto;

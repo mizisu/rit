@@ -20,7 +20,6 @@ from textual.widgets import Input, Static
 from rit.core.types import DiffLine, FileDiff
 from rit.state.models import PRFile, ReviewThread
 from rit.ui.messages import Flash
-from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets import diff_cursor as _cursor
 from rit.ui.widgets import diff_highlight as _hl
@@ -53,6 +52,7 @@ _RENDER_REQUEST_CONTEXT: ContextVar[int | None] = ContextVar(
 class DiffView(VerticalScroll):
     can_focus = True
     LAYOUT = DEFAULT_DIFF_LAYOUT
+    PREVIEW_PREFIX_WIDTH = _render.PREVIEW_PREFIX_WIDTH
 
     VIRTUALIZE_LINE_THRESHOLD = 1200
     BLOCK_RENDER_LINE_THRESHOLD = 120
@@ -178,13 +178,18 @@ class DiffView(VerticalScroll):
         self._render_request_token: int = 0
         self._suspend_split_state_rerender: bool = False
         self._suspend_scroll_virtual_window_watch: bool = False
+        self._syncing_split_scroll: bool = False
+        self._split_horizontal_scroll_x: float = 0.0
+        self._split_old_code_width: int = 1
+        self._split_new_code_width: int = 1
 
         self._code_widgets_by_line: dict[int, tuple[Static, ...]] = {}
+        self._split_scroll_widgets_by_line: dict[int, tuple[Widget, ...]] = {}
         self._unified_blocks_by_line: dict[int, UnifiedDiffBlock] = {}
         self._split_blocks_by_line: dict[int, SplitDiffBlock] = {}
         self._line_widgets_by_index: dict[int, Widget] = {}
         self._row_anchor_widgets: dict[str, Widget] = {}
-        self._hunk_header_widgets: dict[int, Static] = {}
+        self._hunk_header_widgets: dict[int, Widget] = {}
 
         self._header_widget: Static | None = None
         self._search_bar_widget: Horizontal | None = None
@@ -243,6 +248,30 @@ class DiffView(VerticalScroll):
         _render._update_split_state(self)
         _search.refresh_matches(self)
         _cursor._queue_cursor_ui_flush(self, update_status_line=True)
+
+    def watch_show_line_numbers(self, old_value: bool, new_value: bool) -> None:
+        if old_value == new_value or not self.is_mounted or not self._all_lines:
+            return
+
+        self._unified_block_static_rows_by_line.clear()
+        self._split_block_static_rows_by_line.clear()
+        self.run_worker(
+            self._run_render_diff_for_request(self._render_request_token),
+            exclusive=True,
+            name="diff-line-numbers-rerender",
+        )
+
+    def watch_word_diff_enabled(self, old_value: bool, new_value: bool) -> None:
+        if old_value == new_value or not self.is_mounted:
+            return
+        if not self._reset_current_diff_highlight_state():
+            return
+
+        self.run_worker(
+            self._run_render_diff_for_request(self._render_request_token),
+            exclusive=True,
+            name="diff-word-diff-rerender",
+        )
 
     def watch_current_hunk_index(self, _old_index: int, _new_index: int) -> None:
         _cursor._queue_cursor_ui_flush(self, update_status_line=True)
@@ -466,6 +495,7 @@ class DiffView(VerticalScroll):
         else:
             _search.clear_state(self)
         _search._refresh_search_display(self)
+        self._update_status_line()
 
     @on(Input.Submitted, "#diff-search-input")
     def _on_search_submitted(self, event: Input.Submitted) -> None:
@@ -652,6 +682,7 @@ class DiffView(VerticalScroll):
         self._line_widgets_by_index.pop(line_index, None)
         self._unified_blocks_by_line.pop(line_index, None)
         self._split_blocks_by_line.pop(line_index, None)
+        self._split_scroll_widgets_by_line.pop(line_index, None)
 
         if not (0 <= line_index < len(self._all_lines)):
             return
@@ -664,7 +695,7 @@ class DiffView(VerticalScroll):
         for anchor_id in anchor_ids:
             self._row_anchor_widgets.pop(anchor_id, None)
 
-    def _register_hunk_header_widget(self, hunk_index: int, widget: Static) -> None:
+    def _register_hunk_header_widget(self, hunk_index: int, widget: Widget) -> None:
         self._hunk_header_widgets[hunk_index] = widget
 
     def _register_code_widgets(self, line_index: int, *widgets: Static) -> None:
@@ -672,6 +703,63 @@ class DiffView(VerticalScroll):
 
     def _get_code_widgets(self, line_index: int) -> tuple[Static, ...]:
         return self._code_widgets_by_line.get(line_index, ())
+
+    def _register_split_scroll_widgets(self, line_index: int, *widgets: Widget) -> None:
+        self._split_scroll_widgets_by_line[line_index] = tuple(widgets)
+
+    def _get_split_scroll_widgets(self, line_index: int) -> tuple[Widget, ...]:
+        return self._split_scroll_widgets_by_line.get(line_index, ())
+
+    def _sync_split_horizontal_scroll(
+        self,
+        scroll_x: float,
+        source: Widget | None = None,
+    ) -> None:
+        clamped_scroll_x = max(0.0, scroll_x)
+        self._split_horizontal_scroll_x = clamped_scroll_x
+
+        if self._syncing_split_scroll:
+            return
+
+        widgets: list[Widget] = []
+        seen: set[int] = set()
+        for scroll_widgets in self._split_scroll_widgets_by_line.values():
+            for widget in scroll_widgets:
+                widget_id = id(widget)
+                if widget_id in seen:
+                    continue
+                seen.add(widget_id)
+                widgets.append(widget)
+        for widget in self._hunk_header_widgets.values():
+            if not widget.has_class("split-hunk-header-scroll"):
+                continue
+            widget_id = id(widget)
+            if widget_id in seen:
+                continue
+            seen.add(widget_id)
+            widgets.append(widget)
+
+        self._syncing_split_scroll = True
+        try:
+            for widget in widgets:
+                if widget is source:
+                    continue
+                if getattr(widget, "scroll_x", None) != clamped_scroll_x:
+                    widget.scroll_x = clamped_scroll_x
+        finally:
+            self._syncing_split_scroll = False
+
+    def _get_active_split_scroll_widget(self) -> Widget | None:
+        if not (0 <= self.cursor_line < len(self._all_lines)):
+            return None
+
+        target_side = self.active_pane
+        for widget in self._get_split_scroll_widgets(self.cursor_line):
+            if target_side == "old" and widget.has_class("-old-side"):
+                return widget
+            if target_side == "new" and widget.has_class("-new-side"):
+                return widget
+        return None
 
     @staticmethod
     def _merge_line_ranges(
@@ -771,6 +859,11 @@ class DiffView(VerticalScroll):
             self._split_block_static_rows_by_line.clear()
             self._base_code_content_cache.clear()
             self._code_widgets_by_line = {}
+            self._split_scroll_widgets_by_line = {}
+            self._split_horizontal_scroll_x = 0.0
+            self._split_old_code_width = 1
+            self._split_new_code_width = 1
+            self.scroll_x = 0
             self._unified_blocks_by_line = {}
             self._split_blocks_by_line = {}
             self._line_widgets_by_index = {}
@@ -821,6 +914,9 @@ class DiffView(VerticalScroll):
 
             if not self._showing_full_file:
                 _comments.build_comment_map(self)
+            self._split_old_code_width, self._split_new_code_width = (
+                _render._split_code_widths_for_layout(self)
+            )
             _render._update_split_state(self)
             _render._rebuild_rendered_rows(self)
             _virtual._rebuild_virtual_layout(self)
@@ -843,8 +939,58 @@ class DiffView(VerticalScroll):
         if self._diff:
             await asyncio.to_thread(lambda: _render._precompute_diff_data(self))
 
+    def refresh_header(self) -> None:
+        """Re-render the diff header badge without re-rendering diff content."""
+        self._update_status_line()
+
+    def _reset_current_diff_highlight_state(self) -> bool:
+        diff = self._diff
+        filename = self.current_file
+        if diff is None or filename is None:
+            return False
+
+        self._hl_state.request_token += 1
+        self._hl_state.queued_window = None
+        self._hl_state.queued_full = None
+        self._hl_state.cache = {
+            cache_key for cache_key in self._hl_state.cache if cache_key[0] != id(diff)
+        }
+        _hl._clear_highlighted_content(self, diff)
+
+        if not _hl._use_windowed_highlight_strategy(self, diff):
+            _hl._highlight_diff_sync(self, diff)
+        return True
+
+    def refresh_syntax_theme(self) -> None:
+        if not self.is_mounted:
+            return
+        if not self._reset_current_diff_highlight_state():
+            return
+
+        self.run_worker(
+            self._run_render_diff_for_request(self._render_request_token),
+            exclusive=True,
+            name="diff-theme-rerender",
+        )
+
     def _update_status_line(self) -> None:
-        return
+        header = self._header_widget
+        if header is None:
+            return
+
+        header_text = _render._build_header_text(self)
+        query = self._search_query.strip()
+        if not query:
+            header.update(header_text)
+            return
+
+        total_matches = len(self._search_matches)
+        active_match = (
+            self._search_match_index + 1
+            if 0 <= self._search_match_index < total_matches
+            else 0
+        )
+        header.update(f"{header_text}  [dim]search {active_match}/{total_matches}[/]")
 
     # ------------------------------------------------------------------
     # Full-file toggle
@@ -1028,6 +1174,9 @@ class DiffView(VerticalScroll):
     async def _render_diff(self) -> None:
         await _render._render_diff(self)
 
+    def _create_hunk_header_widget(self, *args, **kwargs):
+        return _render._create_hunk_header_widget(self, *args, **kwargs)
+
     def _render_hunk(self, *args, **kwargs) -> None:
         _render._render_hunk(self, *args, **kwargs)
 
@@ -1037,8 +1186,26 @@ class DiffView(VerticalScroll):
     def _build_unified_prefix_content(self, line: DiffLine) -> Content:
         return _render._build_unified_prefix_content(self, line)
 
+    def _build_unified_modified_prefix_content(self, *args, **kwargs) -> Content:
+        return _render._build_unified_modified_prefix_content(self, *args, **kwargs)
+
+    def _old_line_number_width(self) -> int:
+        return _render._old_line_number_width(self)
+
+    def _new_line_number_width(self) -> int:
+        return _render._new_line_number_width(self)
+
+    def _unified_prefix_width_for_layout(self) -> int:
+        return _render._unified_prefix_width_for_layout(self)
+
     def _build_split_prefix(self, *args, **kwargs) -> Content:
         return _render._build_split_prefix(self, *args, **kwargs)
+
+    def _build_split_prefix_content(self, line: DiffLine, **kwargs) -> Content:
+        return _render._build_split_prefix_content(self, line, **kwargs)
+
+    def _build_split_code_content(self, line: DiffLine, **kwargs) -> Content | None:
+        return _render._build_split_code_content(self, line, **kwargs)
 
     def _unified_line_style(self, line: DiffLine, **kwargs) -> str:
         return _render._unified_line_style(self, line, **kwargs)

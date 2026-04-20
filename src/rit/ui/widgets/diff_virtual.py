@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 
 from textual.widgets import Static
 from textual.containers import VerticalScroll
@@ -12,7 +12,7 @@ from rit.ui.widgets import diff_blocks as _blocks
 
 
 if TYPE_CHECKING:
-    from rit.ui.widgets.diff_view import DiffView
+    pass
 
 _RENDER_REQUEST_CONTEXT: ContextVar[int | None] = ContextVar(
     "diff_view_render_request", default=None
@@ -98,9 +98,7 @@ def _set_virtual_window_from_viewport(view) -> bool:
     old_start = view._virt.window_start
     old_end = view._virt.window_end
     _set_virtual_window_around(view, view._viewport_center_line())
-    return (
-        view._virt.window_start != old_start or view._virt.window_end != old_end
-    )
+    return view._virt.window_start != old_start or view._virt.window_end != old_end
 
 
 def _maybe_update_virtual_window_from_viewport(view) -> None:
@@ -310,10 +308,9 @@ async def _sync_visible_virtual_hunk_headers(
         if hunk.header:
             hunk_header += f" {hunk.header}"
 
-        header_widget = Static(
-            hunk_header,
-            classes="hunk-header",
-            id=f"hunk-{hunk_index}",
+        header_widget = view._create_hunk_header_widget(
+            hunk_index=hunk_index,
+            hunk_header=hunk_header,
         )
         _, hunk_start, _ = view._hunk_line_ranges[hunk_index]
         anchor = view._get_line_container(hunk_start)

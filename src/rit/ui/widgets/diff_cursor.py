@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Literal
 from textual.containers import VerticalScroll
 from textual.geometry import Size
 
-from rit.ui.messages import Flash
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets import diff_search as _search
@@ -207,7 +206,8 @@ def _next_word(view: DiffView) -> None:
     if current >= len(rows) - 1:
         return
     target_row = rows[current + 1]
-    next_text = _get_cursor_text_for_target(view, 
+    next_text = _get_cursor_text_for_target(
+        view,
         target_row.line_index,
         view.active_pane
         if target_row.side == "auto"
@@ -237,7 +237,8 @@ def _prev_word(view: DiffView) -> None:
     if current <= 0:
         return
     target_row = rows[current - 1]
-    prev_text = _get_cursor_text_for_target(view, 
+    prev_text = _get_cursor_text_for_target(
+        view,
         target_row.line_index,
         view.active_pane
         if target_row.side == "auto"
@@ -267,7 +268,8 @@ def _end_word(view: DiffView) -> None:
     if current >= len(rows) - 1:
         return
     target_row = rows[current + 1]
-    next_text = _get_cursor_text_for_target(view, 
+    next_text = _get_cursor_text_for_target(
+        view,
         target_row.line_index,
         view.active_pane
         if target_row.side == "auto"
@@ -511,16 +513,31 @@ def _scroll_to_cursor(view: DiffView) -> None:
 
 
 def _scroll_to_cursor_horizontal(view: DiffView) -> None:
-    prefix_width = (
-        view.LAYOUT.split_prefix_width
-        if view.split
-        else view.LAYOUT.unified_prefix_width
-    )
+    edge_padding = view.LAYOUT.horizontal_scroll_edge_padding
+    reveal_padding = view.LAYOUT.horizontal_scroll_reveal_padding
+
+    if view.split:
+        scroll_widget = view._get_active_split_scroll_widget()
+        if scroll_widget is None:
+            return
+
+        cursor_x = view.cursor_column
+        viewport_width = max(1, scroll_widget.size.width)
+        current_scroll = scroll_widget.scroll_x
+
+        if cursor_x >= current_scroll + viewport_width - edge_padding:
+            view._sync_split_horizontal_scroll(
+                cursor_x - viewport_width + reveal_padding,
+                source=None,
+            )
+        elif cursor_x < current_scroll + edge_padding:
+            view._sync_split_horizontal_scroll(cursor_x - edge_padding, source=None)
+        return
+
+    prefix_width = view._unified_prefix_width_for_layout()
     cursor_x = prefix_width + view.cursor_column
     viewport_width = view.size.width
     current_scroll = view.scroll_x
-    edge_padding = view.LAYOUT.horizontal_scroll_edge_padding
-    reveal_padding = view.LAYOUT.horizontal_scroll_reveal_padding
 
     if cursor_x >= current_scroll + viewport_width - edge_padding:
         view.scroll_x = cursor_x - viewport_width + reveal_padding
@@ -894,9 +911,7 @@ def _scroll_to_hunk(view: DiffView, index: int) -> None:
         if target_range is not None:
             _, start, end = target_range
             target_line = start if end >= start else start
-            if not (
-                view._virt.window_start <= target_line <= view._virt.window_end
-            ):
+            if not (view._virt.window_start <= target_line <= view._virt.window_end):
                 _virtual._set_virtual_window_around(view, target_line)
                 view._virt.render_pending = True
                 view.run_worker(

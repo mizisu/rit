@@ -11,12 +11,14 @@ from textual.widget import Widget
 from textual.widgets import Static
 
 from rit.core.types import DiffHunk, DiffLine, FileDiff
+from rit.state.models import FileViewedState
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets import diff_highlight as _hl
 from rit.ui.widgets import diff_search as _search
 from rit.ui.widgets import diff_virtual as _virtual
 from rit.ui.widgets.diff_types import RenderedRow
+from rit.ui.widgets.diff_visual import SyncedCodeScroll
 
 if TYPE_CHECKING:
     from contextvars import ContextVar
@@ -53,6 +55,39 @@ def _should_force_unified_for_current_file(view: DiffView) -> bool:
     )
 
 
+def _split_prefix_width_for_layout(
+    view: DiffView,
+    side: Literal["old", "new"],
+) -> int:
+    if not view.show_line_numbers:
+        return 2
+    line_width = (
+        _old_line_number_width(view) if side == "old" else _new_line_number_width(view)
+    )
+    return line_width + 2
+
+
+def _can_fit_auto_split_content(view: DiffView) -> bool:
+    if not view._all_lines:
+        return True
+
+    old_prefix_width = _split_prefix_width_for_layout(view, "old")
+    new_prefix_width = _split_prefix_width_for_layout(view, "new")
+    max_old_width = max(
+        (len(line.old_content) for line in view._all_lines if line.old_content),
+        default=0,
+    )
+    max_new_width = max(
+        (len(line.new_content) for line in view._all_lines if line.new_content),
+        default=0,
+    )
+    split_gap = 2
+    required_width = old_prefix_width + max_old_width + new_prefix_width + max_new_width
+    required_width += split_gap
+    required_width += split_gap
+    return view.size.width >= required_width
+
+
 def _update_split_state(view: DiffView) -> None:
     old_split = view.split
 
@@ -61,10 +96,17 @@ def _update_split_state(view: DiffView) -> None:
     elif view.mode == "unified":
         view.split = False
     else:
-        view.split = view.size.width >= view.LAYOUT.auto_split_min_width
+        view.split = (
+            view.size.width >= view.LAYOUT.auto_split_min_width
+            and _can_fit_auto_split_content(view)
+        )
 
     if view.split and _should_force_unified_for_current_file(view):
         view.split = False
+
+    if view.split:
+        view.scroll_x = 0
+        view._sync_split_horizontal_scroll(view._split_horizontal_scroll_x)
 
     if old_split != view.split and view._all_lines:
         _virtual._rebuild_virtual_layout(view)
@@ -286,6 +328,32 @@ def _should_render_hunk_header(
 # ---------------------------------------------------------------------------
 
 
+def _build_header_text(view: DiffView) -> str:
+    """Build the diff header text including viewed badge."""
+    if not view.current_file:
+        return "Select a file to view diff"
+
+    badge = ""
+    if view._file:
+        state = view._file.viewer_viewed_state
+        if state == FileViewedState.VIEWED:
+            badge = "[green]✓ Viewed[/]  "
+        elif state == FileViewedState.DISMISSED:
+            badge = "[yellow]! Changed[/]  "
+        else:
+            badge = "[dim]○ Unviewed[/]  "
+
+    if view._showing_full_file:
+        return f"{badge}{view.current_file}  [dim italic]preview[/]"
+    elif view._file:
+        return (
+            f"{badge}{view.current_file}  "
+            f"[green]+{view._file.additions}[/] "
+            f"[red]-{view._file.deletions}[/]"
+        )
+    return f"{badge}{view.current_file}"
+
+
 async def _render_diff(view: DiffView) -> None:
     ctx = _get_render_request_context()
     request_token = ctx.get()
@@ -295,17 +363,7 @@ async def _render_diff(view: DiffView) -> None:
     if header is None:
         header = view.query_one("#diff-header", Static)
         view._header_widget = header
-    if view._showing_full_file:
-        header.update(f"{view.current_file}  [dim italic]preview[/]")
-    elif view._file:
-        header_text = (
-            f"{view.current_file}  "
-            f"[green]+{view._file.additions}[/] "
-            f"[red]-{view._file.deletions}[/]"
-        )
-        header.update(header_text)
-    else:
-        header.update(view.current_file or "No file selected")
+    view._update_status_line()
 
     new_content = view._content_widget
     if new_content is None:
@@ -357,6 +415,27 @@ async def _render_diff(view: DiffView) -> None:
         view.call_after_refresh(lambda: _finalize_render_state(view))
 
 
+def _create_hunk_header_widget(
+    view: DiffView,
+    *,
+    hunk_index: int,
+    hunk_header: str,
+) -> Widget:
+    header_widget = Static(
+        hunk_header,
+        classes="hunk-header",
+        id=f"hunk-{hunk_index}",
+    )
+    if not view.split:
+        return header_widget
+    header_widget.styles.width = max(1, len(hunk_header) + 2)
+    return SyncedCodeScroll(
+        header_widget,
+        classes="split-hunk-header-scroll",
+        on_scroll_x=view._sync_split_horizontal_scroll,
+    )
+
+
 def _render_hunk(
     view: DiffView,
     container: VerticalScroll,
@@ -384,10 +463,10 @@ def _render_hunk(
         )
         if hunk.header:
             hunk_header += f" {hunk.header}"
-        hunk_header_widget = Static(
-            hunk_header,
-            classes="hunk-header",
-            id=f"hunk-{hunk_index}",
+        hunk_header_widget = _create_hunk_header_widget(
+            view,
+            hunk_index=hunk_index,
+            hunk_header=hunk_header,
         )
         container.mount(hunk_header_widget)
         view._register_hunk_header_widget(hunk_index, hunk_header_widget)
@@ -401,16 +480,51 @@ def _render_hunk(
 PREVIEW_PREFIX_WIDTH = 7
 
 
+def _old_line_number_width(view: DiffView) -> int:
+    if not view.show_line_numbers:
+        return 0
+    numbers = view._line_index_by_old_number
+    return max(1, len(str(max(numbers)))) if numbers else 1
+
+
+def _new_line_number_width(view: DiffView) -> int:
+    if not view.show_line_numbers:
+        return 0
+    numbers = view._line_index_by_new_number
+    return max(1, len(str(max(numbers)))) if numbers else 1
+
+
+def _unified_prefix_width_for_layout(view: DiffView) -> int:
+    if view._showing_full_file:
+        return _preview_prefix_width_for_layout(view)
+    if not view.show_line_numbers:
+        return 2
+    return _old_line_number_width(view) + _new_line_number_width(view) + 4
+
+
+def _preview_prefix_width_for_layout(view: DiffView) -> int:
+    if not view.show_line_numbers:
+        return 2
+    return _new_line_number_width(view) + 2
+
+
+def _split_placeholder_content(view: DiffView) -> Content:
+    placeholder_width = max(3, view.scrollable_content_region.width // 2)
+    return Content.styled("╲" * placeholder_width, "$foreground 15%")
+
+
 def _build_unified_prefix_content(view: DiffView, line: DiffLine) -> Content:
     if view._showing_full_file:
         return _build_preview_prefix_content(view, line)
 
     prefix_parts: list[Content] = []
     if view.show_line_numbers:
+        old_width = _old_line_number_width(view)
+        new_width = _new_line_number_width(view)
         old_no = str(line.old_line_no) if line.old_line_no else ""
         new_no = str(line.new_line_no) if line.new_line_no else ""
-        prefix_parts.append(Content.styled(f"{old_no:>4} ", "$text-disabled"))
-        prefix_parts.append(Content.styled(f"{new_no:>4} ", "$text-disabled"))
+        prefix_parts.append(Content.styled(f"{old_no:>{old_width}} ", "$text-disabled"))
+        prefix_parts.append(Content.styled(f"{new_no:>{new_width}} ", "$text-disabled"))
 
     prefix = " "
     if line.is_added:
@@ -423,7 +537,10 @@ def _build_unified_prefix_content(view: DiffView, line: DiffLine) -> Content:
 
 def _build_preview_prefix_content(view: DiffView, line: DiffLine) -> Content:
     line_no = str(line.new_line_no) if line.new_line_no else ""
-    return Content.styled(f"{line_no:>5}  ", "$text-disabled")
+    if not view.show_line_numbers:
+        return Content("  ")
+    line_width = _new_line_number_width(view)
+    return Content.styled(f"{line_no:>{line_width}}  ", "$text-disabled")
 
 
 def _unified_line_style(
@@ -461,6 +578,24 @@ def _split_line_style(
 # ---------------------------------------------------------------------------
 
 
+def _split_code_widths_for_layout(view: DiffView) -> tuple[int, int]:
+    old_width = max(
+        (
+            _base_code_content(view, line, side="old", empty_fallback=" ").cell_length
+            for line in view._all_lines
+        ),
+        default=1,
+    )
+    new_width = max(
+        (
+            _base_code_content(view, line, side="new", empty_fallback=" ").cell_length
+            for line in view._all_lines
+        ),
+        default=1,
+    )
+    return old_width, new_width
+
+
 def _mount_split_lines(
     view: DiffView,
     container: VerticalScroll,
@@ -468,9 +603,17 @@ def _mount_split_lines(
     *,
     before: Widget | None = None,
 ) -> None:
+    old_code_width = view._split_old_code_width
+    new_code_width = view._split_new_code_width
+
     if not _blocks._should_use_split_block_renderer(view):
         for line in lines:
-            widget = _render_line_split(view, line)
+            widget = _render_line_split(
+                view,
+                line,
+                old_code_width=old_code_width,
+                new_code_width=new_code_width,
+            )
             if before is not None:
                 container.mount(widget, before=before)
             else:
@@ -498,7 +641,12 @@ def _mount_split_lines(
             )
             block_lines = []
 
-        widget = _render_line_split(view, line)
+        widget = _render_line_split(
+            view,
+            line,
+            old_code_width=old_code_width,
+            new_code_width=new_code_width,
+        )
         if before is not None:
             container.mount(widget, before=before)
         else:
@@ -584,6 +732,8 @@ def _get_hunk_index_for_line(view: DiffView, line_index: int) -> int | None:
 
 
 def _finalize_render_state(view: DiffView) -> None:
+    if view.split:
+        view._sync_split_horizontal_scroll(view._split_horizontal_scroll_x)
     _show_initial_cursor(view)
     if view.visual_mode:
         view._update_selection_highlighting({view.cursor_line})
@@ -607,31 +757,45 @@ def _finalize_render_state(view: DiffView) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _unified_code_classes(
+    line: DiffLine,
+    *,
+    side: Literal["old", "new", "auto"] = "auto",
+) -> str:
+    classes = "code-content"
+    if side == "old" or line.is_deleted:
+        if side == "old" or line.is_modified or line.is_deleted:
+            classes += " -removed"
+    elif side == "new" or line.is_added:
+        if side == "new" or line.is_modified or line.is_added:
+            classes += " -added"
+    return classes
+
+
+def _build_unified_code_content(
+    view: DiffView,
+    line: DiffLine,
+    *,
+    side: Literal["old", "new", "auto"] = "auto",
+) -> Content:
+    return _base_code_content(view, line, side=side, empty_fallback="")
+
+
 def _render_line_unified(view: DiffView, line: DiffLine) -> Horizontal | Vertical:
     if line.is_modified:
         return _render_modified_line(view, line)
 
     prefix_content = _build_unified_prefix_content(view, line)
-
-    if line.is_added and line.highlighted_new_content:
-        code_content = line.highlighted_new_content
-    elif line.is_deleted and line.highlighted_old_content:
-        code_content = line.highlighted_old_content
-    elif line.highlighted_old_content:
-        code_content = line.highlighted_old_content
-    else:
-        content_text = line.new_content if line.is_added else line.old_content
-        code_content = Content(content_text)
-
-    code_classes = "code-content"
+    side: Literal["old", "new", "auto"] = "auto"
     if line.is_added:
-        code_classes += " -added"
+        side = "new"
     elif line.is_deleted:
-        code_classes += " -removed"
+        side = "old"
+    code_content = _build_unified_code_content(view, line, side=side)
+    code_classes = _unified_code_classes(line, side=side)
 
     prefix_widget = Static(prefix_content, classes="line-prefix")
-    if view._showing_full_file:
-        prefix_widget.styles.width = PREVIEW_PREFIX_WIDTH
+    prefix_widget.styles.width = _unified_prefix_width_for_layout(view)
     code_widget = Static(code_content, classes=code_classes)
 
     container = Horizontal(
