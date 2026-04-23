@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from typing import Literal, cast
 
 from textual.message import Message
 
@@ -12,6 +13,7 @@ from rit.state.models import (
     PR,
     FileViewedState,
     LoadingState,
+    PendingReviewComment,
     PRComment,
     PRFile,
     PRIssueComment,
@@ -31,6 +33,9 @@ class PRStoreState:
     reviews: list[PRReview] = field(default_factory=list)
     issue_comments: list[PRIssueComment] = field(default_factory=list)
     review_threads: list[ReviewThread] = field(default_factory=list)
+    pending_review_id: int | None = None
+    pending_review_body: str = ""
+    pending_review_comments: list[PendingReviewComment] = field(default_factory=list)
 
     file_diffs: dict[str, FileDiff] = field(default_factory=dict)
     comments_by_file: dict[str, list[PRComment]] = field(default_factory=dict)
@@ -140,6 +145,7 @@ class PRStore:
                 self._state.comments_by_file[comment.path].append(comment)
 
             self._state.pr_loading = LoadingState.LOADED
+            await self._load_pending_review(pr)
 
             self._state.thread_info_cache = {
                 thread.root_comment_id: ReviewThreadInfo(
@@ -223,6 +229,295 @@ class PRStore:
             return content
         except Exception:
             return None
+
+    async def submit_issue_comment(self, body: str) -> PRIssueComment:
+        """Submit a PR-level comment and update local state."""
+        normalized = body.strip()
+        if not normalized:
+            raise ValueError("Comment cannot be empty")
+
+        comment = await self._service.create_issue_comment(self.pr_number, normalized)
+        self._state.issue_comments.append(comment)
+        self._state.issue_comments.sort(key=lambda item: item.created_at)
+        self._post_message(
+            self.IssueCommentsLoaded(comments=self._state.issue_comments)
+        )
+        return comment
+
+    async def submit_inline_comment(
+        self,
+        body: str,
+        *,
+        path: str,
+        line: int,
+        side: str,
+    ) -> PRComment:
+        """Submit a single inline comment on the current diff line."""
+        normalized = body.strip()
+        if not normalized:
+            raise ValueError("Comment cannot be empty")
+
+        pr = self._state.pr
+        if pr is None or not pr.head_sha:
+            raise ValueError("PR head SHA is unavailable")
+
+        return await self._service.create_review_comment(
+            self.pr_number,
+            body=normalized,
+            commit_id=pr.head_sha,
+            path=path,
+            line=line,
+            side=side,
+        )
+
+    def save_pending_inline_comment(
+        self,
+        body: str,
+        *,
+        path: str,
+        line: int,
+        side: Literal["LEFT", "RIGHT"],
+    ) -> PendingReviewComment:
+        normalized = body.strip()
+        if not normalized:
+            raise ValueError("Comment cannot be empty")
+
+        comments, draft = self._with_pending_comment_upserted(
+            body=normalized,
+            path=path,
+            line=line,
+            side=side,
+        )
+        self._state.pending_review_comments = comments
+        return draft
+
+    def get_pending_inline_comment(
+        self,
+        *,
+        path: str,
+        line: int,
+        side: Literal["LEFT", "RIGHT"],
+    ) -> PendingReviewComment | None:
+        for draft in self._state.pending_review_comments:
+            if draft.path == path and draft.line == line and draft.side == side:
+                return draft
+        return None
+
+    def get_pending_file_comments(self, filename: str) -> list[PendingReviewComment]:
+        return [
+            draft
+            for draft in self._state.pending_review_comments
+            if draft.path == filename
+        ]
+
+    def _with_pending_comment_upserted(
+        self,
+        *,
+        body: str,
+        path: str,
+        line: int,
+        side: Literal["LEFT", "RIGHT"],
+    ) -> tuple[list[PendingReviewComment], PendingReviewComment]:
+        draft = PendingReviewComment(body=body, path=path, line=line, side=side)
+        comments = list(self._state.pending_review_comments)
+        for index, existing in enumerate(comments):
+            if (
+                existing.path == path
+                and existing.line == line
+                and existing.side == side
+            ):
+                comments[index] = draft
+                break
+        else:
+            comments.append(draft)
+        comments.sort(key=lambda item: (item.path, item.line, item.side))
+        return comments, draft
+
+    def _with_pending_comment_removed(
+        self,
+        *,
+        path: str,
+        line: int,
+        side: Literal["LEFT", "RIGHT"],
+    ) -> tuple[list[PendingReviewComment], bool]:
+        comments = list(self._state.pending_review_comments)
+        for index, draft in enumerate(comments):
+            if draft.path == path and draft.line == line and draft.side == side:
+                del comments[index]
+                return comments, True
+        return comments, False
+
+    async def _replace_pending_review(
+        self,
+        comments: list[PendingReviewComment],
+    ) -> PRReview | None:
+        pending_review_id = self._state.pending_review_id
+        if pending_review_id is not None:
+            await self._service.delete_pending_review(self.pr_number, pending_review_id)
+
+        if not comments:
+            return None
+
+        pr = self._state.pr
+        commit_id = pr.head_sha if pr is not None and pr.head_sha else None
+        return await self._service.create_pending_review(
+            self.pr_number,
+            comments=comments,
+            body=self._state.pending_review_body or None,
+            commit_id=commit_id,
+        )
+
+    async def _load_pending_review(self, pr: PR) -> None:
+        pending_review = next(
+            (
+                review
+                for review in reversed(pr.reviews)
+                if review.state.name == "PENDING"
+            ),
+            None,
+        )
+        if pending_review is None:
+            self._state.pending_review_id = None
+            self._state.pending_review_body = ""
+            self._state.pending_review_comments = []
+            return
+
+        self._state.pending_review_id = pending_review.id or None
+        self._state.pending_review_body = pending_review.body
+
+        try:
+            review_comments = await self._service.list_review_comments(
+                self.pr_number,
+                pending_review.id,
+            )
+        except Exception:
+            self._state.pending_review_comments = []
+            return
+
+        pending_comments: list[PendingReviewComment] = []
+        for comment in review_comments:
+            anchor_line = comment.anchor_line
+            if not comment.path or anchor_line is None:
+                continue
+            if comment.side not in {"LEFT", "RIGHT"}:
+                continue
+            pending_comments.append(
+                PendingReviewComment(
+                    body=comment.body,
+                    path=comment.path,
+                    line=anchor_line,
+                    side=cast(Literal["LEFT", "RIGHT"], comment.side),
+                )
+            )
+
+        pending_comments.sort(key=lambda item: (item.path, item.line, item.side))
+        self._state.pending_review_comments = pending_comments
+
+    def delete_pending_inline_comment(
+        self,
+        *,
+        path: str,
+        line: int,
+        side: Literal["LEFT", "RIGHT"],
+    ) -> bool:
+        comments, deleted = self._with_pending_comment_removed(
+            path=path,
+            line=line,
+            side=side,
+        )
+        if deleted:
+            self._state.pending_review_comments = comments
+        return deleted
+
+    async def upsert_pending_inline_comment(
+        self,
+        body: str,
+        *,
+        path: str,
+        line: int,
+        side: Literal["LEFT", "RIGHT"],
+    ) -> PendingReviewComment:
+        normalized = body.strip()
+        if not normalized:
+            raise ValueError("Comment cannot be empty")
+
+        comments, draft = self._with_pending_comment_upserted(
+            body=normalized,
+            path=path,
+            line=line,
+            side=side,
+        )
+        review = await self._replace_pending_review(comments)
+        self._state.pending_review_comments = comments
+        self._state.pending_review_id = review.id if review is not None else None
+        if review is None:
+            self._state.pending_review_body = ""
+        elif review.body:
+            self._state.pending_review_body = review.body
+        return draft
+
+    async def remove_pending_inline_comment(
+        self,
+        *,
+        path: str,
+        line: int,
+        side: Literal["LEFT", "RIGHT"],
+    ) -> bool:
+        comments, deleted = self._with_pending_comment_removed(
+            path=path,
+            line=line,
+            side=side,
+        )
+        if not deleted:
+            return False
+
+        review = await self._replace_pending_review(comments)
+        self._state.pending_review_comments = comments
+        self._state.pending_review_id = review.id if review is not None else None
+        if review is None:
+            self._state.pending_review_body = ""
+        elif review.body:
+            self._state.pending_review_body = review.body
+        return True
+
+    async def submit_review(
+        self,
+        event: Literal["APPROVE", "COMMENT", "REQUEST_CHANGES"],
+        body: str = "",
+    ) -> None:
+        """Submit a top-level review and refresh local review state."""
+        normalized = body.strip()
+        pending_comments = list(self._state.pending_review_comments)
+        if event == "REQUEST_CHANGES" and not normalized:
+            raise ValueError("Review body cannot be empty")
+        if event == "COMMENT" and not normalized and not pending_comments:
+            raise ValueError("Review body cannot be empty")
+
+        pending_review_id = self._state.pending_review_id
+        if pending_review_id is not None:
+            await self._service.submit_pending_review(
+                self.pr_number,
+                pending_review_id,
+                event=event,
+                body=normalized if normalized else None,
+            )
+        else:
+            await self._service.submit_review(
+                self.pr_number,
+                event=event,
+                body=normalized if normalized else None,
+                comments=pending_comments,
+            )
+
+        self._state.pending_review_id = None
+        self._state.pending_review_body = ""
+        self._state.pending_review_comments.clear()
+
+    async def refresh_review_data(self) -> None:
+        """Refresh comments, reviews, and review threads without reloading file diffs."""
+        await self._load_pr_data()
+        for file in self._state.files:
+            file.comments = self._state.comments_by_file.get(file.filename, [])
 
     def get_file_comments(self, filename: str) -> list[PRComment]:
         return self._state.comments_by_file.get(filename, [])

@@ -6,8 +6,12 @@ from dataclasses import dataclass
 from pydantic import TypeAdapter
 
 from rit.state.models import (
+    PendingReviewComment,
     PR,
+    PRComment,
     PRFile,
+    PRIssueComment,
+    PRReview,
 )
 
 _PRFileListAdapter: TypeAdapter[list[PRFile]] = TypeAdapter(list[PRFile])
@@ -271,6 +275,192 @@ class GitHubService:
 
         return files
 
+    async def create_issue_comment(
+        self,
+        pr_number: int,
+        body: str,
+    ) -> PRIssueComment:
+        """Create a PR-level issue comment via the REST API."""
+        repo = await self.get_repo()
+        result = await self._run_gh(
+            [
+                "api",
+                "--method",
+                "POST",
+                f"/repos/{repo.full_name}/issues/{pr_number}/comments",
+                "-f",
+                f"body={body}",
+            ]
+        )
+        return PRIssueComment.model_validate(json.loads(result))
+
+    async def create_review_comment(
+        self,
+        pr_number: int,
+        *,
+        body: str,
+        commit_id: str,
+        path: str,
+        line: int,
+        side: str,
+    ) -> PRComment:
+        """Create an inline review comment via the REST API."""
+        repo = await self.get_repo()
+        result = await self._run_gh(
+            [
+                "api",
+                "--method",
+                "POST",
+                f"/repos/{repo.full_name}/pulls/{pr_number}/comments",
+                "-f",
+                f"body={body}",
+                "-f",
+                f"commit_id={commit_id}",
+                "-f",
+                f"path={path}",
+                "-F",
+                f"line={line}",
+                "-f",
+                f"side={side}",
+            ]
+        )
+        return PRComment.model_validate(json.loads(result))
+
+    async def create_pending_review(
+        self,
+        pr_number: int,
+        *,
+        comments: list[PendingReviewComment],
+        body: str | None = None,
+        commit_id: str | None = None,
+    ) -> PRReview:
+        repo = await self.get_repo()
+        payload: dict[str, object] = {
+            "comments": [
+                {
+                    "path": comment.path,
+                    "line": comment.line,
+                    "side": comment.side,
+                    "body": comment.body,
+                }
+                for comment in comments
+            ]
+        }
+        if body is not None and body != "":
+            payload["body"] = body
+        if commit_id is not None and commit_id != "":
+            payload["commit_id"] = commit_id
+        result = await self._run_gh(
+            [
+                "api",
+                "--method",
+                "POST",
+                f"/repos/{repo.full_name}/pulls/{pr_number}/reviews",
+                "--input",
+                "-",
+            ],
+            input_text=json.dumps(payload),
+        )
+        return PRReview.model_validate(json.loads(result))
+
+    async def list_review_comments(
+        self,
+        pr_number: int,
+        review_id: int,
+    ) -> list[PRComment]:
+        repo = await self.get_repo()
+        result = await self._run_gh(
+            [
+                "api",
+                f"/repos/{repo.full_name}/pulls/{pr_number}/reviews/{review_id}/comments",
+                "--paginate",
+            ]
+        )
+
+        comments: list[PRComment] = []
+        for line in result.strip().split("\n"):
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, list):
+                comments.extend(PRComment.model_validate(item) for item in data)
+            else:
+                comments.append(PRComment.model_validate(data))
+        return comments
+
+    async def delete_pending_review(self, pr_number: int, review_id: int) -> None:
+        repo = await self.get_repo()
+        await self._run_gh(
+            [
+                "api",
+                "--method",
+                "DELETE",
+                f"/repos/{repo.full_name}/pulls/{pr_number}/reviews/{review_id}",
+            ]
+        )
+
+    async def submit_pending_review(
+        self,
+        pr_number: int,
+        review_id: int,
+        *,
+        event: str,
+        body: str | None = None,
+    ) -> None:
+        repo = await self.get_repo()
+        payload: dict[str, object] = {"event": event}
+        if body is not None and body != "":
+            payload["body"] = body
+        await self._run_gh(
+            [
+                "api",
+                "--method",
+                "POST",
+                f"/repos/{repo.full_name}/pulls/{pr_number}/reviews/{review_id}/events",
+                "--input",
+                "-",
+            ],
+            input_text=json.dumps(payload),
+        )
+
+    async def submit_review(
+        self,
+        pr_number: int,
+        *,
+        event: str,
+        body: str | None = None,
+        comments: list[PendingReviewComment] | None = None,
+    ) -> None:
+        """Submit a top-level review via the REST API."""
+        repo = await self.get_repo()
+        payload: dict[str, object] = {"event": event}
+        if body is not None and body != "":
+            payload["body"] = body
+        if comments:
+            payload["comments"] = [
+                {
+                    "path": comment.path,
+                    "line": comment.line,
+                    "side": comment.side,
+                    "body": comment.body,
+                }
+                for comment in comments
+            ]
+        await self._run_gh(
+            [
+                "api",
+                "--method",
+                "POST",
+                f"/repos/{repo.full_name}/pulls/{pr_number}/reviews",
+                "--input",
+                "-",
+            ],
+            input_text=json.dumps(payload),
+        )
+
     async def _set_thread_resolved(self, thread_id: str, resolve: bool) -> bool:
         mutation_name = "resolveReviewThread" if resolve else "unresolveReviewThread"
         mutation = f"""
@@ -406,16 +596,24 @@ class GitHubService:
         if "errors" in data:
             raise GitHubError(f"Failed to unmark file as viewed: {data['errors']}")
 
-    async def _run_gh(self, args: list[str]) -> str:
+    async def _run_gh(
+        self,
+        args: list[str],
+        *,
+        input_text: str | None = None,
+    ) -> str:
         cmd = ["gh", *args]
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.PIPE if input_text is not None else None,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
 
-        stdout, stderr = await proc.communicate()
+        stdout, stderr = await proc.communicate(
+            input_text.encode() if input_text is not None else None
+        )
 
         if proc.returncode != 0:
             error_msg = (

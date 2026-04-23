@@ -35,6 +35,42 @@ def make_comment(
     )
 
 
+class TestPRComment:
+    """Tests for PRComment helpers."""
+
+    def test_anchor_line_prefers_original_line_for_left_side(self) -> None:
+        comment = PRComment(
+            id=1,
+            body="test",
+            user=PRUser(login="user"),
+            path="test.py",
+            line=20,
+            original_line=15,
+            side="LEFT",
+            created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        )
+
+        assert comment.anchor_side == "old"
+        assert comment.anchor_line == 15
+
+    def test_anchor_line_prefers_new_line_for_right_side(self) -> None:
+        comment = PRComment(
+            id=1,
+            body="test",
+            user=PRUser(login="user"),
+            path="test.py",
+            line=20,
+            original_line=15,
+            side="RIGHT",
+            created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        )
+
+        assert comment.anchor_side == "new"
+        assert comment.anchor_line == 20
+
+
 class TestCommentThread:
     """Tests for CommentThread dataclass."""
 

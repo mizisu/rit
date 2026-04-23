@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -102,6 +102,26 @@ class PRComment(BaseModel):
     node_id: str = Field(default="", alias="nodeId")
     pull_request_review_id: int | None = Field(default=None, alias="pullRequestReview")
 
+    @property
+    def anchor_side(self) -> Literal["old", "new", "auto"]:
+        if self.side == "LEFT":
+            return "old"
+        if self.side == "RIGHT":
+            return "new"
+        if self.original_line is not None and self.line is None:
+            return "old"
+        if self.line is not None:
+            return "new"
+        return "auto"
+
+    @property
+    def anchor_line(self) -> int | None:
+        if self.anchor_side == "old":
+            return self.original_line if self.original_line is not None else self.line
+        if self.anchor_side == "new":
+            return self.line if self.line is not None else self.original_line
+        return self.line if self.line is not None else self.original_line
+
     @field_validator("in_reply_to_id", mode="before")
     @classmethod
     def parse_reply_to(cls, v: Any) -> int | None:
@@ -115,6 +135,23 @@ class PRComment(BaseModel):
         if isinstance(v, dict):
             return v.get("databaseId")
         return v
+
+
+class PendingReviewComment(BaseModel):
+    """Locally staged inline review comment awaiting review submission."""
+
+    body: str = ""
+    path: str = ""
+    line: int = 0
+    side: Literal["LEFT", "RIGHT"] = "RIGHT"
+
+    @property
+    def anchor_side(self) -> Literal["old", "new"]:
+        return "old" if self.side == "LEFT" else "new"
+
+    @property
+    def anchor_line(self) -> int:
+        return self.line
 
 
 class ReviewRequest(BaseModel):
