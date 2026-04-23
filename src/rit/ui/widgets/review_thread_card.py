@@ -17,7 +17,6 @@ from rit.ui.icons import get_file_icon
 
 
 class ReviewThreadCard(Vertical):
-
     DEFAULT_CSS = """
     ReviewThreadCard {
         height: auto;
@@ -87,6 +86,10 @@ class ReviewThreadCard(Vertical):
     ReviewThreadCard .comment-content MarkdownH2,
     ReviewThreadCard .comment-content MarkdownH3 {
         margin: 0;
+    }
+
+    ReviewThreadCard .comment-content MarkdownH1 {
+        content-align: left middle;
     }
 
     /* Nested markdown <details> style (shared across timeline/diff) */
@@ -302,7 +305,6 @@ class ReviewThreadCard(Vertical):
 
 
 class ReviewThreadItem(Collapsible):
-
     DEFAULT_CSS = """
     ReviewThreadItem {
         height: auto;

@@ -15,7 +15,6 @@ from textual.widgets.tree import TreeNode
 
 from rit.state.models import FileViewedState, PRFile
 from rit.ui.messages import Flash
-from rit.ui.protocols import NavigableProtocol
 
 if TYPE_CHECKING:
     from rit.state.store import PRStore
@@ -475,7 +474,16 @@ class FileTree(Vertical):
         if file.comments:
             text.append(f" [{len(file.comments)}]", style="cyan")
 
+        pending_count = self._pending_comment_count(file.filename)
+        if pending_count:
+            text.append(f" [draft {pending_count}]", style="yellow")
+
         return text
+
+    def _pending_comment_count(self, filename: str) -> int:
+        if self.store is None:
+            return 0
+        return len(self.store.get_pending_file_comments(filename))
 
     def update_view_state(self, filename: str) -> None:
         """Re-render the label for a single file node (no tree rebuild)."""

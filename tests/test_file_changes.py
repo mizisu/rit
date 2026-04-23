@@ -140,6 +140,37 @@ async def test_theme_change_rehighlights_current_diff(
 
 
 @pytest.mark.asyncio
+async def test_file_tree_shows_pending_draft_badge() -> None:
+    store = PRStore()
+    store.state.files = [PRFile(filename="one.py", status="modified")]
+    store.save_pending_inline_comment(
+        "hello pending",
+        path="one.py",
+        line=7,
+        side="RIGHT",
+    )
+
+    class TestApp(App):
+        def __init__(self) -> None:
+            super().__init__()
+            self.settings = DummySettings()
+            self.settings_changed_signal = Signal(self, "settings-changed")
+
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await pilot.pause()
+        await pilot.pause()
+
+        node = file_changes.file_tree._file_nodes["one.py"]
+        assert "draft 1" in node.label.plain
+
+
+@pytest.mark.asyncio
 async def test_rapid_file_tree_selection_coalesces_to_latest_pending_diff() -> None:
     """Rapid file-tree selection should skip intermediate pending diff renders."""
 

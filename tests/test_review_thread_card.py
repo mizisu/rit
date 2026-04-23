@@ -95,6 +95,28 @@ async def test_timeline_variant_mounts_markdown_content() -> None:
 
 
 @pytest.mark.asyncio
+async def test_timeline_variant_left_aligns_markdown_h1() -> None:
+    """Markdown headings in thread cards should not use Textual's centered H1."""
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield ReviewThreadCard(
+                comments=[make_comment("# Test")],
+                compact=False,
+                variant="timeline",
+                show_diff_hunk=False,
+            )
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+
+        h1 = app.query_one("MarkdownH1")
+        assert h1.styles.content_align == ("left", "middle")
+
+
+@pytest.mark.asyncio
 async def test_timeline_variant_mounts_nested_details_without_mount_error() -> None:
     """Nested <details> blocks should mount without pre-mount MountError."""
     body = """<details>

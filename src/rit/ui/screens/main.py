@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import Literal
 
 from textual import events, getters, on
 from textual.app import ComposeResult
@@ -11,7 +12,7 @@ from textual.binding import Binding
 from textual.containers import VerticalScroll
 from textual.reactive import reactive
 from textual.screen import Screen
-from textual.widgets import Footer, Input, TabbedContent, TabPane, Tree
+from textual.widgets import Footer, Input, TabbedContent, TabPane, TextArea, Tree
 from textual.worker import Worker, WorkerState
 
 from rit.app import RitApp
@@ -21,11 +22,14 @@ from rit.ui.components.file_changes import FileChanges
 from rit.ui.components.pr_info import PRInfo
 from rit.ui.messages import Flash
 from rit.ui.screens.branch_picker import BranchPickerScreen
+from rit.ui.screens.review_submit import ReviewSubmitScreen
 from rit.ui.widgets import DiffView, Header
+from rit.ui.widgets.comment_editor import InlineCommentEditor
 
 
 _NAVIGATION_GROUP = Binding.Group("Navigation", compact=True)
 _COMMENT_GROUP = Binding.Group("Comments", compact=True)
+_REVIEW_GROUP = Binding.Group("Reviews", compact=True)
 _FILE_GROUP = Binding.Group("Files", compact=True)
 _TAB_GROUP = Binding.Group("Move Tab", compact=True)
 
@@ -113,6 +117,8 @@ _PR_INFO_BINDINGS = [
         "J", "next_comment", "Comments", key_display="shift+j/k", group=_COMMENT_GROUP
     ),
     Binding("K", "prev_comment", "", group=_COMMENT_GROUP, show=False),
+    Binding("c", "comment", "Comment", group=_COMMENT_GROUP),
+    Binding("S", "review", "Review", group=_REVIEW_GROUP),
     Binding("r", "toggle_resolve", "Resolve", tooltip="Toggle thread resolution"),
 ]
 
@@ -124,6 +130,9 @@ _FILES_BINDINGS = [
         key_display="shift+h/l",
         group=_NAVIGATION_GROUP,
     ),
+    Binding("c", "comment", "Comment", group=_COMMENT_GROUP),
+    Binding("d", "delete_pending_comment", "Delete Draft", group=_COMMENT_GROUP),
+    Binding("S", "review", "Review", group=_REVIEW_GROUP),
     Binding("L", "focus_right", "", group=_NAVIGATION_GROUP, show=False),
     Binding("e", "open_file_in_editor", "Edit", group=_FILE_GROUP),
     Binding(
@@ -386,8 +395,199 @@ class MainScreen(Screen):
             else:
                 self.notify("No thread selected", severity="warning")
 
+    def action_comment(self) -> None:
+        if self.store.state.pr is None:
+            self.post_message(Flash("PR not loaded yet", style="warning", duration=2.0))
+            return
+
+        if self.current_tab == 0:
+            self.pr_info.start_issue_comment()
+            return
+
+        if self.current_tab != 1:
+            return
+
+        self.run_worker(
+            self.file_changes.diff_view.open_inline_comment_editor(),
+            exclusive=False,
+            name="_open_inline_comment_editor",
+        )
+
+    def action_review(self) -> None:
+        if self.current_tab not in {0, 1} or self.store.state.pr is None:
+            return
+        self.app.push_screen(
+            ReviewSubmitScreen(
+                pending_comments_count=len(self.store.state.pending_review_comments),
+                pending_comments=list(self.store.state.pending_review_comments),
+                initial_body=self.store.state.pending_review_body,
+            ),
+            self._handle_review_submit,
+        )
+
+    def action_delete_pending_comment(self) -> None:
+        if self.current_tab != 1:
+            return
+        self.run_worker(
+            self._delete_pending_inline_comment(),
+            exclusive=False,
+            name="_delete_pending_inline_comment",
+        )
+
+    def _handle_review_submit(
+        self,
+        result: tuple[Literal["APPROVE", "COMMENT", "REQUEST_CHANGES"], str] | None,
+    ) -> None:
+        if result is None:
+            return
+        event, body = result
+        self.run_worker(
+            self._submit_review(event, body),
+            exclusive=False,
+            name="_submit_review",
+        )
+
+    @on(InlineCommentEditor.Submitted)
+    def on_inline_comment_submitted(
+        self,
+        event: InlineCommentEditor.Submitted,
+    ) -> None:
+        event.stop()
+        if event.kind == "issue":
+            self.pr_info.close_issue_comment()
+            self.run_worker(
+                self._submit_issue_comment(event.body),
+                exclusive=False,
+                name="_submit_issue_comment",
+            )
+            return
+
+        target = self.file_changes.diff_view.inline_comment_target()
+        if target is None:
+            self.post_message(
+                Flash("No diff line selected", style="warning", duration=2.0)
+            )
+            return
+
+        path, line, side = target
+        self.run_worker(
+            self._save_inline_comment_draft(
+                event.body, path=path, line=line, side=side
+            ),
+            exclusive=False,
+            name="_save_inline_comment_draft",
+        )
+
+    @on(InlineCommentEditor.Cancelled)
+    def on_inline_comment_cancelled(
+        self,
+        event: InlineCommentEditor.Cancelled,
+    ) -> None:
+        event.stop()
+        if event.kind == "issue":
+            self.pr_info.close_issue_comment()
+            return
+        self.run_worker(
+            self.file_changes.diff_view.close_inline_comment_editor(),
+            exclusive=False,
+            name="_close_inline_comment_editor",
+        )
+
     async def _toggle_resolve(self) -> tuple[bool, bool]:
         return await self.pr_info.toggle_resolve()
+
+    async def _submit_issue_comment(self, body: str) -> bool:
+        await self.store.submit_issue_comment(body)
+        self.pr_info.refresh_comments()
+        return True
+
+    async def _submit_review(
+        self,
+        event: Literal["APPROVE", "COMMENT", "REQUEST_CHANGES"],
+        body: str,
+    ) -> bool:
+        diff_view = self.file_changes.diff_view
+        current_file = diff_view.current_file
+        current_line = diff_view.cursor_line
+        current_pane = diff_view.active_pane
+
+        await self.store.submit_review(event, body)
+        await self.store.refresh_review_data()
+        self.pr_info.refresh_pr_data()
+        self.pr_info.refresh_comments()
+        self.file_changes.file_tree.refresh_files()
+
+        if current_file is not None:
+            diff = self.store.get_file_diff(current_file)
+            if diff is not None:
+                await diff_view.show_diff(current_file, diff)
+                if 0 <= current_line < len(diff_view._all_lines):
+                    diff_view._move_cursor(line=current_line, pane=current_pane)
+        return True
+
+    async def _save_inline_comment_draft(
+        self,
+        body: str,
+        *,
+        path: str,
+        line: int,
+        side: Literal["LEFT", "RIGHT"],
+    ) -> bool:
+        diff_view = self.file_changes.diff_view
+        current_file = diff_view.current_file
+        current_line = diff_view.cursor_line
+        current_pane = diff_view.active_pane
+
+        await diff_view.close_inline_comment_editor()
+        await self.store.upsert_pending_inline_comment(
+            body,
+            path=path,
+            line=line,
+            side=side,
+        )
+        self.file_changes.file_tree.refresh_files()
+
+        if current_file is None:
+            return True
+
+        diff = self.store.get_file_diff(current_file)
+        if diff is None:
+            return True
+
+        await diff_view.show_diff(current_file, diff)
+        if 0 <= current_line < len(diff_view._all_lines):
+            diff_view._move_cursor(line=current_line, pane=current_pane)
+        diff_view.focus()
+        return True
+
+    async def _delete_pending_inline_comment(self) -> bool:
+        diff_view = self.file_changes.diff_view
+        current_file = diff_view.current_file
+        current_line = diff_view.cursor_line
+        current_pane = diff_view.active_pane
+        target = diff_view._inline_comment_target_for_current_line()
+        if current_file is None or target is None:
+            return False
+
+        path, line, side = target
+        deleted = await self.store.remove_pending_inline_comment(
+            path=path,
+            line=line,
+            side=side,
+        )
+        if not deleted:
+            return False
+
+        self.file_changes.file_tree.refresh_files()
+        diff = self.store.get_file_diff(current_file)
+        if diff is None:
+            return True
+
+        await diff_view.show_diff(current_file, diff)
+        if 0 <= current_line < len(diff_view._all_lines):
+            diff_view._move_cursor(line=current_line, pane=current_pane)
+        diff_view.focus()
+        return True
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if (
@@ -399,9 +599,56 @@ class MainScreen(Screen):
                 success, _ = result
                 if not success:
                     self.notify("Failed to toggle resolve status", severity="error")
+            return
+
+        if event.worker.name == "_submit_issue_comment":
+            if event.state == WorkerState.SUCCESS:
+                self.post_message(
+                    Flash("Comment posted", style="success", duration=2.0)
+                )
+            elif event.state == WorkerState.ERROR:
+                self.notify("Failed to post comment", severity="error")
+            return
+
+        if event.worker.name == "_submit_review":
+            if event.state == WorkerState.SUCCESS:
+                self.post_message(
+                    Flash("Review submitted", style="success", duration=2.0)
+                )
+            elif event.state == WorkerState.ERROR:
+                self.notify("Failed to submit review", severity="error")
+            return
+
+        if event.worker.name == "_save_inline_comment_draft":
+            if event.state == WorkerState.SUCCESS:
+                self.post_message(Flash("Draft saved", style="success", duration=2.0))
+            elif event.state == WorkerState.ERROR:
+                self.notify("Failed to save draft", severity="error")
+            return
+
+        if event.worker.name == "_delete_pending_inline_comment":
+            if event.state == WorkerState.SUCCESS:
+                if event.worker.result:
+                    self.post_message(
+                        Flash("Draft deleted", style="success", duration=2.0)
+                    )
+                else:
+                    self.post_message(
+                        Flash("No draft on this line", style="warning", duration=2.0)
+                    )
+            elif event.state == WorkerState.ERROR:
+                self.notify("Failed to delete draft", severity="error")
+            return
+
+        if event.worker.name == "_open_inline_comment_editor":
+            if event.state == WorkerState.SUCCESS and event.worker.result is False:
+                self.post_message(
+                    Flash("No diff line selected", style="warning", duration=2.0)
+                )
+            return
 
     def on_key(self, event: events.Key) -> None:
-        if isinstance(self.focused, Input):
+        if isinstance(self.focused, (Input, TextArea)):
             return
         if event.key == "tab":
             self.next_tab()
@@ -419,7 +666,7 @@ class MainScreen(Screen):
             "prev_tab",
             "focus_left",
             "focus_right",
-        } and isinstance(self.focused, Input):
+        } and isinstance(self.focused, (Input, TextArea)):
             return False
         return super().check_action(action, parameters)
 

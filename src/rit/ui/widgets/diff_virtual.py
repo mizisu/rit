@@ -54,7 +54,10 @@ def _effective_virtual_window_shift_margin(view) -> int:
 
 
 def _rebuild_virtual_layout(view) -> None:
-    from rit.ui.widgets.diff_comments import estimate_thread_height
+    from rit.ui.widgets.diff_comments import (
+        estimate_pending_draft_height,
+        estimate_thread_height,
+    )
 
     view._hunk_header_top_offsets = []
     view._line_top_offsets = [0] * len(view._all_lines)
@@ -67,6 +70,8 @@ def _rebuild_virtual_layout(view) -> None:
         return
 
     comment_map = getattr(view, "_comment_threads_by_line", {})
+    pending_draft_map = getattr(view, "_pending_comment_drafts_by_line", {})
+    inline_editor_line = getattr(view, "_inline_comment_editor_line_index", None)
 
     offset = 0
     for hunk in view._diff.hunks:
@@ -79,6 +84,14 @@ def _rebuild_virtual_layout(view) -> None:
             view._line_heights[line_index] = height
             view._total_line_render_height += height
             offset += height
+
+            if line_index == inline_editor_line:
+                offset += view._inline_comment_editor_height()
+
+            drafts = pending_draft_map.get(line_index)
+            if drafts:
+                for draft in drafts:
+                    offset += estimate_pending_draft_height(draft)
 
             # Account for inline comment widgets after this line.
             threads = comment_map.get(line_index)
@@ -230,11 +243,20 @@ async def _remove_virtualized_lines(
     repair_ranges: list[tuple[int, int]] = []
 
     comment_widgets_map = getattr(view, "_comment_widgets_by_line", {})
+    pending_draft_widgets_map = getattr(view, "_pending_comment_widgets_by_line", {})
+    inline_editor_line = getattr(view, "_inline_comment_editor_line_index", None)
+    inline_editor_widget = getattr(view, "_inline_comment_editor_widget", None)
 
     for line_idx in range(start, end + 1):
         # Remove inline comment widgets attached to this line.
         for cw in comment_widgets_map.pop(line_idx, []):
             await cw.remove()
+        for dw in pending_draft_widgets_map.pop(line_idx, []):
+            await dw.remove()
+
+        if line_idx == inline_editor_line and inline_editor_widget is not None:
+            await inline_editor_widget.remove()
+            view._inline_comment_editor_widget = None
 
         block = view._unified_blocks_by_line.get(line_idx)
         if block is None:

@@ -17,8 +17,10 @@ from textual.reactive import reactive, var
 from textual.widget import Widget
 from textual.widgets import Input, Static
 
+from rit.ui.widgets.comment_editor import InlineCommentEditor
+
 from rit.core.types import DiffLine, FileDiff
-from rit.state.models import PRFile, ReviewThread
+from rit.state.models import PendingReviewComment, PRFile, ReviewThread
 from rit.ui.messages import Flash
 from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets import diff_cursor as _cursor
@@ -65,6 +67,7 @@ class DiffView(VerticalScroll):
     COMPLEX_DIFF_WINDOW_ROWS_MULTIPLIER = 0.75
     DYNAMIC_WINDOW_SHIFT_DIVISOR = 7
     MIN_DYNAMIC_WINDOW_RADIUS = 12
+    INLINE_COMMENT_EDITOR_HEIGHT = 8
 
     DEFAULT_CSS = Path(__file__).with_suffix(".tcss").read_text()
 
@@ -214,6 +217,15 @@ class DiffView(VerticalScroll):
         self._comment_threads_by_line: dict[int, list[ReviewThread]] = {}
         self._comment_line_indices: list[int] = []
         self._comment_widgets_by_line: dict[int, list[Widget]] = {}
+        self._comment_side_by_line: dict[int, Literal["old", "new", "auto"]] = {}
+        self._pending_comment_drafts_by_line: dict[int, list[PendingReviewComment]] = {}
+        self._pending_comment_widgets_by_line: dict[int, list[Widget]] = {}
+        self._inline_comment_editor_line_index: int | None = None
+        self._inline_comment_editor_target: (
+            tuple[str, int, Literal["LEFT", "RIGHT"]] | None
+        ) = None
+        self._inline_comment_editor_widget: InlineCommentEditor | None = None
+        self._inline_comment_editor_initial_body: str = ""
         self._pending_comment_jump: str | None = None  # "first" or "last"
 
         self.mode = mode
@@ -570,6 +582,106 @@ class DiffView(VerticalScroll):
             return "auto"
         return self._cursor_side_for_line(line)
 
+    def inline_comment_target(
+        self,
+    ) -> tuple[str, int, Literal["LEFT", "RIGHT"]] | None:
+        return self._inline_comment_editor_target
+
+    def has_inline_comment_editor_for_line(self, line_index: int) -> bool:
+        return (
+            self._inline_comment_editor_target is not None
+            and self._inline_comment_editor_line_index == line_index
+        )
+
+    def _inline_comment_target_for_current_line(
+        self,
+    ) -> tuple[str, int, Literal["LEFT", "RIGHT"]] | None:
+        line = self._current_line()
+        if not self.current_file or line is None:
+            return None
+
+        side = self._current_cursor_side()
+        if side == "old":
+            if line.old_line_no is None:
+                return None
+            return self.current_file, line.old_line_no, "LEFT"
+
+        if line.new_line_no is not None:
+            return self.current_file, line.new_line_no, "RIGHT"
+        if line.old_line_no is not None:
+            return self.current_file, line.old_line_no, "LEFT"
+        return None
+
+    def _inline_comment_editor_height(self) -> int:
+        return self.INLINE_COMMENT_EDITOR_HEIGHT
+
+    def _mount_inline_comment_editor(
+        self,
+        container: VerticalScroll,
+        line_index: int,
+        *,
+        before: Widget | None = None,
+    ) -> None:
+        if not self.has_inline_comment_editor_for_line(line_index):
+            return
+
+        widget = InlineCommentEditor(
+            kind="inline",
+            title="Add inline comment",
+            placeholder="Write a comment for the current line...",
+            initial_text=self._inline_comment_editor_initial_body,
+            id="diff-inline-comment-editor",
+        )
+        if before is not None:
+            container.mount(widget, before=before)
+        else:
+            container.mount(widget)
+        self._inline_comment_editor_widget = widget
+
+    def _focus_inline_comment_editor(self) -> None:
+        if self._inline_comment_editor_widget is not None:
+            self._inline_comment_editor_widget.open(
+                self._inline_comment_editor_initial_body
+            )
+
+    async def open_inline_comment_editor(self) -> bool:
+        line = self._current_line()
+        target = self._inline_comment_target_for_current_line()
+        if line is None or target is None:
+            return False
+
+        self._inline_comment_editor_line_index = line.line_index
+        self._inline_comment_editor_target = target
+        if self.store is not None:
+            path, target_line, side = target
+            existing = self.store.get_pending_inline_comment(
+                path=path,
+                line=target_line,
+                side=side,
+            )
+            self._inline_comment_editor_initial_body = existing.body if existing else ""
+        else:
+            self._inline_comment_editor_initial_body = ""
+        _virtual._rebuild_virtual_layout(self)
+        await self._render_diff()
+        self.call_after_refresh(self._focus_inline_comment_editor)
+        return True
+
+    async def close_inline_comment_editor(self) -> None:
+        if (
+            self._inline_comment_editor_line_index is None
+            and self._inline_comment_editor_target is None
+        ):
+            return
+
+        self._inline_comment_editor_line_index = None
+        self._inline_comment_editor_target = None
+        self._inline_comment_editor_widget = None
+        self._inline_comment_editor_initial_body = ""
+        _virtual._rebuild_virtual_layout(self)
+        await self._render_diff()
+        self.call_after_refresh(self.focus)
+
     def _get_cursor_text_for_target(
         self,
         line_index: int,
@@ -826,6 +938,10 @@ class DiffView(VerticalScroll):
         self._suspend_scroll_virtual_window_watch = True
         try:
             if filename != self.current_file:
+                self._inline_comment_editor_line_index = None
+                self._inline_comment_editor_target = None
+                self._inline_comment_editor_widget = None
+                self._inline_comment_editor_initial_body = ""
                 self._showing_full_file = False
                 self._saved_diff = None
 

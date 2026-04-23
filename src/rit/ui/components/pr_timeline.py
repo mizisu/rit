@@ -22,6 +22,7 @@ from rit.state.models import (
 )
 from rit.ui.icons import get_file_icon
 from rit.ui.collapsible_markdown import mount_markdown_with_details
+from rit.ui.widgets.comment_editor import InlineCommentEditor
 from rit.ui.widgets.review_thread_card import ReviewThreadItem
 
 if TYPE_CHECKING:
@@ -31,16 +32,18 @@ MOUNT_BATCH_SIZE = 3
 
 
 class PRTimeline(Vertical):
-
     DEFAULT_CSS = """
     PRTimeline {
         height: auto;
+    }
+
+    PRTimeline MarkdownH1 {
+        content-align: left middle;
     }
     """
 
     @dataclass
     class ResolveToggled(Message):
-
         thread_id: str
         root_comment_id: int
         is_resolved: bool  # New state after toggle
@@ -61,6 +64,12 @@ class PRTimeline(Vertical):
             yield Markdown("*Loading...*", id="pr-description")
 
         yield Vertical(id="comments-container")
+        yield InlineCommentEditor(
+            kind="issue",
+            title="Add comment",
+            placeholder="Write a PR-level comment...",
+            id="issue-comment-editor",
+        )
 
     def on_mount(self) -> None:
         try:
@@ -72,6 +81,12 @@ class PRTimeline(Vertical):
 
     def set_scroll_container(self, container: VerticalScroll) -> None:
         self._scroll_container = container
+
+    def start_issue_comment(self) -> None:
+        self.query_one("#issue-comment-editor", InlineCommentEditor).open()
+
+    def close_issue_comment(self) -> None:
+        self.query_one("#issue-comment-editor", InlineCommentEditor).close()
 
     def refresh_description(self, pr: PR | None) -> None:
         if not pr:
@@ -207,11 +222,7 @@ class PRTimeline(Vertical):
         is_resolved = thread_info.is_resolved if thread_info else False
         thread_id = thread_info.thread_id if thread_info else ""
 
-        line_info = ""
-        if root.line:
-            line_info = f":{root.line}"
-        elif root.original_line:
-            line_info = f":{root.original_line}"
+        line_info = f":{root.anchor_line}" if root.anchor_line else ""
         file_icon = get_file_icon(root.path)
 
         if is_resolved:
@@ -223,7 +234,7 @@ class PRTimeline(Vertical):
             collapsible_classes = "--thread"
             collapsed = False
 
-        line_no = root.line or root.original_line
+        line_no = root.anchor_line
         collapsible = ReviewThreadItem(
             title=collapsible_title,
             path=root.path,
@@ -481,11 +492,7 @@ class PRTimeline(Vertical):
         new_title: str | None = None
         for comment in self.store.state.comments:
             if comment.id == root_comment_id:
-                line_info = ""
-                if comment.line:
-                    line_info = f":{comment.line}"
-                elif comment.original_line:
-                    line_info = f":{comment.original_line}"
+                line_info = f":{comment.anchor_line}" if comment.anchor_line else ""
                 file_icon = get_file_icon(comment.path)
                 if is_resolved:
                     new_title = f"✓ Resolved: {file_icon} {comment.path}{line_info}"

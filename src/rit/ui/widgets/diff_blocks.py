@@ -52,11 +52,15 @@ def _should_use_split_block_renderer(view) -> bool:
 def _can_render_in_unified_block(view, line: DiffLine) -> bool:
     if line.line_index in view._comment_threads_by_line:
         return False
+    if line.line_index == getattr(view, "_inline_comment_editor_line_index", None):
+        return False
     return True
 
 
 def _can_render_in_split_block(view, line: DiffLine) -> bool:
     if line.line_index in view._comment_threads_by_line:
+        return False
+    if line.line_index == getattr(view, "_inline_comment_editor_line_index", None):
         return False
     return True
 

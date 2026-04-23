@@ -100,6 +100,12 @@ class PRInfo(Container):
         timeline = self.query_one(PRTimeline)
         timeline.refresh_timeline()
 
+    def start_issue_comment(self) -> None:
+        self.query_one(PRTimeline).start_issue_comment()
+
+    def close_issue_comment(self) -> None:
+        self.query_one(PRTimeline).close_issue_comment()
+
     def refresh_reviewers(self) -> None:
         self._update_reviewers()
 
