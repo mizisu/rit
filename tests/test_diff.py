@@ -192,6 +192,80 @@ class TestParsePatch:
         assert trailing_delete.new_line_no is None
         assert trailing_delete.old_content == "old gamma"
 
+    def test_multi_line_replace_aligns_matching_pairs_after_leading_add(self):
+        """Replace blocks should keep similar pairs together after a leading add."""
+        patch = """@@ -1,4 +1,5 @@
+ line1
+-old alpha
+-old beta
++new gamma
++new alpha
++new beta
+ line2"""
+
+        diff = parse_patch(patch, "test.py")
+
+        hunk = diff.hunks[0]
+        assert len(hunk.lines) == 5
+
+        leading_add = hunk.lines[1]
+        first_change = hunk.lines[2]
+        second_change = hunk.lines[3]
+
+        assert leading_add.is_added
+        assert leading_add.old_line_no is None
+        assert leading_add.new_line_no == 2
+        assert leading_add.new_content == "new gamma"
+
+        assert first_change.is_modified
+        assert first_change.old_line_no == 2
+        assert first_change.new_line_no == 3
+        assert first_change.old_content == "old alpha"
+        assert first_change.new_content == "new alpha"
+
+        assert second_change.is_modified
+        assert second_change.old_line_no == 3
+        assert second_change.new_line_no == 4
+        assert second_change.old_content == "old beta"
+        assert second_change.new_content == "new beta"
+
+    def test_multi_line_replace_aligns_matching_pairs_after_leading_delete(self):
+        """Replace blocks should keep similar pairs together after a leading delete."""
+        patch = """@@ -1,5 +1,4 @@
+ line1
+-old gamma
+-old alpha
+-old beta
++new alpha
++new beta
+ line2"""
+
+        diff = parse_patch(patch, "test.py")
+
+        hunk = diff.hunks[0]
+        assert len(hunk.lines) == 5
+
+        leading_delete = hunk.lines[1]
+        first_change = hunk.lines[2]
+        second_change = hunk.lines[3]
+
+        assert leading_delete.is_deleted
+        assert leading_delete.old_line_no == 2
+        assert leading_delete.new_line_no is None
+        assert leading_delete.old_content == "old gamma"
+
+        assert first_change.is_modified
+        assert first_change.old_line_no == 3
+        assert first_change.new_line_no == 2
+        assert first_change.old_content == "old alpha"
+        assert first_change.new_content == "new alpha"
+
+        assert second_change.is_modified
+        assert second_change.old_line_no == 4
+        assert second_change.new_line_no == 3
+        assert second_change.old_content == "old beta"
+        assert second_change.new_content == "new beta"
+
 
 class TestComputeWordDiff:
     """Tests for word-level diff."""

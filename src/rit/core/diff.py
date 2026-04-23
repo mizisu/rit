@@ -157,6 +157,92 @@ def _identify_modified_lines(hunk: DiffHunk) -> None:
     hunk.lines = new_lines
 
 
+def _replace_pair_cost(old_text: str, new_text: str) -> float:
+    if old_text == new_text:
+        return 0.0
+
+    similarity = _compute_similarity(old_text, new_text)
+    if similarity < WORD_DIFF_THRESHOLD:
+        return 2.1
+
+    return 1.0 - similarity
+
+
+def _align_replace_lines(
+    old_lines: list[str],
+    new_lines: list[str],
+) -> list[tuple[str | None, str | None]]:
+    old_count = len(old_lines)
+    new_count = len(new_lines)
+
+    if old_count < 2 or new_count < 2:
+        aligned_lines: list[tuple[str | None, str | None]] = []
+        max_count = max(old_count, new_count)
+        for index in range(max_count):
+            old_text = old_lines[index] if index < old_count else None
+            new_text = new_lines[index] if index < new_count else None
+            aligned_lines.append((old_text, new_text))
+        return aligned_lines
+
+    costs = [[0.0] * (new_count + 1) for _ in range(old_count + 1)]
+    choices = [[""] * (new_count + 1) for _ in range(old_count + 1)]
+
+    for old_index in range(1, old_count + 1):
+        costs[old_index][0] = costs[old_index - 1][0] + 1.0
+        choices[old_index][0] = "delete"
+
+    for new_index in range(1, new_count + 1):
+        costs[0][new_index] = costs[0][new_index - 1] + 1.0
+        choices[0][new_index] = "insert"
+
+    for old_index in range(1, old_count + 1):
+        old_text = old_lines[old_index - 1]
+        for new_index in range(1, new_count + 1):
+            new_text = new_lines[new_index - 1]
+            pair_cost = costs[old_index - 1][new_index - 1] + _replace_pair_cost(
+                old_text, new_text
+            )
+            delete_cost = costs[old_index - 1][new_index] + 1.0
+            insert_cost = costs[old_index][new_index - 1] + 1.0
+
+            if (
+                old_text == new_text
+                and pair_cost <= delete_cost
+                and pair_cost <= insert_cost
+            ):
+                costs[old_index][new_index] = pair_cost
+                choices[old_index][new_index] = "pair"
+            elif pair_cost < delete_cost and pair_cost < insert_cost:
+                costs[old_index][new_index] = pair_cost
+                choices[old_index][new_index] = "pair"
+            elif delete_cost <= insert_cost:
+                costs[old_index][new_index] = delete_cost
+                choices[old_index][new_index] = "delete"
+            else:
+                costs[old_index][new_index] = insert_cost
+                choices[old_index][new_index] = "insert"
+
+    aligned_lines: list[tuple[str | None, str | None]] = []
+    old_index = old_count
+    new_index = new_count
+
+    while old_index > 0 or new_index > 0:
+        choice = choices[old_index][new_index]
+        if choice == "pair":
+            aligned_lines.append((old_lines[old_index - 1], new_lines[new_index - 1]))
+            old_index -= 1
+            new_index -= 1
+        elif choice == "delete":
+            aligned_lines.append((old_lines[old_index - 1], None))
+            old_index -= 1
+        else:
+            aligned_lines.append((None, new_lines[new_index - 1]))
+            new_index -= 1
+
+    aligned_lines.reverse()
+    return aligned_lines
+
+
 def _compute_similarity(a: str, b: str) -> float:
     if not a and not b:
         return 1.0
@@ -396,11 +482,8 @@ def compute_line_diff(old_lines: list[str], new_lines: list[str]) -> list[DiffLi
         elif tag == "replace":
             old_chunk = old_lines[i1:i2]
             new_chunk = new_lines[j1:j2]
-            max_len = max(len(old_chunk), len(new_chunk))
-            for idx in range(max_len):
-                old_text = old_chunk[idx] if idx < len(old_chunk) else None
-                new_text = new_chunk[idx] if idx < len(new_chunk) else None
 
+            for old_text, new_text in _align_replace_lines(old_chunk, new_chunk):
                 if old_text is not None and new_text is not None:
                     if old_text == new_text:
                         result.append(
