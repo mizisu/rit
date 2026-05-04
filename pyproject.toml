@@ -38,3 +38,20 @@ asyncio_default_fixture_loop_scope = "function"
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+
+[tool.pyright]
+pythonVersion = "3.14"
+typeCheckingMode = "basic"
+
+include = ["src/rit", "tests"]
+exclude = ["**/__pycache__/**", "**/site-packages/**"]
+
+venvPath = "."
+venv = ".venv"
+
+defineConstant = { DEBUG = true }
+
+reportMissingImports = "error"
+reportMissingTypeStubs = false
+reportGeneralTypeIssues = "warning"
+reportAttributeAccessIssue = "warning"

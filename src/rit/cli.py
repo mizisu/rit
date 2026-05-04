@@ -36,7 +36,7 @@ def parse_pr_reference(pr_ref: str) -> tuple[str | None, str | None, int]:
 
     raise click.BadParameter(
         f"Invalid PR reference: {pr_ref}. "
-        "Use '123', 'owner/repo#123', or 'https://github.com/owner/repo/pull/123'"
+        + "Use '123', 'owner/repo#123', or 'https://github.com/owner/repo/pull/123'"
     )
 
 
