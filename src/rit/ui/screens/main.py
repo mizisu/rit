@@ -26,7 +26,6 @@ from rit.ui.screens.review_submit import ReviewSubmitScreen
 from rit.ui.widgets import DiffView, Header
 from rit.ui.widgets.comment_editor import InlineCommentEditor
 
-
 _NAVIGATION_GROUP = Binding.Group("Navigation", compact=True)
 _COMMENT_GROUP = Binding.Group("Comments", compact=True)
 _REVIEW_GROUP = Binding.Group("Reviews", compact=True)
@@ -183,6 +182,7 @@ class MainScreen(Screen):
         self.pr_number = pr_number
 
         self.store = PRStore(owner=owner, repo=repo, pr_number=pr_number)
+        self.store.set_message_sink(self._post_store_message)
 
     def compose(self) -> ComposeResult:
         yield Header(
@@ -205,23 +205,13 @@ class MainScreen(Screen):
 
     async def _load_data(self) -> None:
         await self.store.load_all()
-        self._update_ui_after_load()
         await self.store.load_file_view_states()
         self._apply_viewed_states()
 
-    def _update_ui_after_load(self) -> None:
-        state = self.store.state
-
-        if state.error:
-            self.notify(state.error, title="Error", severity="error")
+    def _post_store_message(self, message) -> None:
+        if isinstance(message, PRStore.FileSelected):
             return
-
-        if state.pr:
-            self.header.update_from_pr(state.pr)
-
-        self.pr_info.refresh_pr_data()
-        self.pr_info.refresh_comments()
-        self.file_changes.refresh_files()
+        self.post_message(message)
 
     def switch_tab(self, tab_index: int) -> None:
         if not 0 <= tab_index < len(_TAB_IDS):
@@ -282,6 +272,22 @@ class MainScreen(Screen):
     @on(PRStore.PRLoaded)
     def on_pr_loaded(self, event: PRStore.PRLoaded) -> None:
         self.header.update_from_pr(event.pr)
+        self.pr_info.refresh_summary()
+
+    @on(PRStore.PRDiscussionLoaded)
+    def on_pr_discussion_loaded(self, _event: PRStore.PRDiscussionLoaded) -> None:
+        self.pr_info.refresh_pr_data()
+        self.pr_info.refresh_comments()
+        self.file_changes.file_tree.refresh_files()
+        self.run_worker(
+            self._refresh_current_diff_after_discussion(),
+            exclusive=False,
+            name="_refresh_current_diff_after_discussion",
+        )
+
+    @on(PRStore.FilesLoaded)
+    def on_files_loaded(self, _event: PRStore.FilesLoaded) -> None:
+        self.file_changes.refresh_files()
 
     @on(PRStore.ErrorOccurred)
     def on_store_error(self, event: PRStore.ErrorOccurred) -> None:
@@ -495,6 +501,22 @@ class MainScreen(Screen):
 
     async def _toggle_resolve(self) -> tuple[bool, bool]:
         return await self.pr_info.toggle_resolve()
+
+    async def _refresh_current_diff_after_discussion(self) -> None:
+        diff_view = self.file_changes.diff_view
+        current_file = diff_view.current_file
+        if current_file is None:
+            return
+
+        diff = self.store.get_file_diff(current_file)
+        if diff is None:
+            return
+
+        current_line = diff_view.cursor_line
+        current_pane = diff_view.active_pane
+        await diff_view.show_diff(current_file, diff)
+        if 0 <= current_line < len(diff_view._all_lines):
+            diff_view._move_cursor(line=current_line, pane=current_pane)
 
     async def _submit_issue_comment(self, body: str) -> bool:
         await self.store.submit_issue_comment(body)

@@ -1,13 +1,17 @@
 """Tests for the main rit application."""
 
+import asyncio
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from textual.widgets import Static
 
 from rit.app import RitApp
 from rit.cli import parse_pr_reference
-from rit.state.models import FileViewedState, PR, PRFile
+from rit.core.diff import parse_patch
+from rit.state.models import PR, FileViewedState, LoadingState, PRFile
 from rit.ui.screens.branch_picker import BranchPickerScreen
 
 
@@ -39,9 +43,12 @@ def _simple_diff(
     old: str = "old_value",
     new: str = "new_value",
 ):
-    from rit.core.diff import parse_patch
-
     return parse_patch(f"@@ -{line_no} +{line_no} @@\n-{old}\n+{new}", filename)
+
+
+def _static_text(widget: Static) -> str:
+    content = getattr(widget, "content", "")
+    return str(getattr(content, "plain", content))
 
 
 class TestPRReferenceParsing:
@@ -153,6 +160,81 @@ class TestRitApp:
             await pilot.pause()
             tree = app.screen.query_one("#file-tree", Tree)
             assert tree.has_focus
+
+    async def test_staged_load_paints_summary_and_first_file_before_full_load(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        release = threading.Event()
+        patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+
+        async def fake_load_all(store) -> None:
+            store.state.pr = PR(
+                number=123,
+                title="Staged PR",
+                base_ref="main",
+                head_ref="feature",
+                changed_files=2,
+            )
+            store.state.files_total_count = 2
+            store._post_message(store.PRLoaded(pr=store.state.pr))
+
+            first_file = PRFile(filename="one.py", status="modified", patch=patch)
+            store.state.files_loading = LoadingState.LOADING
+            store.state.files = [first_file]
+            store.state.file_diffs = {"one.py": parse_patch(patch, "one.py")}
+            store.state.files_loaded_count = 1
+            store._post_message(
+                store.FilesLoaded(
+                    files=list(store.state.files), loaded_count=1, total_count=2
+                )
+            )
+
+            await asyncio.to_thread(release.wait, 1.0)
+
+            store.state.pr = store.state.pr.model_copy(update={"body": "Loaded body"})
+            store._post_message(store.PRDiscussionLoaded(pr=store.state.pr))
+
+            second_file = PRFile(filename="two.py", status="modified", patch=patch)
+            store.state.files.append(second_file)
+            store.state.file_diffs["two.py"] = parse_patch(patch, "two.py")
+            store.state.files_loaded_count = 2
+            store.state.files_loading = LoadingState.LOADED
+            store._post_message(
+                store.FilesLoaded(
+                    files=list(store.state.files), loaded_count=2, total_count=2
+                )
+            )
+
+        async def fake_load_file_view_states(_store) -> None:
+            return None
+
+        monkeypatch.setattr("rit.state.store.PRStore.load_all", fake_load_all)
+        monkeypatch.setattr(
+            "rit.state.store.PRStore.load_file_view_states",
+            fake_load_file_view_states,
+        )
+
+        app = RitApp(owner="test", repo="repo", pr_number=123)
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.pause()
+
+            screen = app.screen
+            file_count = screen.query_one("#file-count", Static)
+
+            assert screen.header.pr_title == "Staged PR"
+            assert screen.file_changes.diff_view.current_file == "one.py"
+            assert _static_text(file_count) == "Files (1/2)"
+
+            release.set()
+            await pilot.pause()
+            await pilot.pause()
+            await pilot.pause()
+
+            assert screen.file_changes.diff_view.current_file == "one.py"
+            assert _static_text(file_count) == "Files (2)"
 
     async def test_files_tab_shift_hl_moves_between_tree_and_split_panes(
         self, app: RitApp, monkeypatch: pytest.MonkeyPatch

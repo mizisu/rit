@@ -2,17 +2,18 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Literal, cast
+from typing import Callable, Literal, cast
 
 from textual.message import Message
 
 from rit.core.diff import parse_patch
 from rit.core.types import FileDiff
-from rit.services.github import GitHubService, ReviewThreadInfo
+from rit.services.github import GitHubService, PRDiscussion, ReviewThreadInfo
 from rit.state.models import (
     PR,
     FileViewedState,
     LoadingState,
+    NodeList,
     PendingReviewComment,
     PRComment,
     PRFile,
@@ -61,6 +62,8 @@ class PRStore:
     @dataclass
     class FilesLoaded(Message):
         files: list[PRFile]
+        loaded_count: int = 0
+        total_count: int = 0
 
     @dataclass
     class FileSelected(Message):
@@ -96,6 +99,10 @@ class PRStore:
         is_resolved: bool
 
     @dataclass
+    class PRDiscussionLoaded(Message):
+        pr: PR
+
+    @dataclass
     class ErrorOccurred(Message):
         error: str
         source: str = "unknown"
@@ -109,63 +116,78 @@ class PRStore:
         self.pr_number = pr_number
         self._service = GitHubService(owner=owner, repo=repo)
         self._state = PRStoreState()
+        self._message_sink: Callable[[Message], None] | None = None
 
     @property
     def state(self) -> PRStoreState:
         return self._state
 
+    def set_message_sink(self, sink: Callable[[Message], None]) -> None:
+        self._message_sink = sink
+
     def _post_message(self, message: Message) -> None:
-        pass
+        if self._message_sink is not None:
+            self._message_sink(message)
 
     async def load_all(self) -> None:
-        """Load all PR data (GraphQL + REST in parallel)."""
+        """Load PR summary first, then discussion and files in parallel."""
+        await self.load_pr_summary()
+        if self._state.pr is None:
+            return
+
         await asyncio.gather(
-            self._load_pr_data(),
+            self.load_pr_discussion(),
             self.load_files(),
             return_exceptions=True,
         )
+
+    async def load_pr_summary(self) -> None:
+        self._state.pr_loading = LoadingState.LOADING
+        try:
+            pr = await self._service.get_pr_summary(self.pr_number)
+            self._state.pr = pr
+            self._state.pr_loading = LoadingState.LOADED
+            self._state.files_total_count = pr.changed_files
+            self._post_message(self.PRLoaded(pr=pr))
+        except Exception as e:
+            self._state.pr_loading = LoadingState.ERROR
+            self._state.error = str(e)
+            self._post_message(
+                self.ErrorOccurred(error=str(e), source="load_pr_summary")
+            )
+
+    async def load_pr_discussion(self) -> None:
+        try:
+            discussion = await self._service.get_pr_discussion(self.pr_number)
+            pr = self._merge_pr_discussion(discussion)
+            self._apply_discussion_state(pr)
+            await self._load_pending_review(pr)
+
+            self._post_message(self.PRDiscussionLoaded(pr=pr))
+            self._post_message(self.CommentsLoaded(comments=self._state.comments))
+            self._post_message(self.ReviewsLoaded(reviews=pr.reviews))
+            self._post_message(self.IssueCommentsLoaded(comments=pr.issue_comments))
+            self._post_message(
+                self.ThreadsLoaded(threads=self._state.thread_info_cache)
+            )
+        except Exception as e:
+            self._state.error = str(e)
+            self._post_message(
+                self.ErrorOccurred(error=str(e), source="load_pr_discussion")
+            )
 
     async def _load_pr_data(self) -> None:
         self._state.pr_loading = LoadingState.LOADING
         try:
             pr = await self._service.get_pr_all(self.pr_number)
             self._state.pr = pr
-            self._state.reviews = pr.reviews
-            self._state.issue_comments = pr.issue_comments
-            self._state.review_threads = pr.review_threads
-
-            all_comments: list[PRComment] = []
-            for thread in pr.review_threads:
-                all_comments.extend(thread.comments)
-            self._state.comments = all_comments
-            self._state.comments_by_file = {}
-            for comment in all_comments:
-                if comment.path not in self._state.comments_by_file:
-                    self._state.comments_by_file[comment.path] = []
-                self._state.comments_by_file[comment.path].append(comment)
-
+            self._state.files_total_count = pr.changed_files
+            self._apply_discussion_state(pr)
             self._state.pr_loading = LoadingState.LOADED
             await self._load_pending_review(pr)
 
-            self._state.thread_info_cache = {
-                thread.root_comment_id: ReviewThreadInfo(
-                    thread_id=thread.id,
-                    is_resolved=thread.is_resolved,
-                    path=thread.path,
-                    line=thread.line,
-                    root_comment_id=thread.root_comment_id,
-                )
-                for thread in pr.review_threads
-                if thread.root_comment_id
-            }
-            self._state.thread_cache = {
-                thread.root_comment_id: thread
-                for thread in pr.review_threads
-                if thread.root_comment_id
-            }
-
             self._post_message(self.PRLoaded(pr=pr))
-            self._post_message(self.CommentsLoaded(comments=all_comments))
+            self._post_message(self.CommentsLoaded(comments=self._state.comments))
             self._post_message(self.ReviewsLoaded(reviews=pr.reviews))
             self._post_message(self.IssueCommentsLoaded(comments=pr.issue_comments))
             self._post_message(
@@ -178,24 +200,65 @@ class PRStore:
             self._post_message(self.ErrorOccurred(error=str(e), source="load_pr_data"))
 
     async def load_files(self) -> None:
-        """Load files via REST API (GraphQL doesn't provide patch data)."""
+        """Load files incrementally via paginated REST API."""
         self._state.files_loading = LoadingState.LOADING
+        self._state.files = []
+        self._state.file_diffs = {}
+        self._state.files_loaded_count = 0
+        if self._state.pr is None:
+            self._state.files_total_count = 0
+
+        page = 1
+        per_page = 100
+
         try:
-            files = await self._service.get_pr_files(self.pr_number)
-            self._state.files = files
-            self._state.files_total_count = len(files)
+            while True:
+                batch = await self._service.get_pr_files_page(
+                    self.pr_number,
+                    page=page,
+                    per_page=per_page,
+                )
+                if not batch:
+                    break
 
-            self._state.file_diffs = await asyncio.to_thread(
-                self._parse_all_patches, files
-            )
-            self._state.files_loaded_count = len(files)
+                for file in batch:
+                    file.comments = self._state.comments_by_file.get(file.filename, [])
 
-            for file in files:
-                file.comments = self._state.comments_by_file.get(file.filename, [])
+                self._state.files.extend(batch)
+                self._state.file_diffs.update(
+                    await asyncio.to_thread(self._parse_all_patches, batch)
+                )
+                self._state.files_loaded_count = len(self._state.files)
+                if self._state.files_total_count < self._state.files_loaded_count:
+                    self._state.files_total_count = self._state.files_loaded_count
+
+                self._post_message(
+                    self.LoadingProgress(
+                        current=self._state.files_loaded_count,
+                        total=self._state.files_total_count,
+                    )
+                )
+                self._post_message(
+                    self.FilesLoaded(
+                        files=list(self._state.files),
+                        loaded_count=self._state.files_loaded_count,
+                        total_count=self._state.files_total_count,
+                    )
+                )
+
+                if len(batch) < per_page:
+                    break
+                page += 1
 
             self._state.files_loading = LoadingState.LOADED
-            self._post_message(self.FilesLoaded(files=files))
-
+            if not self._state.files:
+                self._post_message(
+                    self.FilesLoaded(
+                        files=[],
+                        loaded_count=0,
+                        total_count=self._state.files_total_count,
+                    )
+                )
         except Exception as e:
             self._state.files_loading = LoadingState.ERROR
             self._state.error = str(e)
@@ -203,6 +266,54 @@ class PRStore:
 
     def _parse_all_patches(self, files: list[PRFile]) -> dict[str, FileDiff]:
         return {f.filename: parse_patch(f.patch, f.filename) for f in files}
+
+    def _merge_pr_discussion(self, discussion: PRDiscussion) -> PR:
+        pr = self._state.pr or PR(number=self.pr_number)
+        merged_pr = pr.model_copy(
+            update={
+                "body": discussion.body,
+                "reviews_connection": NodeList(nodes=discussion.reviews),
+                "issue_comments_connection": NodeList(nodes=discussion.issue_comments),
+                "review_threads_connection": NodeList(nodes=discussion.review_threads),
+            }
+        )
+        self._state.pr = merged_pr
+        return merged_pr
+
+    def _apply_discussion_state(self, pr: PR) -> None:
+        self._state.reviews = pr.reviews
+        self._state.issue_comments = pr.issue_comments
+        self._state.review_threads = pr.review_threads
+
+        all_comments: list[PRComment] = []
+        for thread in pr.review_threads:
+            all_comments.extend(thread.comments)
+        self._state.comments = all_comments
+
+        comments_by_file: dict[str, list[PRComment]] = {}
+        for comment in all_comments:
+            comments_by_file.setdefault(comment.path, []).append(comment)
+        self._state.comments_by_file = comments_by_file
+
+        for file in self._state.files:
+            file.comments = comments_by_file.get(file.filename, [])
+
+        self._state.thread_info_cache = {
+            thread.root_comment_id: ReviewThreadInfo(
+                thread_id=thread.id,
+                is_resolved=thread.is_resolved,
+                path=thread.path,
+                line=thread.line,
+                root_comment_id=thread.root_comment_id,
+            )
+            for thread in pr.review_threads
+            if thread.root_comment_id
+        }
+        self._state.thread_cache = {
+            thread.root_comment_id: thread
+            for thread in pr.review_threads
+            if thread.root_comment_id
+        }
 
     def select_file(self, filename: str) -> None:
         if filename in self._state.file_diffs:

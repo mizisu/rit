@@ -13,7 +13,7 @@ from textual.reactive import reactive, var
 from textual.widgets import Input, Static, Tree
 from textual.widgets.tree import TreeNode
 
-from rit.state.models import FileViewedState, PRFile
+from rit.state.models import FileViewedState, LoadingState, PRFile
 from rit.ui.messages import Flash
 
 if TYPE_CHECKING:
@@ -136,14 +136,16 @@ class FileTree(Vertical):
         self._update_file_count_display()
 
     def refresh_files(self, files: list[PRFile] | None = None) -> None:
+        total_file_count = 0
         if files is None and self.store:
             files = self.store.state.files
+            total_file_count = self.store.state.files_total_count
 
         if files is None:
             files = []
 
         self._all_files = list(files)
-        self.total_file_count = len(self._all_files)
+        self.total_file_count = max(total_file_count, len(self._all_files))
 
         self._apply_search_filter()
 
@@ -437,7 +439,12 @@ class FileTree(Vertical):
     def _update_file_count_display(self) -> None:
         try:
             count_widget = self.query_one("#file-count", Static)
-            if self._search_query:
+            is_incremental_loading = (
+                self.store is not None
+                and self.store.state.files_loading == LoadingState.LOADING
+                and self.file_count < self.total_file_count
+            )
+            if self._search_query or is_incremental_loading:
                 count_widget.update(
                     f"Files ({self.file_count}/{self.total_file_count})"
                 )

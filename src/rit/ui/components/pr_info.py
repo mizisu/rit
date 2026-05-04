@@ -3,12 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from textual import events, on
 from textual.app import ComposeResult
-from textual.containers import VerticalScroll, Vertical, Container
+from textual.containers import Container, Vertical, VerticalScroll
 from textual.message import Message
 from textual.reactive import var
-from textual.widgets import Static, Rule
-from textual import events, on
+from textual.widgets import Rule, Static
 
 from rit.state.reviewer_status import ReviewerDisplayState, derive_reviewer_states
 from rit.state.store import PRStore
@@ -89,9 +89,12 @@ class PRInfo(Container):
             )
         )
 
-    def refresh_pr_data(self) -> None:
+    def refresh_summary(self) -> None:
         self._update_header()
         self._update_sidebar()
+
+    def refresh_pr_data(self) -> None:
+        self.refresh_summary()
 
         timeline = self.query_one(PRTimeline)
         timeline.refresh_description(self.store.state.pr)
