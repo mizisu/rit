@@ -212,6 +212,7 @@ class CursorUIState:
     update_status: bool = False
     suppress_scroll: bool = False
     pending_count: str = ""
+    desired_column: int | None = None
     suspend_line_watch: bool = False
     suspend_column_watch: bool = False
     suspend_pane_watch: bool = False

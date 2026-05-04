@@ -579,3 +579,119 @@ class TestDiffViewVisualMode:
 
             assert old_text == "old content here"
             assert new_text == "new content here"
+
+    @pytest.mark.asyncio
+    async def test_vertical_motion_preserves_goal_column_across_short_rows(
+        self,
+    ) -> None:
+        """`j`/`k` should restore the preferred column after crossing short rows."""
+
+        patch = """@@ -1,3 +1,3 @@
+ long_column
+ x
+ long_column"""
+
+        class TestApp(App):
+            def compose(self) -> ComposeResult:
+                yield DiffView(id="diff-view")
+
+        app = TestApp()
+        async with app.run_test() as pilot:
+            diff_view = app.query_one(DiffView)
+            diff = parse_patch(patch, "test.py")
+
+            await diff_view.show_diff("test.py", diff)
+            await pilot.pause()
+            diff_view.focus()
+            await pilot.pause()
+
+            await pilot.press("$")
+            await pilot.press("j")
+            await pilot.press("j")
+            await pilot.pause()
+
+            assert diff_view.cursor_line == 2
+            assert diff_view.cursor_column == len("long_column") - 1
+
+    @pytest.mark.asyncio
+    async def test_count_prefix_applies_to_word_motion(self) -> None:
+        """Count prefixes should work for word motions, not only j/k."""
+
+        patch = """@@ -1,1 +1,1 @@
+ one two three four"""
+
+        class TestApp(App):
+            def compose(self) -> ComposeResult:
+                yield DiffView(id="diff-view")
+
+        app = TestApp()
+        async with app.run_test() as pilot:
+            diff_view = app.query_one(DiffView)
+            diff = parse_patch(patch, "test.py")
+
+            await diff_view.show_diff("test.py", diff)
+            await pilot.pause()
+            diff_view.focus()
+            await pilot.pause()
+
+            await pilot.press("2")
+            await pilot.press("w")
+            await pilot.pause()
+
+            assert diff_view.cursor_column == len("one two ")
+
+    @pytest.mark.asyncio
+    async def test_prev_word_cross_line_lands_on_word_start(self) -> None:
+        """`b` from a line start should land on the previous word start."""
+
+        patch = """@@ -1,2 +1,2 @@
+ hello world
+ second line"""
+
+        class TestApp(App):
+            def compose(self) -> ComposeResult:
+                yield DiffView(id="diff-view")
+
+        app = TestApp()
+        async with app.run_test() as pilot:
+            diff_view = app.query_one(DiffView)
+            diff = parse_patch(patch, "test.py")
+
+            await diff_view.show_diff("test.py", diff)
+            await pilot.pause()
+            diff_view.focus()
+            await pilot.pause()
+
+            await pilot.press("j")
+            await pilot.press("b")
+            await pilot.pause()
+
+            assert diff_view.cursor_line == 0
+            assert diff_view.cursor_column == len("hello ")
+
+    @pytest.mark.asyncio
+    async def test_next_word_skips_whitespace_only_rows(self) -> None:
+        """`w` should skip whitespace-only rows when searching for a word."""
+
+        patch = "@@ -1,3 +1,3 @@\n foo\n    \n bar"
+
+        class TestApp(App):
+            def compose(self) -> ComposeResult:
+                yield DiffView(id="diff-view")
+
+        app = TestApp()
+        async with app.run_test() as pilot:
+            diff_view = app.query_one(DiffView)
+            diff = parse_patch(patch, "test.py")
+
+            await diff_view.show_diff("test.py", diff)
+            await pilot.pause()
+            diff_view.focus()
+            await pilot.pause()
+
+            await pilot.press("$")
+            await pilot.press("w")
+            await pilot.pause()
+
+            assert diff_view.cursor_line == 2
+            assert diff_view.cursor_column == 0

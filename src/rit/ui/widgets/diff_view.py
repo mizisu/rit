@@ -451,7 +451,9 @@ class DiffView(VerticalScroll):
     # Key handling
     # ------------------------------------------------------------------
 
-    _COUNT_MOTION_KEYS = frozenset({"j", "k", "up", "down"})
+    _COUNT_MOTION_KEYS = frozenset(
+        {"h", "j", "k", "l", "left", "right", "up", "down", "w", "b", "$", "G"}
+    )
 
     def on_key(self, event: events.Key) -> None:
         if event.character and event.character in "123456789":
@@ -1142,7 +1144,11 @@ class DiffView(VerticalScroll):
         await self.show_diff(filename, diff)
         self.post_message(Flash("Diff view", style="success", duration=1.5))
 
-    _DIFF_MODES: tuple[str, ...] = ("auto", "split", "unified")
+    _DIFF_MODES: tuple[Literal["auto", "split", "unified"], ...] = (
+        "auto",
+        "split",
+        "unified",
+    )
 
     def action_cycle_diff_mode(self) -> None:
         try:
@@ -1150,7 +1156,7 @@ class DiffView(VerticalScroll):
         except ValueError:
             idx = 0
         new_mode = self._DIFF_MODES[(idx + 1) % len(self._DIFF_MODES)]
-        self.mode = new_mode  # type: ignore[assignment]
+        self.mode = new_mode
         label = {"auto": "Auto", "split": "Split", "unified": "Unified"}[new_mode]
         self.post_message(Flash(f"Diff mode: {label}", style="success", duration=1.5))
 
