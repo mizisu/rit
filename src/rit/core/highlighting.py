@@ -45,9 +45,9 @@ def _collect_line_text(lines: Iterable[DiffLine]) -> tuple[list[str], list[str]]
     new_lines_text: list[str] = []
 
     for line in lines:
-        if line.old_content:
+        if line.has_old_side:
             old_lines_text.append(line.old_content)
-        if line.new_content:
+        if line.has_new_side:
             new_lines_text.append(line.new_content)
 
     return old_lines_text, new_lines_text
@@ -132,7 +132,7 @@ def _apply_highlighted_content_to_lines(
     new_idx = 0
 
     for line in lines:
-        if line.old_content and old_idx < len(old_lines):
+        if line.has_old_side and old_idx < len(old_lines):
             line.highlighted_old_content = old_lines[old_idx]
             if include_word_diff and line.is_modified and line.old_segments:
                 line.highlighted_old_content = _apply_word_diff_to_content(
@@ -141,7 +141,7 @@ def _apply_highlighted_content_to_lines(
                 )
             old_idx += 1
 
-        if line.new_content and new_idx < len(new_lines):
+        if line.has_new_side and new_idx < len(new_lines):
             line.highlighted_new_content = new_lines[new_idx]
             if include_word_diff and line.is_modified and line.new_segments:
                 line.highlighted_new_content = _apply_word_diff_to_content(

@@ -129,6 +129,41 @@ async def test_split_mode_uses_explicit_placeholders_for_missing_side() -> None:
 
 
 @pytest.mark.asyncio
+async def test_split_mode_distinguishes_blank_lines_from_missing_sides() -> None:
+    """Blank added/deleted lines should not render as missing-side placeholders."""
+
+    patch = "@@ -1,1 +1,1 @@\n-\n+"
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="split", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test(size=(40, 10)) as pilot:
+        diff_view = app.query_one(DiffView)
+        diff = parse_patch(patch, "test.py")
+
+        await diff_view.show_diff("test.py", diff)
+        await pilot.pause()
+
+        old_code = diff_view.query_one("#line-0-old .code-content", Static)
+        new_code = diff_view.query_one("#line-0-new .code-content", Static)
+
+        assert "╲" not in _as_plain(old_code)
+        assert "╲" not in _as_plain(new_code)
+
+        add_patch = "@@ -1,1 +1,2 @@\n line\n+"
+        await diff_view.show_diff("test.py", parse_patch(add_patch, "test.py"))
+        await pilot.pause()
+
+        missing_old = diff_view.query_one("#line-1-old .code-content", Static)
+        blank_new = diff_view.query_one("#line-1-new .code-content", Static)
+
+        assert "╲" in _as_plain(missing_old)
+        assert "╲" not in _as_plain(blank_new)
+
+
+@pytest.mark.asyncio
 async def test_split_non_block_rows_share_horizontal_scroll_width() -> None:
     """Non-block split rows should keep a shared pane width so shorter rows still scroll."""
 

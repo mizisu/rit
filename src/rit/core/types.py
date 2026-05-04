@@ -51,6 +51,14 @@ class DiffLine:
     is_current: bool = False  # Current cursor line
 
     @property
+    def has_old_side(self) -> bool:
+        return self.old_line_no is not None
+
+    @property
+    def has_new_side(self) -> bool:
+        return self.new_line_no is not None
+
+    @property
     def is_context(self) -> bool:
         return not self.is_added and not self.is_deleted and not self.is_modified
 

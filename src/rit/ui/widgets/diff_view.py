@@ -25,6 +25,7 @@ from rit.ui.messages import Flash
 from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets import diff_cursor as _cursor
 from rit.ui.widgets import diff_highlight as _hl
+from rit.ui.widgets import diff_plan as _plan
 from rit.ui.widgets import diff_render as _render
 from rit.ui.widgets import diff_search as _search
 from rit.ui.widgets import diff_selection as _selection
@@ -725,9 +726,9 @@ class DiffView(VerticalScroll):
             return line.old_content
         if side == "new":
             return line.new_content
-        if line.new_content:
+        if line.has_new_side:
             return line.new_content
-        if line.old_content:
+        if line.has_old_side:
             return line.old_content
         return ""
 
@@ -1003,30 +1004,17 @@ class DiffView(VerticalScroll):
             else:
                 self._file = None
 
-            line_index = 0
-            for hunk_index, hunk in enumerate(diff.hunks):
-                hunk_start = line_index
-                for line in hunk.lines:
-                    line.line_index = line_index
-                    self._all_lines.append(line)
-                    self._hunk_index_by_line.append(hunk_index)
-
-                    if line.is_modified:
-                        self._modified_line_count += 1
-
-                    if line.new_line_no is not None:
-                        self._line_index_by_new_number.setdefault(
-                            line.new_line_no, line_index
-                        )
-                    if line.old_line_no is not None:
-                        self._line_index_by_old_number.setdefault(
-                            line.old_line_no, line_index
-                        )
-
-                    line_index += 1
-
-                hunk_end = line_index - 1
-                self._hunk_line_ranges.append((hunk_index, hunk_start, hunk_end))
+            plan = _plan.build_diff_plan(diff)
+            self._all_lines = plan.all_lines
+            self._line_index_by_new_number = plan.line_index_by_new_number
+            self._line_index_by_old_number = plan.line_index_by_old_number
+            self._hunk_index_by_line = plan.hunk_index_by_line
+            self._modified_line_count = plan.modified_line_count
+            self._hunk_line_ranges = plan.hunk_line_ranges
+            self._rows_unified = plan.rendered_rows.rows_unified
+            self._rows_split = plan.rendered_rows.rows_split
+            self._row_lookup_unified = plan.rendered_rows.row_lookup_unified
+            self._row_lookup_split = plan.rendered_rows.row_lookup_split
 
             if not self._showing_full_file:
                 _comments.build_comment_map(self)
@@ -1034,7 +1022,6 @@ class DiffView(VerticalScroll):
                 _render._split_code_widths_for_layout(self)
             )
             _render._update_split_state(self)
-            _render._rebuild_rendered_rows(self)
             _virtual._rebuild_virtual_layout(self)
             _virtual._configure_virtual_window(self)
 

@@ -175,14 +175,10 @@ def _align_replace_lines(
     old_count = len(old_lines)
     new_count = len(new_lines)
 
-    if old_count < 2 or new_count < 2:
-        aligned_lines: list[tuple[str | None, str | None]] = []
-        max_count = max(old_count, new_count)
-        for index in range(max_count):
-            old_text = old_lines[index] if index < old_count else None
-            new_text = new_lines[index] if index < new_count else None
-            aligned_lines.append((old_text, new_text))
-        return aligned_lines
+    if old_count == 0:
+        return [(None, line) for line in new_lines]
+    if new_count == 0:
+        return [(line, None) for line in old_lines]
 
     costs = [[0.0] * (new_count + 1) for _ in range(old_count + 1)]
     choices = [[""] * (new_count + 1) for _ in range(old_count + 1)]
@@ -215,12 +211,12 @@ def _align_replace_lines(
             elif pair_cost < delete_cost and pair_cost < insert_cost:
                 costs[old_index][new_index] = pair_cost
                 choices[old_index][new_index] = "pair"
-            elif delete_cost <= insert_cost:
-                costs[old_index][new_index] = delete_cost
-                choices[old_index][new_index] = "delete"
-            else:
+            elif insert_cost <= delete_cost:
                 costs[old_index][new_index] = insert_cost
                 choices[old_index][new_index] = "insert"
+            else:
+                costs[old_index][new_index] = delete_cost
+                choices[old_index][new_index] = "delete"
 
     aligned_lines: list[tuple[str | None, str | None]] = []
     old_index = old_count

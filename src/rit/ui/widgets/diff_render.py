@@ -15,9 +15,9 @@ from rit.state.models import FileViewedState
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets import diff_highlight as _hl
+from rit.ui.widgets import diff_plan as _plan
 from rit.ui.widgets import diff_search as _search
 from rit.ui.widgets import diff_virtual as _virtual
-from rit.ui.widgets.diff_types import RenderedRow
 from rit.ui.widgets.diff_visual import SyncedCodeScroll
 
 if TYPE_CHECKING:
@@ -132,102 +132,12 @@ def _update_split_state(view: DiffView) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _row_kind_for_line(
-    view: DiffView,
-    line: DiffLine,
-    *,
-    modified_side: Literal["old", "new"] | None = None,
-) -> Literal[
-    "context",
-    "added",
-    "deleted",
-    "modified-old",
-    "modified-new",
-]:
-    if line.is_modified:
-        return "modified-old" if modified_side == "old" else "modified-new"
-    if line.is_added:
-        return "added"
-    if line.is_deleted:
-        return "deleted"
-    return "context"
-
-
 def _rebuild_rendered_rows(view: DiffView) -> None:
-    view._rows_unified = []
-    view._rows_split = []
-    view._row_lookup_unified = {}
-    view._row_lookup_split = {}
-
-    if view._diff is None:
-        return
-
-    for hunk_index, hunk in enumerate(view._diff.hunks):
-        for line in hunk.lines:
-            if line.is_modified:
-                old_row = RenderedRow(
-                    mode="unified",
-                    row_index=len(view._rows_unified),
-                    line_index=line.line_index,
-                    hunk_index=hunk_index,
-                    kind=_row_kind_for_line(view, line, modified_side="old"),
-                    side="old",
-                    anchor_id=f"line-{line.line_index}-old",
-                    old_line_no=line.old_line_no,
-                    new_line_no=line.new_line_no,
-                )
-                view._rows_unified.append(old_row)
-                view._row_lookup_unified[(line.line_index, "old")] = old_row.row_index
-
-                new_row = RenderedRow(
-                    mode="unified",
-                    row_index=len(view._rows_unified),
-                    line_index=line.line_index,
-                    hunk_index=hunk_index,
-                    kind=_row_kind_for_line(view, line, modified_side="new"),
-                    side="new",
-                    anchor_id=f"line-{line.line_index}-new",
-                    old_line_no=line.old_line_no,
-                    new_line_no=line.new_line_no,
-                )
-                view._rows_unified.append(new_row)
-                view._row_lookup_unified[(line.line_index, "new")] = new_row.row_index
-            else:
-                side: Literal["old", "new", "auto"]
-                if line.is_deleted:
-                    side = "old"
-                elif line.is_added:
-                    side = "new"
-                else:
-                    side = "auto"
-
-                row = RenderedRow(
-                    mode="unified",
-                    row_index=len(view._rows_unified),
-                    line_index=line.line_index,
-                    hunk_index=hunk_index,
-                    kind=_row_kind_for_line(view, line),
-                    side=side,
-                    anchor_id=f"line-{line.line_index}",
-                    old_line_no=line.old_line_no,
-                    new_line_no=line.new_line_no,
-                )
-                view._rows_unified.append(row)
-                view._row_lookup_unified[(line.line_index, side)] = row.row_index
-
-            split_row = RenderedRow(
-                mode="split",
-                row_index=len(view._rows_split),
-                line_index=line.line_index,
-                hunk_index=hunk_index,
-                kind=_row_kind_for_line(view, line),
-                side="auto",
-                anchor_id=f"line-{line.line_index}",
-                old_line_no=line.old_line_no,
-                new_line_no=line.new_line_no,
-            )
-            view._rows_split.append(split_row)
-            view._row_lookup_split[line.line_index] = split_row.row_index
+    rows = _plan.build_rendered_rows(view._diff)
+    view._rows_unified = rows.rows_unified
+    view._rows_split = rows.rows_split
+    view._row_lookup_unified = rows.row_lookup_unified
+    view._row_lookup_split = rows.row_lookup_split
 
 
 # ---------------------------------------------------------------------------
@@ -581,18 +491,28 @@ def _split_line_style(
 
 def _split_code_widths_for_layout(view: DiffView) -> tuple[int, int]:
     old_width = max(
-        (
-            _base_code_content(view, line, side="old", empty_fallback=" ").cell_length
-            for line in view._all_lines
+        1,
+        max(
+            (
+                _base_code_content(
+                    view, line, side="old", empty_fallback=" "
+                ).cell_length
+                for line in view._all_lines
+            ),
+            default=1,
         ),
-        default=1,
     )
     new_width = max(
-        (
-            _base_code_content(view, line, side="new", empty_fallback=" ").cell_length
-            for line in view._all_lines
+        1,
+        max(
+            (
+                _base_code_content(
+                    view, line, side="new", empty_fallback=" "
+                ).cell_length
+                for line in view._all_lines
+            ),
+            default=1,
         ),
-        default=1,
     )
     return old_width, new_width
 
@@ -1028,12 +948,13 @@ def _build_split_code_content(
     side: Literal["old", "new"],
     placeholder_when_missing: bool,
 ) -> Content | None:
-    text = line.old_content if side == "old" else line.new_content
-    if not text:
+    has_side = line.has_old_side if side == "old" else line.has_new_side
+    if not has_side:
         if placeholder_when_missing:
             return _split_placeholder_content(view)
         return None
 
+    text = line.old_content if side == "old" else line.new_content
     spec = view._compute_selection_spec_for_line(line.line_index)
     has_cursor = line.line_index == view.cursor_line and view.active_pane == side
     cursor_col = view.cursor_column if has_cursor else None
@@ -1235,18 +1156,23 @@ def _compute_base_code_content(
     if side == "old":
         if line.highlighted_old_content is not None:
             return line.highlighted_old_content
-        return Content(line.old_content if line.old_content else empty_fallback)
+        if line.has_old_side:
+            return Content(line.old_content)
+        return Content(empty_fallback)
     if side == "new":
         if line.highlighted_new_content is not None:
             return line.highlighted_new_content
-        return Content(line.new_content if line.new_content else empty_fallback)
-    if line.highlighted_new_content is not None:
+        if line.has_new_side:
+            return Content(line.new_content)
+        return Content(empty_fallback)
+    if line.has_new_side and line.highlighted_new_content is not None:
         return line.highlighted_new_content
-    if line.highlighted_old_content is not None:
+    if line.has_old_side and line.highlighted_old_content is not None:
         return line.highlighted_old_content
 
-    text_content = view._get_line_text(line, side)
-    return Content(text_content if text_content else empty_fallback)
+    if line.has_new_side or line.has_old_side:
+        return Content(view._get_line_text(line, side))
+    return Content(empty_fallback)
 
 
 def _base_code_content(

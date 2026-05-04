@@ -266,6 +266,53 @@ class TestParsePatch:
         assert second_change.old_content == "old beta"
         assert second_change.new_content == "new beta"
 
+    def test_multi_line_replace_aligns_single_old_line_after_leading_adds(self):
+        """One-to-many replace blocks should still find the matching old/new line."""
+        patch = """@@ -1,1 +1,3 @@
+-def method(self):
++@classmethod
++
++def method(cls):"""
+
+        diff = parse_patch(patch, "test.py")
+
+        hunk = diff.hunks[0]
+        assert len(hunk.lines) == 3
+
+        assert hunk.lines[0].is_added
+        assert hunk.lines[0].new_line_no == 1
+        assert hunk.lines[0].new_content == "@classmethod"
+
+        assert hunk.lines[1].is_added
+        assert hunk.lines[1].new_line_no == 2
+        assert hunk.lines[1].new_content == ""
+
+        assert hunk.lines[2].is_modified
+        assert hunk.lines[2].old_line_no == 1
+        assert hunk.lines[2].new_line_no == 3
+        assert hunk.lines[2].old_content == "def method(self):"
+        assert hunk.lines[2].new_content == "def method(cls):"
+
+    def test_multi_line_replace_keeps_unrelated_deletes_before_adds(self):
+        """Unpaired low-similarity replace lines should keep git's delete/add order."""
+        patch = """@@ -1,2 +1,2 @@
+-old aaa
+-old bbb
++new xxx
++new yyy"""
+
+        diff = parse_patch(patch, "test.py")
+
+        hunk = diff.hunks[0]
+        assert [(line.old_content, line.new_content) for line in hunk.lines] == [
+            ("old aaa", ""),
+            ("old bbb", ""),
+            ("", "new xxx"),
+            ("", "new yyy"),
+        ]
+        assert [line.is_deleted for line in hunk.lines] == [True, True, False, False]
+        assert [line.is_added for line in hunk.lines] == [False, False, True, True]
+
 
 class TestComputeWordDiff:
     """Tests for word-level diff."""
@@ -436,11 +483,11 @@ class TestComputeLineDiff:
 
         hunk = diff.hunks[0]
         assert len(hunk.lines) == 3
-        assert hunk.lines[0].is_modified
+        assert hunk.lines[0].is_deleted
         assert hunk.lines[0].old_content == "@classmethod"
-        assert hunk.lines[0].new_content == "def method(self):"
-        assert hunk.lines[1].is_deleted
+        assert hunk.lines[1].is_modified
         assert hunk.lines[1].old_content == "def method(cls):"
+        assert hunk.lines[1].new_content == "def method(self):"
         assert hunk.lines[2].is_deleted
         assert hunk.lines[2].old_content == ""
         assert all(
