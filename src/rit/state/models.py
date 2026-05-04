@@ -189,7 +189,7 @@ class ReviewThread(BaseModel):
     start_line: int | None = Field(default=None, alias="startLine")
     original_start_line: int | None = Field(default=None, alias="originalStartLine")
     diff_side: str = Field(default="", alias="diffSide")
-    start_diff_side: str = Field(default="", alias="startDiffSide")
+    start_diff_side: str | None = Field(default=None, alias="startDiffSide")
     subject_type: str = Field(default="LINE", alias="subjectType")
 
     comments_connection: NodeList[PRComment] = Field(

@@ -142,6 +142,21 @@ class TestReviewThread:
         assert thread.anchor_side == "old"
         assert thread.anchor_line == 10
 
+    def test_nullable_graphql_start_diff_side_is_allowed(self) -> None:
+        thread = ReviewThread.model_validate(
+            {
+                "path": "test.py",
+                "line": 20,
+                "originalLine": 10,
+                "diffSide": "RIGHT",
+                "startDiffSide": None,
+                "comments": {"nodes": []},
+            }
+        )
+
+        assert thread.start_diff_side is None
+        assert thread.anchor_side == "new"
+
 
 class TestCommentThread:
     """Tests for CommentThread dataclass."""
