@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.message import Message
+from textual.worker import Worker, WorkerState
 
 from textual.widget import Widget
 from textual.widgets import Static, Markdown, Collapsible
@@ -57,6 +58,7 @@ class PRTimeline(Vertical):
         self._thread_widget_info: dict[Widget, tuple[str, int, bool]] = {}
         self._pending_resolve_threads: set[str] = set()
         self._scroll_container: VerticalScroll | None = None
+        self._refresh_worker: Worker[None] | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="description-container"):
@@ -100,8 +102,31 @@ class PRTimeline(Vertical):
         desc_widget.update(pr.body or "*No description provided.*")
 
     def refresh_timeline(self) -> None:
-        self.run_worker(self._build_timeline_async(), exclusive=True)
+        self.cancel_refresh()
+        self._refresh_worker = self.run_worker(
+            self._build_timeline_async(),
+            exclusive=True,
+            name="pr-timeline-refresh",
+        )
         self._invalidate_navigable_items()
+
+    def cancel_refresh(self) -> bool:
+        worker = self._refresh_worker
+        if worker is None or worker.state not in {
+            WorkerState.PENDING,
+            WorkerState.RUNNING,
+        }:
+            return False
+        worker.cancel()
+        return True
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker is self._refresh_worker and event.state in {
+            WorkerState.CANCELLED,
+            WorkerState.ERROR,
+            WorkerState.SUCCESS,
+        }:
+            self._refresh_worker = None
 
     async def _build_timeline_async(self) -> None:
         state = self.store.state

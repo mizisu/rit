@@ -103,6 +103,9 @@ class PRInfo(Container):
         timeline = self.query_one(PRTimeline)
         timeline.refresh_timeline()
 
+    def cancel_comment_refresh(self) -> bool:
+        return self.query_one(PRTimeline).cancel_refresh()
+
     def start_issue_comment(self) -> None:
         self.query_one(PRTimeline).start_issue_comment()
 

@@ -4,6 +4,7 @@ import asyncio
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from textual.widgets import Static
@@ -206,6 +207,47 @@ class TestRitApp:
             await pilot.pause()
             tree = app.screen.query_one("#file-tree", Tree)
             assert tree.has_focus
+
+    async def test_files_tab_defers_pr_info_discussion_render_until_pr_info_tab(
+        self, app: RitApp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Hidden PR info rendering should not interrupt Files tab input."""
+
+        _stub_initial_loads(monkeypatch)
+
+        from rit.state.store import PRStore
+        from rit.ui.components.pr_info import PRInfo
+        from rit.ui.screens.main import MainScreen
+
+        calls: list[str] = []
+
+        def fake_refresh_pr_data(_pr_info: PRInfo) -> None:
+            calls.append("data")
+
+        def fake_refresh_comments(_pr_info: PRInfo) -> None:
+            calls.append("comments")
+
+        monkeypatch.setattr(PRInfo, "refresh_pr_data", fake_refresh_pr_data)
+        monkeypatch.setattr(PRInfo, "refresh_comments", fake_refresh_comments)
+
+        async with app.run_test() as pilot:
+            await pilot.press("tab")
+            await pilot.pause()
+
+            screen = cast(MainScreen, app.screen)
+            pr = PR(number=123, title="Loaded PR", body="Loaded body")
+            screen.store.state.pr = pr
+            screen.on_pr_discussion_loaded(PRStore.PRDiscussionLoaded(pr=pr))
+            await pilot.pause()
+
+            assert calls == []
+            assert screen._pr_info_refresh_pending is True
+
+            await pilot.press("shift+tab")
+            await pilot.pause()
+
+            assert calls == ["data", "comments"]
+            assert screen._pr_info_refresh_pending is False
 
     async def test_staged_load_paints_summary_and_first_file_before_full_load(
         self, monkeypatch: pytest.MonkeyPatch

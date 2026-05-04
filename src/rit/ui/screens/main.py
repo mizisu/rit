@@ -158,7 +158,7 @@ _FILES_BINDINGS = [
 ]
 
 
-class MainScreen(Screen):
+class MainScreen(Screen[None]):
     BINDINGS = _COMMON_BINDINGS + _PR_INFO_BINDINGS
 
     current_tab: reactive[int] = reactive(0)
@@ -168,7 +168,7 @@ class MainScreen(Screen):
     file_changes = getters.query_one(FileChanges)
     tabbed_content = getters.query_one(TabbedContent)
 
-    app: RitApp = getters.app(RitApp)  # type: ignore
+    app = getters.app(RitApp)
 
     def __init__(
         self,
@@ -183,6 +183,7 @@ class MainScreen(Screen):
 
         self.store = PRStore(owner=owner, repo=repo, pr_number=pr_number)
         self.store.set_message_sink(self._post_store_message)
+        self._pr_info_refresh_pending = False
 
     def compose(self) -> ComposeResult:
         yield Header(
@@ -244,10 +245,21 @@ class MainScreen(Screen):
 
         self.current_tab = tab_index
 
-        if tab_id == "files":
-            self.call_after_refresh(self._focus_files_tree)
+        if tab_id == "pr-info":
+            self._refresh_pending_pr_info()
+        elif tab_id == "files":
+            if self.pr_info.cancel_comment_refresh():
+                self._pr_info_refresh_pending = True
+            self.call_after_refresh(
+                lambda: self._focus_files_tree(preserve_existing_focus=True)
+            )
 
-    def _focus_files_tree(self) -> None:
+    def _focus_files_tree(self, *, preserve_existing_focus: bool = False) -> None:
+        if self.current_tab != 1:
+            return
+        if preserve_existing_focus and self._current_files_focus_target() is not None:
+            return
+
         try:
             tree = self.file_changes.file_tree.query_one("#file-tree", Tree)
             tree.focus()
@@ -276,14 +288,23 @@ class MainScreen(Screen):
 
     @on(PRStore.PRDiscussionLoaded)
     def on_pr_discussion_loaded(self, _event: PRStore.PRDiscussionLoaded) -> None:
-        self.pr_info.refresh_pr_data()
-        self.pr_info.refresh_comments()
         self.file_changes.file_tree.refresh_files()
         self.run_worker(
             self._refresh_current_diff_after_discussion(),
             exclusive=False,
             name="_refresh_current_diff_after_discussion",
         )
+        self._pr_info_refresh_pending = True
+        if self.current_tab == 0:
+            self._refresh_pending_pr_info()
+
+    def _refresh_pending_pr_info(self) -> None:
+        if not self._pr_info_refresh_pending:
+            return
+
+        self._pr_info_refresh_pending = False
+        self.pr_info.refresh_pr_data()
+        self.pr_info.refresh_comments()
 
     @on(PRStore.FilesLoaded)
     def on_files_loaded(self, _event: PRStore.FilesLoaded) -> None:
