@@ -23,7 +23,7 @@ def sample_files() -> list[PRFile]:
 async def test_slash_opens_file_search_input(sample_files: list[PRFile]) -> None:
     """Pressing `/` on the file tree should open and focus search input."""
 
-    class TestApp(App):
+    class TestApp(App[None]):
         def compose(self) -> ComposeResult:
             yield FileTree(id="file-tree-sidebar")
 
@@ -51,7 +51,7 @@ async def test_search_enter_selects_highlighted_result(
 ) -> None:
     """Enter in search mode should directly select the highlighted result."""
 
-    class TestApp(App):
+    class TestApp(App[None]):
         def compose(self) -> ComposeResult:
             yield FileTree(id="file-tree-sidebar")
 
@@ -91,7 +91,7 @@ async def test_search_allows_arrow_navigation_then_enter_selects_current_item(
 ) -> None:
     """Up/Down in search mode should move tree cursor and Enter selects that item."""
 
-    class TestApp(App):
+    class TestApp(App[None]):
         def compose(self) -> ComposeResult:
             yield FileTree(id="file-tree-sidebar")
 
@@ -135,7 +135,7 @@ async def test_search_enter_on_directory_toggles_expand_state(
 ) -> None:
     """Enter on a directory cursor should toggle fold state, not open a file."""
 
-    class TestApp(App):
+    class TestApp(App[None]):
         def compose(self) -> ComposeResult:
             yield FileTree(id="file-tree-sidebar")
 
@@ -176,7 +176,7 @@ async def test_search_enter_with_no_cursor_does_not_auto_select_first_match(
 ) -> None:
     """Enter without a tree cursor should not auto-open the first filtered file."""
 
-    class TestApp(App):
+    class TestApp(App[None]):
         def compose(self) -> ComposeResult:
             yield FileTree(id="file-tree-sidebar")
 
@@ -213,7 +213,7 @@ async def test_escape_cancels_search_and_restores_list(
 ) -> None:
     """Escape should close search mode and restore the full file list."""
 
-    class TestApp(App):
+    class TestApp(App[None]):
         def compose(self) -> ComposeResult:
             yield FileTree(id="file-tree-sidebar")
 
@@ -247,7 +247,7 @@ async def test_escape_cancels_search_and_restores_list(
 async def test_y_copies_basename_of_current_file(sample_files: list[PRFile]) -> None:
     """Pressing `y` should copy the basename of the current file."""
 
-    class TestApp(App):
+    class TestApp(App[None]):
         def compose(self) -> ComposeResult:
             yield FileTree(id="file-tree-sidebar")
 
@@ -274,7 +274,7 @@ async def test_Y_copies_repo_relative_path_of_current_file(
 ) -> None:
     """Pressing `Y` should copy the repo-relative path of the current file."""
 
-    class TestApp(App):
+    class TestApp(App[None]):
         def compose(self) -> ComposeResult:
             yield FileTree(id="file-tree-sidebar")
 
@@ -296,12 +296,73 @@ async def test_Y_copies_repo_relative_path_of_current_file(
 
 
 @pytest.mark.asyncio
+async def test_g_and_G_move_file_tree_cursor_to_top_and_bottom(
+    sample_files: list[PRFile],
+) -> None:
+    """Pressing `g`/`G` should move the file tree cursor to top/bottom."""
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FileTree(id="file-tree-sidebar")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_tree = app.query_one(FileTree)
+        file_tree.refresh_files(sample_files)
+        await pilot.pause()
+
+        tree = file_tree.query_one("#file-tree", Tree)
+        tree.focus()
+        await pilot.pause()
+
+        await pilot.press("G")
+        await pilot.pause()
+
+        assert tree.cursor_line == tree.last_line
+
+        await pilot.press("g")
+        await pilot.pause()
+
+        assert tree.cursor_line == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_preserves_focused_tree_cursor(
+    sample_files: list[PRFile],
+) -> None:
+    """Incremental file refresh should not jump tree navigation back to selection."""
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FileTree(id="file-tree-sidebar")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_tree = app.query_one(FileTree)
+        file_tree.refresh_files(sample_files)
+        await pilot.pause()
+
+        tree = file_tree.query_one("#file-tree", Tree)
+        file_tree.select_file("src/app.py", emit_message=False)
+        tree.focus()
+        tree.move_cursor(file_tree._file_nodes["tests/test_app.py"])
+        await pilot.pause()
+
+        file_tree.refresh_files(sample_files)
+        await pilot.pause()
+        await pilot.pause()
+
+        assert tree.cursor_node is file_tree._file_nodes["tests/test_app.py"]
+        assert file_tree.selected_file == "src/app.py"
+
+
+@pytest.mark.asyncio
 async def test_search_input_keeps_y_text_instead_of_copying(
     sample_files: list[PRFile],
 ) -> None:
     """Typing `y` in search mode should update the input instead of copying."""
 
-    class TestApp(App):
+    class TestApp(App[None]):
         def compose(self) -> ComposeResult:
             yield FileTree(id="file-tree-sidebar")
 

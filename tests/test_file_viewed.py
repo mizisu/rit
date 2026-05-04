@@ -61,6 +61,47 @@ def test_file_label_dismissed_has_bang_badge(sample_files: list[PRFile]) -> None
     assert label.plain.startswith("! ")
 
 
+@pytest.mark.asyncio
+async def test_file_tree_uses_compact_folder_indentation() -> None:
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FileTree(id="file-tree-sidebar")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_tree = app.query_one(FileTree)
+        tree = app.query_one("#file-tree", Tree)
+
+        assert tree.guide_depth == 2
+
+        filename = "app/lemonbase/account/application/request/version_create_request.py"
+        file_tree.refresh_files(
+            [
+                PRFile(filename=filename, additions=10),
+                PRFile(
+                    filename="app/lemonbase/account/application/response/version_response.py",
+                    additions=31,
+                ),
+            ]
+        )
+        await pilot.pause()
+
+        compacted_root = tree.root.children[0]
+        assert compacted_root.label.plain == "app/lemonbase/account/application"
+
+        file_node = file_tree._file_nodes[filename]
+        ancestor_labels: list[str] = []
+        parent = file_node.parent
+        while parent is not None and parent is not tree.root:
+            ancestor_labels.append(parent.label.plain)
+            parent = parent.parent
+
+        assert list(reversed(ancestor_labels)) == [
+            "app/lemonbase/account/application",
+            "request",
+        ]
+
+
 # ---------------------------------------------------------------------------
 # FileTree.update_view_state — single-node update
 # ---------------------------------------------------------------------------

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Literal
 
 from rich.text import Text
 from textual import events, on
@@ -18,6 +18,15 @@ from rit.ui.messages import Flash
 
 if TYPE_CHECKING:
     from rit.state.store import PRStore
+
+
+@dataclass
+class _DirectoryContents:
+    child_dirs: dict[str, str] = field(default_factory=dict)
+    entries: list[tuple[Literal["directory", "file"], str]] = field(
+        default_factory=list
+    )
+    direct_file_count: int = 0
 
 
 class ReviewTree(Tree[str]):
@@ -79,6 +88,8 @@ class FileTree(Vertical):
     BINDINGS = [
         Binding("j", "cursor_down", "Next", show=False),
         Binding("k", "cursor_up", "Prev", show=False),
+        Binding("g", "go_top", "Go to Top", show=False),
+        Binding("G", "go_bottom", "Go to Bottom", show=False),
         Binding("h", "collapse_or_parent", "Collapse", show=False),
         Binding("l", "expand_or_child", "Expand", show=False),
         Binding("ctrl+d", "half_page_down", "Half Page Down", show=False),
@@ -126,6 +137,7 @@ class FileTree(Vertical):
         yield Input(placeholder="Search files", id="file-search")
         tree: Tree[str] = Tree("Files", id="file-tree")
         tree.show_root = False
+        tree.guide_depth = 2
         tree.root.expand()
         yield tree
 
@@ -197,6 +209,14 @@ class FileTree(Vertical):
     def action_cursor_up(self) -> None:
         tree = self.query_one("#file-tree", Tree)
         tree.action_cursor_up()
+
+    def action_go_top(self) -> None:
+        tree = self.query_one("#file-tree", Tree)
+        tree.action_scroll_home()
+
+    def action_go_bottom(self) -> None:
+        tree = self.query_one("#file-tree", Tree)
+        tree.action_scroll_end()
 
     def action_half_page_down(self) -> None:
         tree = self.query_one("#file-tree", Tree)
@@ -369,32 +389,100 @@ class FileTree(Vertical):
             tree.root.add_leaf(empty_label)
             return
 
-        dir_nodes: dict[str, TreeNode[str]] = {}
+        contents_by_path, files_by_path = self._build_directory_contents(files)
+        self._render_directory_contents(
+            tree.root,
+            "",
+            contents_by_path,
+            files_by_path,
+        )
+
+    def _build_directory_contents(
+        self, files: list[PRFile]
+    ) -> tuple[dict[str, _DirectoryContents], dict[str, PRFile]]:
+        contents_by_path = {"": _DirectoryContents()}
+        files_by_path: dict[str, PRFile] = {}
 
         for file in files:
+            files_by_path[file.filename] = file
             parts = file.filename.split("/")
+            parent_path = ""
 
             if len(parts) == 1:
-                node = tree.root.add_leaf(
-                    self._file_label(file),
-                    data=file.filename,
-                )
-                self._file_nodes[file.filename] = node
-            else:
-                parent = tree.root
-                for i, part in enumerate(parts[:-1]):
-                    current_path = "/".join(parts[: i + 1])
-                    if current_path not in dir_nodes:
-                        dir_nodes[current_path] = parent.add(part, expand=True)
-                    parent = dir_nodes[current_path]
+                contents_by_path[parent_path].entries.append(("file", file.filename))
+                contents_by_path[parent_path].direct_file_count += 1
+                continue
 
+            for i, part in enumerate(parts[:-1]):
+                current_path = "/".join(parts[: i + 1])
+                parent_contents = contents_by_path.setdefault(
+                    parent_path, _DirectoryContents()
+                )
+
+                if part not in parent_contents.child_dirs:
+                    parent_contents.child_dirs[part] = current_path
+                    parent_contents.entries.append(("directory", current_path))
+
+                contents_by_path.setdefault(current_path, _DirectoryContents())
+                parent_path = current_path
+
+            contents_by_path[parent_path].entries.append(("file", file.filename))
+            contents_by_path[parent_path].direct_file_count += 1
+
+        return contents_by_path, files_by_path
+
+    def _render_directory_contents(
+        self,
+        parent: TreeNode[str],
+        directory_path: str,
+        contents_by_path: dict[str, _DirectoryContents],
+        files_by_path: dict[str, PRFile],
+    ) -> None:
+        for kind, path in contents_by_path[directory_path].entries:
+            if kind == "file":
+                file = files_by_path[path]
+                show_path = "/" not in file.filename
                 node = parent.add_leaf(
-                    self._file_label(file, show_path=False),
+                    self._file_label(file, show_path=show_path),
                     data=file.filename,
                 )
                 self._file_nodes[file.filename] = node
+                continue
+
+            label, compacted_path = self._compact_directory_path(
+                path,
+                contents_by_path,
+            )
+            node = parent.add(label, expand=True)
+            self._render_directory_contents(
+                node,
+                compacted_path,
+                contents_by_path,
+                files_by_path,
+            )
+
+    def _compact_directory_path(
+        self,
+        directory_path: str,
+        contents_by_path: dict[str, _DirectoryContents],
+    ) -> tuple[str, str]:
+        path = directory_path
+        label_parts = [path.rsplit("/", 1)[-1]]
+
+        while True:
+            contents = contents_by_path[path]
+            if contents.direct_file_count or len(contents.child_dirs) != 1:
+                break
+
+            child_path = next(iter(contents.child_dirs.values()))
+            label_parts.append(child_path.rsplit("/", 1)[-1])
+            path = child_path
+
+        return "/".join(label_parts), path
 
     def _apply_search_filter(self) -> None:
+        tree_was_focused, cursor_file, cursor_line = self._focused_cursor_state()
+
         if self._search_query:
             query = self._search_query.lower()
             self._filtered_files = [
@@ -406,6 +494,14 @@ class FileTree(Vertical):
         self.file_count = len(self._filtered_files)
         self._render_files(self._filtered_files)
 
+        if tree_was_focused:
+            if cursor_file and cursor_file in self._file_nodes:
+                self.call_after_refresh(lambda: self._focus_file_in_tree(cursor_file))
+                return
+            if cursor_line is not None:
+                self.call_after_refresh(lambda: self._focus_tree_line(cursor_line))
+                return
+
         if self.selected_file and self.selected_file in self._file_nodes:
             self.select_file(self.selected_file, emit_message=False)
             return
@@ -413,6 +509,25 @@ class FileTree(Vertical):
         if self._filtered_files:
             first_match = self._filtered_files[0].filename
             self.call_after_refresh(lambda: self._focus_file_in_tree(first_match))
+
+    def _focused_cursor_state(self) -> tuple[bool, str | None, int | None]:
+        try:
+            tree = self.query_one("#file-tree", Tree)
+        except Exception:
+            return (False, None, None)
+
+        if not tree.has_focus:
+            return (False, None, None)
+
+        node = tree.cursor_node
+        cursor_file = node.data if node is not None and node.data else None
+        return (True, cursor_file, tree.cursor_line)
+
+    def _focus_tree_line(self, line: int) -> None:
+        tree = self.query_one("#file-tree", Tree)
+        target_line = max(0, min(line, tree.last_line))
+        tree.move_cursor_to_line(target_line)
+        tree.focus()
 
     def _focus_file_in_tree(self, filename: str) -> None:
         node = self._file_nodes.get(filename)
