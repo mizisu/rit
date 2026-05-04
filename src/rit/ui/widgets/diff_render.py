@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from bisect import bisect_right
 from typing import TYPE_CHECKING, Literal
 
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -14,6 +13,7 @@ from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.state.models import FileViewedState
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_comments as _comments
+from rit.ui.widgets import diff_geometry as _geometry
 from rit.ui.widgets import diff_highlight as _hl
 from rit.ui.widgets import diff_plan as _plan
 from rit.ui.widgets import diff_search as _search
@@ -175,48 +175,46 @@ def _invalidate_base_code_content_cache(
 
 
 def _render_height_for_line(view: DiffView, line: DiffLine) -> int:
-    if not view.split and line.is_modified:
-        return 2
-    return 1
+    return _geometry.render_height_for_line(line, split=view.split)
 
 
 def _line_index_at_vertical_offset(view: DiffView, offset: int) -> int:
-    if not view._all_lines:
-        return 0
-    clamped = max(0, min(offset, max(0, view._virtual_content_height - 1)))
-    index = bisect_right(view._line_top_offsets, clamped) - 1
-    if index < 0:
-        return 0
-    if clamped >= view._line_bottom_offsets[index] and index + 1 < len(view._all_lines):
-        return index + 1
-    return index
+    return _geometry.line_index_at_vertical_offset(
+        line_top_offsets=view._line_top_offsets,
+        line_bottom_offsets=view._line_bottom_offsets,
+        virtual_content_height=view._virtual_content_height,
+        offset=offset,
+    )
 
 
 def _viewport_center_line(view: DiffView) -> int:
-    if not view._all_lines:
-        return 0
-    viewport_height = max(1, view.scrollable_content_region.height)
-    center_offset = int(
-        view.scroll_y + view._dock_header_height() + viewport_height / 2
+    return _geometry.viewport_center_line(
+        line_top_offsets=view._line_top_offsets,
+        line_bottom_offsets=view._line_bottom_offsets,
+        virtual_content_height=view._virtual_content_height,
+        scroll_y=int(view.scroll_y),
+        dock_header_height=view._dock_header_height(),
+        viewport_height=view.scrollable_content_region.height,
     )
-    return _line_index_at_vertical_offset(view, center_offset)
 
 
 def _get_rendered_line_bounds(view: DiffView) -> tuple[int, int]:
-    if not view._all_lines:
-        return 0, -1
-    if view._virt.active:
-        start = max(0, view._virt.rendered_start)
-        end = min(len(view._all_lines) - 1, view._virt.rendered_end)
-        return start, end
-    return 0, len(view._all_lines) - 1
+    return _geometry.rendered_line_bounds(
+        total_lines=len(view._all_lines),
+        virtual_active=view._virt.active,
+        rendered_start=view._virt.rendered_start,
+        rendered_end=view._virt.rendered_end,
+    )
 
 
 def _is_line_rendered(view: DiffView, line_idx: int) -> bool:
-    if line_idx < 0 or line_idx >= len(view._all_lines):
-        return False
-    start, end = _get_rendered_line_bounds(view)
-    return start <= line_idx <= end
+    return _geometry.is_line_rendered(
+        line_idx,
+        total_lines=len(view._all_lines),
+        virtual_active=view._virt.active,
+        rendered_start=view._virt.rendered_start,
+        rendered_end=view._virt.rendered_end,
+    )
 
 
 def _should_render_hunk_header(
@@ -225,12 +223,12 @@ def _should_render_hunk_header(
     window_start: int,
     window_end: int,
 ) -> bool:
-    if not (0 <= hunk_index < len(view._hunk_line_ranges)):
-        return False
-    _, hunk_start, hunk_end = view._hunk_line_ranges[hunk_index]
-    if hunk_end < window_start or hunk_start > window_end:
-        return False
-    return window_start <= hunk_start <= window_end
+    return _geometry.should_render_hunk_header(
+        hunk_line_ranges=view._hunk_line_ranges,
+        hunk_index=hunk_index,
+        window_start=window_start,
+        window_end=window_end,
+    )
 
 
 # ---------------------------------------------------------------------------

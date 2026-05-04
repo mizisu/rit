@@ -9,6 +9,7 @@ from textual.widgets import Static
 from textual.containers import VerticalScroll
 
 from rit.ui.widgets import diff_blocks as _blocks
+from rit.ui.widgets import diff_geometry as _geometry
 
 
 if TYPE_CHECKING:
@@ -54,54 +55,44 @@ def _effective_virtual_window_shift_margin(view) -> int:
 
 
 def _rebuild_virtual_layout(view) -> None:
+    geometry = _geometry.build_diff_geometry(
+        view._diff,
+        split=view.split,
+        extra_heights_by_line=_extra_heights_by_line(view),
+        inline_editor_line_index=getattr(
+            view, "_inline_comment_editor_line_index", None
+        ),
+        inline_editor_height=view._inline_comment_editor_height(),
+    )
+    view._hunk_header_top_offsets = geometry.hunk_header_top_offsets
+    view._line_top_offsets = geometry.line_top_offsets
+    view._line_heights = geometry.line_heights
+    view._line_bottom_offsets = geometry.line_bottom_offsets
+    view._virtual_content_height = geometry.virtual_content_height
+    view._total_line_render_height = geometry.total_line_render_height
+
+
+def _extra_heights_by_line(view) -> dict[int, int]:
     from rit.ui.widgets.diff_comments import (
         estimate_pending_draft_height,
         estimate_thread_height,
     )
 
-    view._hunk_header_top_offsets = []
-    view._line_top_offsets = [0] * len(view._all_lines)
-    view._line_heights = [1] * len(view._all_lines)
-    view._line_bottom_offsets = [0] * len(view._all_lines)
-    view._virtual_content_height = 0
-    view._total_line_render_height = 0
+    extra_heights: dict[int, int] = {}
 
-    if view._diff is None:
-        return
+    pending_draft_map = getattr(view, "_pending_comment_drafts_by_line", {})
+    for line_index, drafts in pending_draft_map.items():
+        extra_heights[line_index] = extra_heights.get(line_index, 0) + sum(
+            estimate_pending_draft_height(draft) for draft in drafts
+        )
 
     comment_map = getattr(view, "_comment_threads_by_line", {})
-    pending_draft_map = getattr(view, "_pending_comment_drafts_by_line", {})
-    inline_editor_line = getattr(view, "_inline_comment_editor_line_index", None)
+    for line_index, threads in comment_map.items():
+        extra_heights[line_index] = extra_heights.get(line_index, 0) + sum(
+            estimate_thread_height(thread) for thread in threads
+        )
 
-    offset = 0
-    for hunk in view._diff.hunks:
-        view._hunk_header_top_offsets.append(offset)
-        offset += 1
-        for line in hunk.lines:
-            line_index = line.line_index
-            height = view._render_height_for_line(line)
-            view._line_top_offsets[line_index] = offset
-            view._line_heights[line_index] = height
-            view._total_line_render_height += height
-            offset += height
-
-            if line_index == inline_editor_line:
-                offset += view._inline_comment_editor_height()
-
-            drafts = pending_draft_map.get(line_index)
-            if drafts:
-                for draft in drafts:
-                    offset += estimate_pending_draft_height(draft)
-
-            # Account for inline comment widgets after this line.
-            threads = comment_map.get(line_index)
-            if threads:
-                for thread in threads:
-                    offset += estimate_thread_height(thread)
-
-            view._line_bottom_offsets[line_index] = offset
-
-    view._virtual_content_height = offset
+    return extra_heights
 
 
 def _set_virtual_window_from_viewport(view) -> bool:
@@ -208,19 +199,24 @@ def _maybe_update_virtual_window(view, line_index: int) -> None:
 
 
 def _virtual_top_buffer_height(view, window_start: int, window_end: int) -> int:
-    if not view._all_lines or not (0 <= window_start < len(view._all_lines)):
-        return 0
-
-    hunk_index = view._hunk_index_by_line[window_start]
-    if view._should_render_hunk_header(hunk_index, window_start, window_end):
-        return view._hunk_header_top_offsets[hunk_index]
-    return view._line_top_offsets[window_start]
+    return _geometry.virtual_top_buffer_height(
+        total_lines=len(view._all_lines),
+        window_start=window_start,
+        window_end=window_end,
+        hunk_index_by_line=view._hunk_index_by_line,
+        hunk_line_ranges=view._hunk_line_ranges,
+        hunk_header_top_offsets=view._hunk_header_top_offsets,
+        line_top_offsets=view._line_top_offsets,
+    )
 
 
 def _virtual_bottom_buffer_height(view, window_end: int) -> int:
-    if not view._all_lines or not (0 <= window_end < len(view._all_lines)):
-        return 0
-    return max(0, view._virtual_content_height - view._line_bottom_offsets[window_end])
+    return _geometry.virtual_bottom_buffer_height(
+        total_lines=len(view._all_lines),
+        window_end=window_end,
+        virtual_content_height=view._virtual_content_height,
+        line_bottom_offsets=view._line_bottom_offsets,
+    )
 
 
 @staticmethod

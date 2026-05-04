@@ -10,6 +10,7 @@ from textual.geometry import Size
 
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_comments as _comments
+from rit.ui.widgets import diff_geometry as _geometry
 from rit.ui.widgets import diff_search as _search
 from rit.ui.widgets import diff_virtual as _virtual
 from rit.ui.widgets.diff_types import RenderedRow
@@ -380,17 +381,13 @@ def _half_page_step(view: DiffView) -> int:
 
 
 def _row_vertical_bounds(view: DiffView, row: RenderedRow) -> tuple[int, int] | None:
-    if not (0 <= row.line_index < len(view._all_lines)):
-        return None
-    top = view._line_top_offsets[row.line_index]
-    bottom = view._line_bottom_offsets[row.line_index]
-    line = view._all_lines[row.line_index]
-    if not view.split and line.is_modified:
-        if row.side == "old":
-            return top, top + 1
-        if row.side == "new":
-            return top + 1, top + 2
-    return top, bottom
+    return _geometry.row_vertical_bounds(
+        row,
+        all_lines=view._all_lines,
+        split=view.split,
+        line_top_offsets=view._line_top_offsets,
+        line_bottom_offsets=view._line_bottom_offsets,
+    )
 
 
 def _get_cursor_text_for_target(
@@ -410,6 +407,15 @@ def _get_cursor_text_for_target(
 # ---------------------------------------------------------------------------
 
 
+def _viewport_geometry(view: DiffView) -> _geometry.ViewportGeometry:
+    return _geometry.ViewportGeometry(
+        scroll_y=int(view.scroll_y),
+        viewport_height=max(1, view.scrollable_content_region.height),
+        max_scroll_y=max(0, int(view.max_scroll_y)),
+        dock_header_height=_dock_header_height(view),
+    )
+
+
 def _current_cursor_viewport_offset(view: DiffView) -> int | None:
     row = view._current_row()
     if row is None:
@@ -417,8 +423,7 @@ def _current_cursor_viewport_offset(view: DiffView) -> int | None:
     bounds = _row_vertical_bounds(view, row)
     if bounds is None:
         return None
-    top, _ = bounds
-    return max(0, top - int(view.scroll_y) - _dock_header_height(view))
+    return _geometry.cursor_viewport_offset(bounds, _viewport_geometry(view))
 
 
 def _scroll_row_to_viewport_offset(
@@ -431,16 +436,12 @@ def _scroll_row_to_viewport_offset(
     bounds = _row_vertical_bounds(view, row)
     if bounds is None:
         return
-    top, bottom = bounds
-    viewport_height = max(1, view.scrollable_content_region.height)
-    header_h = _dock_header_height(view)
-    target_scroll = max(0, top - max(0, viewport_offset) - header_h)
-    if bottom - target_scroll - header_h > viewport_height:
-        target_scroll = max(0, bottom - viewport_height - header_h)
-    view.scroll_to(
-        y=min(target_scroll, max(0, int(view.max_scroll_y))),
-        animate=animate,
+    target_scroll = _geometry.scroll_target_for_row_viewport_offset(
+        bounds,
+        _viewport_geometry(view),
+        viewport_offset,
     )
+    view.scroll_to(y=target_scroll, animate=animate)
 
 
 def _scroll_row_to_viewport_bottom(
@@ -452,23 +453,18 @@ def _scroll_row_to_viewport_bottom(
     bounds = _row_vertical_bounds(view, row)
     if bounds is None:
         return
-    _, bottom = bounds
-    viewport_height = max(1, view.scrollable_content_region.height)
-    view.scroll_to(
-        y=min(max(0, bottom - viewport_height), max(0, int(view.max_scroll_y))),
-        animate=animate,
+    target_scroll = _geometry.scroll_target_for_row_bottom(
+        bounds,
+        _viewport_geometry(view),
     )
+    view.scroll_to(y=target_scroll, animate=animate)
 
 
 def _row_is_visible(view: DiffView, row: RenderedRow) -> bool:
     bounds = _row_vertical_bounds(view, row)
     if bounds is None:
         return False
-    top, bottom = bounds
-    header_h = _dock_header_height(view)
-    current_top = int(view.scroll_y) + header_h
-    current_bottom = current_top + max(1, view.scrollable_content_region.height)
-    return top >= current_top and bottom <= current_bottom
+    return _geometry.row_is_visible(bounds, _viewport_geometry(view))
 
 
 def _scroll_to_vertical_span(
@@ -479,19 +475,14 @@ def _scroll_to_vertical_span(
     animate: bool = False,
     top_align: bool = False,
 ) -> None:
-    viewport_height = max(1, view.scrollable_content_region.height)
-    header_h = _dock_header_height(view)
-    current_top = int(view.scroll_y) + header_h
-    current_bottom = current_top + viewport_height
-
-    if top_align:
-        view.scroll_to(y=max(0, top - header_h), animate=animate)
-        return
-    if top < current_top:
-        view.scroll_to(y=max(0, top - header_h), animate=animate)
-        return
-    if bottom > current_bottom:
-        view.scroll_to(y=max(0, bottom - viewport_height), animate=animate)
+    target_scroll = _geometry.scroll_target_for_span(
+        top=top,
+        bottom=bottom,
+        viewport=_viewport_geometry(view),
+        top_align=top_align,
+    )
+    if target_scroll is not None:
+        view.scroll_to(y=target_scroll, animate=animate)
 
 
 def _scroll_to_cursor(view: DiffView) -> None:
