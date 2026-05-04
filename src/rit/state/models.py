@@ -185,6 +185,12 @@ class ReviewThread(BaseModel):
     is_resolved: bool = Field(default=False, alias="isResolved")
     path: str = ""
     line: int | None = None
+    original_line: int | None = Field(default=None, alias="originalLine")
+    start_line: int | None = Field(default=None, alias="startLine")
+    original_start_line: int | None = Field(default=None, alias="originalStartLine")
+    diff_side: str = Field(default="", alias="diffSide")
+    start_diff_side: str = Field(default="", alias="startDiffSide")
+    subject_type: str = Field(default="LINE", alias="subjectType")
 
     comments_connection: NodeList[PRComment] = Field(
         default_factory=NodeList, alias="comments", exclude=True
@@ -201,6 +207,29 @@ class ReviewThread(BaseModel):
     @property
     def root_comment_id(self) -> int:
         return self.comments[0].id if self.comments else 0
+
+    @property
+    def anchor_side(self) -> Literal["old", "new", "auto"]:
+        if self.diff_side == "LEFT":
+            return "old"
+        if self.diff_side == "RIGHT":
+            return "new"
+        root = self.root_comment
+        if root is not None and root.anchor_side != "auto":
+            return root.anchor_side
+        if self.original_line is not None and self.line is None:
+            return "old"
+        if self.line is not None:
+            return "new"
+        return "auto"
+
+    @property
+    def anchor_line(self) -> int | None:
+        if self.anchor_side == "old":
+            return self.original_line if self.original_line is not None else self.line
+        if self.anchor_side == "new":
+            return self.line if self.line is not None else self.original_line
+        return self.line if self.line is not None else self.original_line
 
 
 class PRReview(BaseModel):

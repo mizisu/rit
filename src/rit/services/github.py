@@ -130,6 +130,12 @@ query($owner: String!, $repo: String!, $number: Int!) {
           isResolved
           path
           line
+          originalLine
+          startLine
+          originalStartLine
+          diffSide
+          startDiffSide
+          subjectType
           comments(first: 100) {
             nodes {
               databaseId
@@ -248,6 +254,12 @@ query($owner: String!, $repo: String!, $number: Int!) {
           isResolved
           path
           line
+          originalLine
+          startLine
+          originalStartLine
+          diffSide
+          startDiffSide
+          subjectType
           comments(first: 100) {
             nodes {
               databaseId

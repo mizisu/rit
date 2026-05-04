@@ -90,11 +90,11 @@ def build_comment_map(view: DiffView) -> None:
         if root is None:
             continue
 
-        line_index = _resolve_line_index(view, root)
+        line_index = _resolve_line_index(view, root, thread=thread)
         if line_index is not None:
             view._comment_threads_by_line.setdefault(line_index, []).append(thread)
             existing_side = view._comment_side_by_line.get(line_index)
-            root_side = _comment_target_side(root)
+            root_side = _comment_target_side(root, thread=thread)
             if existing_side is None:
                 view._comment_side_by_line[line_index] = root_side
             elif existing_side == "auto":
@@ -107,31 +107,90 @@ def build_comment_map(view: DiffView) -> None:
     )
 
 
-def _comment_target_side(comment: PRComment) -> Literal["old", "new", "auto"]:
+def _comment_target_side(
+    comment: PRComment,
+    *,
+    thread: ReviewThread | None = None,
+) -> Literal["old", "new", "auto"]:
+    if thread is not None and thread.anchor_side != "auto":
+        return thread.anchor_side
     return comment.anchor_side
 
 
-def _resolve_line_index(view: DiffView, comment: PRComment) -> int | None:
-    target_side = _comment_target_side(comment)
+def _resolve_line_index(
+    view: DiffView,
+    comment: PRComment,
+    *,
+    thread: ReviewThread | None = None,
+) -> int | None:
+    target_side = _comment_target_side(comment, thread=thread)
+    old_line = _old_anchor_line(comment, thread=thread)
+    new_line = _new_anchor_line(comment, thread=thread)
 
-    if target_side != "new" and comment.original_line is not None:
-        idx = view._line_index_by_old_number.get(comment.original_line)
+    if target_side != "new" and old_line is not None:
+        idx = view._line_index_by_old_number.get(old_line)
         if idx is not None:
             return idx
-    if target_side != "old" and comment.line is not None:
-        idx = view._line_index_by_new_number.get(comment.line)
+    if target_side != "old" and new_line is not None:
+        idx = view._line_index_by_new_number.get(new_line)
         if idx is not None:
             return idx
-    if target_side == "new" and comment.original_line is not None:
-        idx = view._line_index_by_old_number.get(comment.original_line)
+    if target_side == "new" and old_line is not None:
+        idx = view._line_index_by_old_number.get(old_line)
         if idx is not None:
             return idx
-    if target_side == "old" and comment.line is not None:
-        idx = view._line_index_by_new_number.get(comment.line)
+    if target_side == "old" and new_line is not None:
+        idx = view._line_index_by_new_number.get(new_line)
         if idx is not None:
             return idx
 
-    return _resolve_line_index_from_diff_hunk(view, comment, target_side)
+    return _resolve_line_index_from_diff_hunk(
+        view,
+        comment,
+        target_side,
+        _anchor_line_for_side(comment, target_side, thread=thread),
+    )
+
+
+def _old_anchor_line(
+    comment: PRComment,
+    *,
+    thread: ReviewThread | None = None,
+) -> int | None:
+    if thread is not None and thread.original_line is not None:
+        return thread.original_line
+    return comment.original_line
+
+
+def _new_anchor_line(
+    comment: PRComment,
+    *,
+    thread: ReviewThread | None = None,
+) -> int | None:
+    if thread is not None and thread.line is not None:
+        return thread.line
+    return comment.line
+
+
+def _anchor_line_for_side(
+    comment: PRComment,
+    target_side: Literal["old", "new", "auto"],
+    *,
+    thread: ReviewThread | None = None,
+) -> int | None:
+    if target_side == "old":
+        old_line = _old_anchor_line(comment, thread=thread)
+        if old_line is not None:
+            return old_line
+        return _new_anchor_line(comment, thread=thread)
+    if target_side == "new":
+        new_line = _new_anchor_line(comment, thread=thread)
+        if new_line is not None:
+            return new_line
+        return _old_anchor_line(comment, thread=thread)
+    if thread is not None and thread.anchor_line is not None:
+        return thread.anchor_line
+    return comment.anchor_line
 
 
 def _resolve_pending_line_index(
@@ -147,6 +206,7 @@ def _resolve_line_index_from_diff_hunk(
     view: DiffView,
     comment: PRComment,
     target_side: Literal["old", "new", "auto"],
+    anchor_line: int | None,
 ) -> int | None:
     if view._diff is None or not comment.diff_hunk:
         return None
@@ -167,7 +227,7 @@ def _resolve_line_index_from_diff_hunk(
     if best_hunk is None:
         return None
 
-    return _nearest_line_index_in_hunk(best_hunk, target_side, comment.anchor_line)
+    return _nearest_line_index_in_hunk(best_hunk, target_side, anchor_line)
 
 
 def _hunk_overlap_score(target_hunk: DiffHunk, current_hunk: DiffHunk) -> int:
@@ -510,7 +570,7 @@ def _build_pending_draft_widget(
 
 def _build_inline_thread_widget(thread: ReviewThread) -> ReviewThreadItem:
     root = thread.root_comment
-    line_info = f":{root.anchor_line}" if root and root.anchor_line else ""
+    line_info = f":{thread.anchor_line}" if thread.anchor_line else ""
     file_icon = get_file_icon(thread.path)
 
     if thread.is_resolved:
@@ -522,7 +582,7 @@ def _build_inline_thread_widget(thread: ReviewThread) -> ReviewThreadItem:
         classes = "--thread --inline"
         collapsed = False
 
-    line_no = root.anchor_line if root else None
+    line_no = thread.anchor_line
 
     return ReviewThreadItem(
         title=title,

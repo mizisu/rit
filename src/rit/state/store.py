@@ -303,7 +303,7 @@ class PRStore:
                 thread_id=thread.id,
                 is_resolved=thread.is_resolved,
                 path=thread.path,
-                line=thread.line,
+                line=thread.anchor_line,
                 root_comment_id=thread.root_comment_id,
             )
             for thread in pr.review_threads

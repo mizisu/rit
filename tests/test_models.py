@@ -6,6 +6,8 @@ from rit.state.models import (
     PRComment,
     PRUser,
     CommentThread,
+    NodeList,
+    ReviewThread,
     group_comments_into_threads,
 )
 
@@ -99,6 +101,46 @@ class TestPRComment:
 
         assert comment.anchor_side == "new"
         assert comment.anchor_line == 20
+
+
+class TestReviewThread:
+    """Tests for GraphQL review thread anchor helpers."""
+
+    def test_anchor_side_prefers_graphql_diff_side(self) -> None:
+        comment = PRComment(
+            body="test",
+            path="test.py",
+            line=20,
+            original_line=10,
+        )
+        thread = ReviewThread(
+            path="test.py",
+            line=20,
+            original_line=10,
+            diff_side="LEFT",
+            comments_connection=NodeList(nodes=[comment]),
+        )
+
+        assert thread.anchor_side == "old"
+        assert thread.anchor_line == 10
+
+    def test_anchor_side_falls_back_to_root_comment_side(self) -> None:
+        comment = PRComment(
+            body="test",
+            path="test.py",
+            line=20,
+            original_line=10,
+            side="LEFT",
+        )
+        thread = ReviewThread(
+            path="test.py",
+            line=20,
+            original_line=10,
+            comments_connection=NodeList(nodes=[comment]),
+        )
+
+        assert thread.anchor_side == "old"
+        assert thread.anchor_line == 10
 
 
 class TestCommentThread:

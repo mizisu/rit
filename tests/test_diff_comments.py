@@ -15,6 +15,7 @@ def _make_thread(
     original_line: int | None,
     side: str,
     diff_hunk: str = "",
+    thread_diff_side: str = "",
 ) -> ReviewThread:
     root = PRComment(
         id=1,
@@ -28,6 +29,8 @@ def _make_thread(
     return ReviewThread(
         path="test.py",
         line=line,
+        original_line=original_line,
+        diff_side=thread_diff_side,
         comments_connection=NodeList(nodes=[root]),
     )
 
@@ -68,6 +71,29 @@ def test_resolve_line_index_prefers_left_side_mapping() -> None:
     )
 
     assert _comments._resolve_line_index(view, comment) == 3
+
+
+def test_resolve_line_index_prefers_thread_diff_side_when_comment_side_absent() -> None:
+    view = SimpleNamespace(
+        _line_index_by_new_number={20: 5},
+        _line_index_by_old_number={10: 3},
+    )
+    comment = PRComment(
+        body="comment",
+        path="test.py",
+        line=20,
+        original_line=10,
+    )
+    thread = ReviewThread(
+        path="test.py",
+        line=20,
+        original_line=10,
+        diff_side="LEFT",
+        comments_connection=NodeList(nodes=[comment]),
+    )
+
+    assert _comments._resolve_line_index(view, comment, thread=thread) == 3
+    assert _comments._comment_target_side(comment, thread=thread) == "old"
 
 
 def test_inline_thread_widget_title_uses_anchor_line() -> None:
@@ -138,6 +164,41 @@ async def test_split_comment_jump_sets_old_pane_for_left_comment() -> None:
 +new alpha
  line2"""
     thread = _make_thread(line=2, original_line=2, side="LEFT")
+    store = SimpleNamespace(state=SimpleNamespace(files=[], review_threads=[thread]))
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(store=store, mode="split", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+
+        await diff_view.show_diff("test.py", parse_patch(patch, "test.py"))
+        await pilot.pause()
+        diff_view.focus()
+        await pilot.pause()
+
+        await pilot.press("}")
+        await pilot.pause()
+
+        assert diff_view.cursor_line == 1
+        assert diff_view.active_pane == "old"
+
+
+@pytest.mark.asyncio
+async def test_split_comment_jump_uses_thread_diff_side_when_graphql_comment_has_no_side() -> None:
+    patch = """@@ -1,3 +1,3 @@
+ line1
+-old alpha
++new alpha
+ line2"""
+    thread = _make_thread(
+        line=2,
+        original_line=2,
+        side="",
+        thread_diff_side="LEFT",
+    )
     store = SimpleNamespace(state=SimpleNamespace(files=[], review_threads=[thread]))
 
     class TestApp(App):
