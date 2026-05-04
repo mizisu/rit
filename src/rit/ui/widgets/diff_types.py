@@ -84,9 +84,10 @@ class UnifiedDiffBlock(Horizontal):
         annotations: list[Content],
         code_lines: list[Content | None],
         line_styles: list[str],
+        width: int | None = None,
     ) -> None:
         self._annotations.numbers = annotations
-        self._code.update(LineContent(code_lines, line_styles))
+        self._code.update(LineContent(code_lines, line_styles, width=width))
 
 
 class SplitDiffBlock(Horizontal):

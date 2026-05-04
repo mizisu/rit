@@ -581,15 +581,16 @@ def _scroll_to_cursor_horizontal(view: DiffView) -> None:
             view._sync_split_horizontal_scroll(cursor_x - edge_padding, source=None)
         return
 
+    scroll_widget = view._content_widget or view
     prefix_width = view._unified_prefix_width_for_layout()
     cursor_x = prefix_width + view.cursor_column
-    viewport_width = view.size.width
-    current_scroll = view.scroll_x
+    viewport_width = max(1, scroll_widget.size.width)
+    current_scroll = scroll_widget.scroll_x
 
     if cursor_x >= current_scroll + viewport_width - edge_padding:
-        view.scroll_x = cursor_x - viewport_width + reveal_padding
+        scroll_widget.scroll_x = cursor_x - viewport_width + reveal_padding
     elif cursor_x < current_scroll + prefix_width:
-        view.scroll_x = max(0, cursor_x - prefix_width - edge_padding)
+        scroll_widget.scroll_x = max(0, cursor_x - prefix_width - edge_padding)
 
 
 # ---------------------------------------------------------------------------

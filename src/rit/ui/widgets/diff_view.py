@@ -184,6 +184,7 @@ class DiffView(VerticalScroll):
         self._suspend_scroll_virtual_window_watch: bool = False
         self._syncing_split_scroll: bool = False
         self._split_horizontal_scroll_x: float = 0.0
+        self._unified_code_width: int = 1
         self._split_old_code_width: int = 1
         self._split_new_code_width: int = 1
 
@@ -980,6 +981,7 @@ class DiffView(VerticalScroll):
             self._code_widgets_by_line = {}
             self._split_scroll_widgets_by_line = {}
             self._split_horizontal_scroll_x = 0.0
+            self._unified_code_width = 1
             self._split_old_code_width = 1
             self._split_new_code_width = 1
             self.scroll_x = 0
@@ -1020,6 +1022,7 @@ class DiffView(VerticalScroll):
 
             if not self._showing_full_file:
                 _comments.build_comment_map(self)
+            self._unified_code_width = _render._unified_code_width_for_layout(self)
             self._split_old_code_width, self._split_new_code_width = (
                 _render._split_code_widths_for_layout(self)
             )

@@ -287,6 +287,41 @@ class TestDiffViewVisualMode:
             assert abs(int(diff_view.scroll_y) - int(diff_view.max_scroll_y)) <= 1
 
     @pytest.mark.asyncio
+    async def test_virtualized_G_reveals_last_line_after_window_shift(self) -> None:
+        """`G` should reveal the last line after a virtual window jump."""
+
+        line_count = 200
+        patch = f"@@ -1,{line_count} +1,{line_count} @@\n" + "\n".join(
+            f" line{i}" for i in range(1, line_count + 1)
+        )
+
+        class TestApp(App):
+            def compose(self) -> ComposeResult:
+                diff_view = DiffView(id="diff-view")
+                diff_view.VIRTUALIZE_LINE_THRESHOLD = 20
+                yield diff_view
+
+        app = TestApp()
+        async with app.run_test(size=(100, 12)) as pilot:
+            diff_view = app.query_one(DiffView)
+            diff = parse_patch(patch, "test.py")
+
+            await diff_view.show_diff("test.py", diff)
+            await pilot.pause()
+            diff_view.focus()
+            await pilot.pause()
+
+            await pilot.press("G")
+            for _ in range(8):
+                await pilot.pause()
+
+            current_row = diff_view._current_row()
+            assert current_row is not None
+            assert diff_view.cursor_line == len(diff_view._all_lines) - 1
+            assert diff_view._is_line_rendered(diff_view.cursor_line)
+            assert diff_view._row_is_visible(current_row)
+
+    @pytest.mark.asyncio
     async def test_g_and_G_move_cursor(self, sample_patch: str) -> None:
         """`g`/`G` should move cursor to first/last line."""
 

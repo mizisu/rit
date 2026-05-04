@@ -276,6 +276,7 @@ def _refresh_unified_blocks_for_lines(view, line_indices: set[int]) -> bool:
             annotations=annotations,
             code_lines=code_lines,
             line_styles=line_styles,
+            width=view._unified_code_width,
         )
 
     return True
@@ -451,6 +452,7 @@ def _render_unified_line_block(
         annotations=annotations,
         code_lines=code_lines,
         line_styles=line_styles,
+        width=view._unified_code_width,
     )
     if before is not None:
         container.mount(block, before=before)

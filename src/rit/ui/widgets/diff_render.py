@@ -336,6 +336,11 @@ def _create_hunk_header_widget(
         id=f"hunk-{hunk_index}",
     )
     if not view.split:
+        header_widget.styles.width = max(
+            1,
+            len(hunk_header) + 2,
+            _unified_content_width_for_layout(view),
+        )
         return header_widget
     header_widget.styles.width = max(1, len(hunk_header) + 2)
     return SyncedCodeScroll(
@@ -485,6 +490,30 @@ def _split_line_style(
 # ---------------------------------------------------------------------------
 # Mount helpers
 # ---------------------------------------------------------------------------
+
+
+def _unified_code_width_for_layout(view: DiffView) -> int:
+    return max(
+        1,
+        max(
+            (
+                max(
+                    _base_code_content(
+                        view, line, side="old", empty_fallback=" "
+                    ).cell_length,
+                    _base_code_content(
+                        view, line, side="new", empty_fallback=" "
+                    ).cell_length,
+                )
+                for line in view._all_lines
+            ),
+            default=1,
+        ),
+    )
+
+
+def _unified_content_width_for_layout(view: DiffView) -> int:
+    return _unified_prefix_width_for_layout(view) + view._unified_code_width
 
 
 def _split_code_widths_for_layout(view: DiffView) -> tuple[int, int]:
@@ -856,6 +885,7 @@ def _render_line_unified(view: DiffView, line: DiffLine) -> Horizontal | Vertica
     prefix_widget = Static(prefix_content, classes="line-prefix")
     prefix_widget.styles.width = _unified_prefix_width_for_layout(view)
     code_widget = Static(code_content, classes=code_classes)
+    code_widget.styles.width = view._unified_code_width
 
     container = Horizontal(
         prefix_widget,
@@ -1097,6 +1127,7 @@ def _render_modified_line(view: DiffView, line: DiffLine) -> Vertical:
         old_code_content,
         classes=_unified_code_classes(line, side="old"),
     )
+    old_code_widget.styles.width = view._unified_code_width
     old_horizontal = Horizontal(
         old_prefix_widget,
         old_code_widget,
@@ -1118,6 +1149,7 @@ def _render_modified_line(view: DiffView, line: DiffLine) -> Vertical:
         new_code_content,
         classes=_unified_code_classes(line, side="new"),
     )
+    new_code_widget.styles.width = view._unified_code_width
     new_horizontal = Horizontal(
         new_prefix_widget,
         new_code_widget,

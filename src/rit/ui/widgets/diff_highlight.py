@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from typing import TYPE_CHECKING
 
 
@@ -111,7 +112,7 @@ def _queue_highlight_diff(view, filename: str, diff: FileDiff) -> None:
 
     view._hl_state.full_worker_active = True
     view.run_worker(
-        _drain_queued_full_highlights(view),
+        partial(_drain_queued_full_highlights, view),
         exclusive=False,
         name="diff-highlight",
     )
@@ -290,7 +291,7 @@ def _queue_highlight_diff_range(
 
     view._hl_state.window_worker_active = True
     view.run_worker(
-        _drain_queued_window_highlights(view),
+        partial(_drain_queued_window_highlights, view),
         exclusive=False,
         name="diff-highlight-window",
     )

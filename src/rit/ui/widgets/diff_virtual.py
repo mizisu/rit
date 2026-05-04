@@ -562,6 +562,16 @@ async def _try_shift_virtual_window_incremental(view) -> bool:
     return False
 
 
+def _reveal_cursor_after_virtual_render(view, request_token: int) -> None:
+    if not view._is_current_render_request(request_token):
+        return
+    from rit.ui.widgets import diff_cursor as _cursor
+
+    _cursor._scroll_to_cursor(view)
+    _cursor._scroll_to_cursor_horizontal(view)
+    _cursor._flush_cursor_ui_now_if_safe(view)
+
+
 async def _run_virtual_window_render_for_request(view, request_token: int) -> None:
     token = _RENDER_REQUEST_CONTEXT.set(request_token)
     try:
@@ -597,15 +607,14 @@ async def _render_virtual_window_and_finalize(view) -> None:
 
     cursor_driven = view._virt.cursor_shift_pending
     view._virt.cursor_shift_pending = False
-
     queued_center = view._virt.coalesced_center
     view._virt.coalesced_center = None
-    if (
-        cursor_driven
-        or queued_center is None
-        or not view._virt.active
-        or not view.is_mounted
-    ):
+    if cursor_driven:
+        view.call_after_refresh(
+            lambda: _reveal_cursor_after_virtual_render(view, request_token)
+        )
+        return
+    if queued_center is None or not view._virt.active or not view.is_mounted:
         return
 
     margin = _effective_virtual_window_shift_margin(view)
