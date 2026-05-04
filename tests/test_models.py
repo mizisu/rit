@@ -70,6 +70,36 @@ class TestPRComment:
         assert comment.anchor_side == "new"
         assert comment.anchor_line == 20
 
+    def test_anchor_side_infers_old_when_graphql_side_is_absent(self) -> None:
+        comment = PRComment(
+            id=1,
+            body="test",
+            user=PRUser(login="user"),
+            path="test.py",
+            line=None,
+            original_line=15,
+            created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        )
+
+        assert comment.anchor_side == "old"
+        assert comment.anchor_line == 15
+
+    def test_anchor_side_infers_new_when_graphql_side_is_absent(self) -> None:
+        comment = PRComment(
+            id=1,
+            body="test",
+            user=PRUser(login="user"),
+            path="test.py",
+            line=20,
+            original_line=15,
+            created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            updated_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        )
+
+        assert comment.anchor_side == "new"
+        assert comment.anchor_line == 20
+
 
 class TestCommentThread:
     """Tests for CommentThread dataclass."""

@@ -90,7 +90,7 @@ class PRComment(BaseModel):
     path: str = ""
     line: int | None = None
     original_line: int | None = Field(default=None, alias="originalLine")
-    side: str = "RIGHT"
+    side: str = ""
     created_at: datetime = Field(
         default_factory=lambda: datetime.min, alias="createdAt"
     )

@@ -6,12 +6,13 @@ from dataclasses import dataclass
 from pydantic import TypeAdapter
 
 from rit.state.models import (
-    PendingReviewComment,
     PR,
+    PendingReviewComment,
     PRComment,
     PRFile,
     PRIssueComment,
     PRReview,
+    ReviewThread,
 )
 
 _PRFileListAdapter: TypeAdapter[list[PRFile]] = TypeAdapter(list[PRFile])
@@ -36,10 +37,139 @@ class ReviewThreadInfo:
     root_comment_id: int  # Database ID of root comment
 
 
+@dataclass
+class PRDiscussion:
+    body: str
+    reviews: list[PRReview]
+    issue_comments: list[PRIssueComment]
+    review_threads: list[ReviewThread]
+
+
 class GitHubError(Exception):
     def __init__(self, message: str, status_code: int | None = None):
         super().__init__(message)
         self.status_code = status_code
+
+
+_PR_SUMMARY_GRAPHQL_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      id
+      number
+      title
+      state
+      isDraft
+      additions
+      deletions
+      changedFiles
+      createdAt
+      updatedAt
+      mergedAt
+      closedAt
+      author {
+        login
+        avatarUrl
+      }
+      baseRefName
+      headRefName
+      baseRefOid
+      headRefOid
+      assignees(first: 20) {
+        nodes {
+          login
+          avatarUrl
+        }
+      }
+      labels(first: 50) {
+        nodes {
+          name
+          color
+          description
+        }
+      }
+      reviewRequests(first: 20) {
+        nodes {
+          requestedReviewer {
+            ... on User {
+              login
+              avatarUrl
+            }
+            ... on Team {
+              name
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+_PR_DISCUSSION_GRAPHQL_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      body
+      reviews(first: 100) {
+        nodes {
+          databaseId
+          author {
+            login
+            avatarUrl
+          }
+          state
+          body
+          submittedAt
+        }
+      }
+      reviewThreads(first: 100) {
+        nodes {
+          id
+          isResolved
+          path
+          line
+          comments(first: 100) {
+            nodes {
+              databaseId
+              author {
+                login
+                avatarUrl
+              }
+              body
+              createdAt
+              updatedAt
+              diffHunk
+              path
+              line
+              originalLine
+              replyTo {
+                databaseId
+              }
+              pullRequestReview {
+                databaseId
+              }
+            }
+          }
+        }
+      }
+      comments(first: 100) {
+        nodes {
+          databaseId
+          author {
+            login
+            avatarUrl
+          }
+          body
+          createdAt
+          updatedAt
+        }
+      }
+    }
+  }
+}
+"""
 
 
 _PR_GRAPHQL_QUERY = """
@@ -222,14 +352,82 @@ class GitHubService:
 
     async def get_pr_all(self, pr_number: int) -> PR:
         """Fetch all PR data in a single GraphQL request."""
-        repo = await self.get_repo()
+        pr_data = await self._get_pull_request_data(pr_number, query=_PR_GRAPHQL_QUERY)
+        return PR.model_validate(pr_data)
 
+    async def get_pr_summary(self, pr_number: int) -> PR:
+        """Fetch the summary needed for the header and sidebar."""
+        pr_data = await self._get_pull_request_data(
+            pr_number,
+            query=_PR_SUMMARY_GRAPHQL_QUERY,
+        )
+        return PR.model_validate(pr_data)
+
+    async def get_pr_discussion(self, pr_number: int) -> PRDiscussion:
+        """Fetch the discussion body, reviews, threads, and issue comments."""
+        pr_data = await self._get_pull_request_data(
+            pr_number,
+            query=_PR_DISCUSSION_GRAPHQL_QUERY,
+        )
+        pr = PR.model_validate(pr_data)
+        return PRDiscussion(
+            body=pr.body,
+            reviews=pr.reviews,
+            issue_comments=pr.issue_comments,
+            review_threads=pr.review_threads,
+        )
+
+    async def get_pr_files(self, pr_number: int) -> list[PRFile]:
+        """Fetch files via REST API (GraphQL lacks patch data)."""
+        files: list[PRFile] = []
+        page = 1
+        per_page = 100
+
+        while True:
+            batch = await self.get_pr_files_page(
+                pr_number,
+                page=page,
+                per_page=per_page,
+            )
+            if not batch:
+                break
+            files.extend(batch)
+            if len(batch) < per_page:
+                break
+            page += 1
+
+        return files
+
+    async def get_pr_files_page(
+        self,
+        pr_number: int,
+        *,
+        page: int,
+        per_page: int = 100,
+    ) -> list[PRFile]:
+        """Fetch one page of PR files via the REST API."""
+        repo = await self.get_repo()
+        result = await self._run_gh(
+            [
+                "api",
+                f"/repos/{repo.full_name}/pulls/{pr_number}/files?per_page={per_page}&page={page}",
+            ]
+        )
+        data = json.loads(result)
+        if isinstance(data, list):
+            return _PRFileListAdapter.validate_python(data)
+        return _PRFileListAdapter.validate_python([data])
+
+    async def _get_pull_request_data(
+        self, pr_number: int, *, query: str
+    ) -> dict[str, object]:
+        repo = await self.get_repo()
         result = await self._run_gh(
             [
                 "api",
                 "graphql",
                 "-f",
-                f"query={_PR_GRAPHQL_QUERY}",
+                f"query={query}",
                 "-F",
                 f"owner={repo.owner}",
                 "-F",
@@ -248,32 +446,7 @@ class GitHubService:
         if not pr_data:
             raise GitHubError(f"PR #{pr_number} not found")
 
-        return PR.model_validate(pr_data)
-
-    async def get_pr_files(self, pr_number: int) -> list[PRFile]:
-        """Fetch files via REST API (GraphQL lacks patch data)."""
-        repo = await self.get_repo()
-        result = await self._run_gh(
-            [
-                "api",
-                f"/repos/{repo.full_name}/pulls/{pr_number}/files",
-                "--paginate",
-            ]
-        )
-
-        files: list[PRFile] = []
-        for line in result.strip().split("\n"):
-            if line:
-                try:
-                    data = json.loads(line)
-                    if isinstance(data, list):
-                        files.extend(_PRFileListAdapter.validate_python(data))
-                    else:
-                        files.append(_PRFileListAdapter.validate_python([data])[0])
-                except json.JSONDecodeError:
-                    continue
-
-        return files
+        return pr_data
 
     async def create_issue_comment(
         self,
