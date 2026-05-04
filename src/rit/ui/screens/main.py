@@ -291,7 +291,7 @@ class MainScreen(Screen):
 
     @on(PRStore.ErrorOccurred)
     def on_store_error(self, event: PRStore.ErrorOccurred) -> None:
-        self.notify(event.error, title="Error", severity="error")
+        self.notify(event.error, title="Error", severity="error", markup=False)
 
     def _copy_branch(self, branch: str | None, *, label: str) -> None:
         if not branch:

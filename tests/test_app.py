@@ -132,6 +132,52 @@ class TestRitApp:
 
             assert isinstance(app.screen, MainScreen)
 
+    def test_flash_uses_plain_text_for_markup_like_errors(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from rit.ui.messages import Flash
+
+        calls = []
+
+        def fake_notify(*args, **kwargs) -> None:
+            calls.append((args, kwargs))
+
+        app = RitApp(owner="test", repo="repo", pr_number=123)
+        monkeypatch.setattr(app, "notify", fake_notify)
+
+        app.on_flash(
+            Flash(
+                "Validation error [type=None, input_type=NoneType]",
+                style="error",
+            )
+        )
+
+        assert calls[0][0][0] == "Validation error [type=None, input_type=NoneType]"
+        assert calls[0][1]["markup"] is False
+
+    def test_store_error_notification_uses_plain_text(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from rit.state.store import PRStore
+        from rit.ui.screens.main import MainScreen
+
+        calls = []
+
+        def fake_notify(*args, **kwargs) -> None:
+            calls.append((args, kwargs))
+
+        screen = MainScreen(owner="test", repo="repo", pr_number=123)
+        monkeypatch.setattr(screen, "notify", fake_notify)
+
+        screen.on_store_error(
+            PRStore.ErrorOccurred(
+                error="Validation error [type=None, input_type=NoneType]"
+            )
+        )
+
+        assert calls[0][0][0] == "Validation error [type=None, input_type=NoneType]"
+        assert calls[0][1]["markup"] is False
+
     async def test_tab_switching_with_keys(self, app: RitApp) -> None:
         """Test tab switching with Tab and Shift+Tab."""
         async with app.run_test() as pilot:

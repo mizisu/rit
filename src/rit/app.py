@@ -5,7 +5,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from textual.app import App
+from textual.app import App, SeverityLevel
 from textual.binding import Binding
 from textual.reactive import var
 from textual.signal import Signal
@@ -124,7 +124,7 @@ class RitApp(App):
         self.notify("Settings coming soon!", title="Settings")
 
     def on_flash(self, message: Flash) -> None:
-        severity_map = {
+        severity_map: dict[str, SeverityLevel] = {
             "default": "information",
             "success": "information",
             "warning": "warning",
@@ -141,6 +141,7 @@ class RitApp(App):
 
         self.notify(
             content,
-            severity=severity,  # type: ignore
+            severity=severity,
             timeout=message.duration or 3.0,
+            markup=False,
         )
