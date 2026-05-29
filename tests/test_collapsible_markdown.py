@@ -1,12 +1,27 @@
 """Tests for collapsible markdown component."""
 
+import base64
+
 import pytest
+from textual.app import App, ComposeResult
+from textual.containers import Vertical
 
 from rit.ui.components.collapsible_markdown import (
-    parse_details_blocks,
+    CopyableCodeBlock,
     DetailsBlock,
+    ImageViewerScreen,
+    MarkdownImageBlock,
     MarkdownPart,
+    mount_markdown_with_details,
+    parse_details_blocks,
+    parse_fenced_code_blocks,
+    parse_markdown_image_parts,
 )
+
+
+def _details(part: MarkdownPart) -> DetailsBlock:
+    assert part.details is not None
+    return part.details
 
 
 class TestParseDetailsBlocks:
@@ -44,8 +59,8 @@ Hidden content here.
         assert len(result) == 1
         assert result[0].is_details is True
         assert result[0].details is not None
-        assert result[0].details.summary == "Click to expand"
-        assert "Hidden content here." in result[0].details.content
+        assert _details(result[0]).summary == "Click to expand"
+        assert "Hidden content here." in _details(result[0]).content
 
     def test_details_with_surrounding_content(self) -> None:
         """Details block with content before and after."""
@@ -69,8 +84,8 @@ Some text after."""
 
         # Details block
         assert result[1].is_details is True
-        assert result[1].details.summary == "Summary"
-        assert "Inner content" in result[1].details.content
+        assert _details(result[1]).summary == "Summary"
+        assert "Inner content" in _details(result[1]).content
 
         # After text
         assert result[2].is_details is False
@@ -94,13 +109,13 @@ Content 2
         assert len(result) == 3
 
         assert result[0].is_details is True
-        assert result[0].details.summary == "First"
+        assert _details(result[0]).summary == "First"
 
         assert result[1].is_details is False
         assert "Middle text" in result[1].content
 
         assert result[2].is_details is True
-        assert result[2].details.summary == "Second"
+        assert _details(result[2]).summary == "Second"
 
     def test_details_with_code_block(self) -> None:
         """Details block containing code block."""
@@ -117,8 +132,8 @@ def hello():
 
         assert len(result) == 1
         assert result[0].is_details is True
-        assert "```python" in result[0].details.content
-        assert 'print("world")' in result[0].details.content
+        assert "```python" in _details(result[0]).content
+        assert 'print("world")' in _details(result[0]).content
 
     def test_case_insensitive(self) -> None:
         """Tags are case insensitive."""
@@ -130,7 +145,7 @@ Content
 
         assert len(result) == 1
         assert result[0].is_details is True
-        assert result[0].details.summary == "Upper case"
+        assert _details(result[0]).summary == "Upper case"
 
     def test_whitespace_handling(self) -> None:
         """Whitespace is handled correctly."""
@@ -144,8 +159,8 @@ Content
 
         assert len(result) == 1
         assert result[0].is_details is True
-        assert result[0].details.summary == "Spaced summary"
-        assert "Spaced content" in result[0].details.content
+        assert _details(result[0]).summary == "Spaced summary"
+        assert "Spaced content" in _details(result[0]).content
 
     def test_nested_details_blocks(self) -> None:
         """Nested details blocks are parsed correctly."""
@@ -168,10 +183,10 @@ Content 2
         # Should be one top-level details block
         assert len(result) == 1
         assert result[0].is_details is True
-        assert result[0].details.summary == "Outer"
+        assert _details(result[0]).summary == "Outer"
 
         # Inner content should contain both nested details blocks
-        inner_content = result[0].details.content
+        inner_content = _details(result[0]).content
         assert "<details>" in inner_content.lower()
         assert "Inner 1" in inner_content
         assert "Inner 2" in inner_content
@@ -197,10 +212,10 @@ Deep content
         result = parse_details_blocks(body)
 
         assert len(result) == 1
-        assert result[0].details.summary == "Level 1"
-        assert "Level 2" in result[0].details.content
-        assert "Level 3" in result[0].details.content
-        assert "Deep content" in result[0].details.content
+        assert _details(result[0]).summary == "Level 1"
+        assert "Level 2" in _details(result[0]).content
+        assert "Level 3" in _details(result[0]).content
+        assert "Deep content" in _details(result[0]).content
 
     def test_mixed_nested_and_sibling_details(self) -> None:
         """Mix of nested and sibling details blocks."""
@@ -222,10 +237,10 @@ Second content
 
         # Two top-level details blocks
         assert len(result) == 2
-        assert result[0].details.summary == "First"
-        assert "Nested in First" in result[0].details.content
-        assert result[1].details.summary == "Second"
-        assert "Second content" in result[1].details.content
+        assert _details(result[0]).summary == "First"
+        assert "Nested in First" in _details(result[0]).content
+        assert _details(result[1]).summary == "Second"
+        assert "Second content" in _details(result[1]).content
 
     def test_coderabbit_style_nested(self) -> None:
         """CodeRabbit-style nested details (learnings pattern)."""
@@ -265,10 +280,192 @@ Graph content
 
         # Second is Learnings with nested details
         assert result[1].is_details is True
-        assert "Learnings (2)" in result[1].details.summary
-        assert "Learning: 2026-01-13" in result[1].details.content
-        assert "Learning: 2026-01-14" in result[1].details.content
+        assert "Learnings (2)" in _details(result[1]).summary
+        assert "Learning: 2026-01-13" in _details(result[1]).content
+        assert "Learning: 2026-01-14" in _details(result[1]).content
 
         # Third is Code graph
         assert result[2].is_details is True
-        assert "Code graph analysis" in result[2].details.summary
+        assert "Code graph analysis" in _details(result[2]).summary
+
+
+class TestParseMarkdownImages:
+    def test_markdown_image_is_split_from_markdown_text(self) -> None:
+        body = (
+            'Before\n\n![Screenshot](https://example.com/screenshot.png "UI")\n\nAfter'
+        )
+
+        result = parse_markdown_image_parts(body)
+
+        assert len(result) == 3
+        assert result[0].content == "Before"
+        assert result[1].is_image is True
+        image = result[1].image
+        assert image is not None
+        assert image.alt == "Screenshot"
+        assert image.src == "https://example.com/screenshot.png"
+        assert image.title == "UI"
+        assert result[2].content == "After"
+
+    def test_standalone_html_image_tag_is_split_from_markdown_text(self) -> None:
+        body = (
+            'Before\n\n<img alt="Screenshot" src="https://example.com/ui.png">\n\nAfter'
+        )
+
+        result = parse_markdown_image_parts(body)
+
+        assert len(result) == 3
+        assert result[1].is_image is True
+        image = result[1].image
+        assert image is not None
+        assert image.alt == "Screenshot"
+        assert image.src == "https://example.com/ui.png"
+
+    def test_inline_markdown_badges_stay_markdown_text(self) -> None:
+        body = (
+            "## [![Quality Gate Failed](https://example.com/qg-failed-20px.png "
+            "'Quality Gate Failed')](https://example.com/dashboard) "
+            "**Quality Gate failed**\n"
+            "![](https://example.com/failed-16px.png '') "
+            "[80.8% Coverage on New Code](https://example.com/coverage)"
+        )
+
+        result = parse_markdown_image_parts(body)
+
+        assert len(result) == 1
+        assert result[0].is_image is False
+        assert result[0].content == body
+
+    def test_inline_html_image_tag_stays_markdown_text(self) -> None:
+        body = 'Before <img alt="Screenshot" src="https://example.com/ui.png"> After'
+
+        result = parse_markdown_image_parts(body)
+
+        assert len(result) == 1
+        assert result[0].is_image is False
+        assert result[0].content == body
+
+    def test_relative_image_url_is_resolved_against_base_url(self) -> None:
+        result = parse_markdown_image_parts(
+            "![Diagram](assets/diagram.png)",
+            base_url="https://github.com/owner/repo/pull/123",
+        )
+
+        image = result[0].image
+        assert image is not None
+        assert image.src == "https://github.com/owner/repo/pull/assets/diagram.png"
+        assert image.github_context == "owner/repo"
+
+    def test_github_user_attachment_keeps_repo_context(self) -> None:
+        result = parse_markdown_image_parts(
+            "![Screenshot](https://github.com/user-attachments/assets/abc123)",
+            base_url="https://github.com/owner/repo/pull/123",
+        )
+
+        image = result[0].image
+        assert image is not None
+        assert image.src == "https://github.com/user-attachments/assets/abc123"
+        assert image.github_context == "owner/repo"
+
+
+class TestParseFencedCodeBlocks:
+    def test_fenced_code_block_is_split_from_markdown_text(self) -> None:
+        body = """Before.
+
+```python
+print("hello")
+```
+
+After."""
+
+        result = parse_fenced_code_blocks(body)
+
+        assert len(result) == 3
+        assert result[0].content == "Before."
+        assert result[0].is_code is False
+        assert result[1].is_code is True
+        assert result[1].language == "python"
+        assert result[1].content == 'print("hello")'
+        assert result[2].content == "After."
+
+    def test_unclosed_fence_stays_markdown_text(self) -> None:
+        body = """Before.
+
+```python
+print("hello")"""
+
+        result = parse_fenced_code_blocks(body)
+
+        assert len(result) == 1
+        assert result[0].is_code is False
+        assert "```python" in result[0].content
+
+
+@pytest.mark.asyncio
+async def test_markdown_image_block_loads_image_from_in_memory_bytes() -> None:
+    body = "![Tiny](https://example.com/tiny.png)"
+    png_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1Pe"
+        "AAAADUlEQVR42mP8z8BQDwAFgwJ/lOOFzgAAAABJRU5ErkJggg=="
+    )
+    fetched_urls: list[str] = []
+
+    async def fetcher(url: str) -> bytes:
+        fetched_urls.append(url)
+        return png_bytes
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield Vertical(id="root")
+
+        def on_mount(self) -> None:
+            root = self.query_one("#root", Vertical)
+            mount_markdown_with_details(root, body, image_fetcher=fetcher)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        for _ in range(10):
+            await pilot.pause(0.1)
+            if fetched_urls:
+                break
+
+        assert fetched_urls == ["https://example.com/tiny.png"]
+        assert app.query_one(MarkdownImageBlock).image.alt == "Tiny"
+        image_widget = app.query_one(".markdown-terminal-image")
+        assert image_widget.size.height > 0
+
+        clicked = await pilot.click("MarkdownImageBlock .markdown-image-header")
+        await pilot.pause(0.1)
+
+        assert clicked is True
+        assert isinstance(app.screen, ImageViewerScreen)
+
+
+@pytest.mark.asyncio
+async def test_copyable_code_block_copies_raw_code() -> None:
+    body = """Before.
+
+```python
+print("hello")
+```
+
+After."""
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield Vertical(id="root")
+
+        def on_mount(self) -> None:
+            root = self.query_one("#root", Vertical)
+            mount_markdown_with_details(root, body)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        assert app.query_one(CopyableCodeBlock) is not None
+        clicked = await pilot.click("CopyableCodeBlock Button.code-copy-button")
+        await pilot.pause()
+
+        assert clicked is True
+        assert app.clipboard == 'print("hello")'

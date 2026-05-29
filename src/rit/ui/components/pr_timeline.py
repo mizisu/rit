@@ -11,7 +11,7 @@ from textual.message import Message
 from textual.worker import Worker, WorkerState
 
 from textual.widget import Widget
-from textual.widgets import Static, Markdown, Collapsible
+from textual.widgets import Static, Collapsible, Markdown
 
 from rit.state.models import (
     PR,
@@ -63,7 +63,8 @@ class PRTimeline(Vertical):
     def compose(self) -> ComposeResult:
         with Vertical(classes="description-container"):
             yield Static("", classes="comment-header", id="pr-author-header")
-            yield Markdown("*Loading...*", id="pr-description")
+            with Vertical(id="pr-description", classes="comment-content"):
+                yield Markdown("*Loading...*")
 
         yield Vertical(id="comments-container")
         yield InlineCommentEditor(
@@ -98,8 +99,13 @@ class PRTimeline(Vertical):
         author_name = pr.user.login if pr.user else "unknown"
         author_header.update(f"[bold]{author_name}[/] [#6e738d]opened this PR[/]")
 
-        desc_widget = self.query_one("#pr-description", Markdown)
-        desc_widget.update(pr.body or "*No description provided.*")
+        desc_widget = self.query_one("#pr-description", Vertical)
+        desc_widget.remove_children()
+        mount_markdown_with_details(
+            desc_widget,
+            pr.body or "*No description provided.*",
+            base_url=self._markdown_base_url(),
+        )
 
     def refresh_timeline(self) -> None:
         self.cancel_refresh()
@@ -201,7 +207,11 @@ class PRTimeline(Vertical):
         container.mount(comment_container)
         comment_container.mount(header)
         comment_container.mount(content_container)
-        mount_markdown_with_details(content_container, comment.body)
+        mount_markdown_with_details(
+            content_container,
+            comment.body,
+            base_url=self._markdown_base_url(),
+        )
 
     def _mount_review(self, container: Vertical, review: PRReview) -> None:
         if not review.body or not review.body.strip():
@@ -226,7 +236,11 @@ class PRTimeline(Vertical):
         container.mount(comment_container)
         comment_container.mount(header)
         comment_container.mount(content_container)
-        mount_markdown_with_details(content_container, review.body)
+        mount_markdown_with_details(
+            content_container,
+            review.body,
+            base_url=self._markdown_base_url(),
+        )
 
     def _mount_review_with_threads(
         self,
@@ -272,10 +286,23 @@ class PRTimeline(Vertical):
             show_path_header=True,
             collapsed=collapsed,
             classes=collapsible_classes,
+            markdown_base_url=self._markdown_base_url(),
         )
         container.mount(collapsible)
 
         self._thread_widget_info[collapsible] = (thread_id, root.id, is_resolved)
+
+    def _markdown_base_url(self) -> str | None:
+        pr = self.store.state.pr
+        if pr and pr.html_url:
+            return pr.html_url
+
+        service = getattr(self.store, "_service", None)
+        owner = getattr(service, "_owner", None)
+        repo = getattr(service, "_repo", None)
+        if owner and repo and self.store.pr_number:
+            return f"https://github.com/{owner}/{repo}/pull/{self.store.pr_number}"
+        return None
 
     def _select_first_item(self) -> None:
         self._collect_navigable_items()

@@ -5,16 +5,22 @@ from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from textual.app import App, SeverityLevel
+from textual.app import App
 from textual.binding import Binding
+from textual.notifications import SeverityLevel
 from textual.reactive import var
 from textual.signal import Signal
+from textual.widgets import Input, TextArea
 
 from rit.state.settings import Settings
+from rit.ui.terminal_graphics import configure_terminal_graphics
 from rit.ui.messages import Flash, SettingChanged
 
 if TYPE_CHECKING:
     from rit.ui.screens.main import MainScreen
+
+
+configure_terminal_graphics()
 
 
 class RitApp(App):
@@ -122,6 +128,13 @@ class RitApp(App):
     def action_settings(self) -> None:
         # TODO: Implement settings screen
         self.notify("Settings coming soon!", title="Settings")
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action in {"quit", "open_pr", "settings"} and isinstance(
+            self.focused, (Input, TextArea)
+        ):
+            return False
+        return super().check_action(action, parameters)
 
     def on_flash(self, message: Flash) -> None:
         severity_map: dict[str, SeverityLevel] = {

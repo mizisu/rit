@@ -2,12 +2,10 @@
 
 import asyncio
 import threading
-from pathlib import Path
-from types import SimpleNamespace
 from typing import cast
 
 import pytest
-from textual.widgets import Static
+from textual.widgets import Static, TabbedContent, TextArea, Tree
 
 from rit.app import RitApp
 from rit.cli import parse_pr_reference
@@ -196,8 +194,6 @@ class TestRitApp:
     async def test_files_tab_focuses_tree_by_default(self, app: RitApp) -> None:
         """Test that entering Files tab focuses the file tree."""
         async with app.run_test() as pilot:
-            from textual.widgets import TabbedContent, Tree
-
             tabbed = app.screen.query_one(TabbedContent)
             assert tabbed.active == "pr-info"
 
@@ -207,6 +203,78 @@ class TestRitApp:
             await pilot.pause()
             tree = app.screen.query_one("#file-tree", Tree)
             assert tree.has_focus
+
+    async def test_files_tab_ctrl_h_l_moves_between_tree_and_diff(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ctrl+h/l should move across tree, old pane, and new pane."""
+
+        _stub_initial_loads(monkeypatch)
+
+        from rit.ui.screens.main import MainScreen
+        from rit.ui.widgets import DiffView
+
+        app = RitApp(owner="test", repo="repo", pr_number=123)
+        async with app.run_test() as pilot:
+            screen = cast(MainScreen, app.screen)
+            screen.switch_tab(1)
+            diff_view = screen.query_one(DiffView)
+            diff_view.mode = "split"
+            await diff_view.show_diff(
+                "src/app.py",
+                _simple_diff("src/app.py"),
+            )
+            await pilot.pause()
+
+            tree = screen.query_one("#file-tree", Tree)
+            tree.focus()
+            await pilot.pause()
+
+            await pilot.press("ctrl+l")
+            await pilot.pause()
+            assert diff_view.has_focus
+            assert diff_view.active_pane == "old"
+
+            await pilot.press("ctrl+l")
+            await pilot.pause()
+            assert diff_view.has_focus
+            assert diff_view.active_pane == "new"
+
+            await pilot.press("ctrl+h")
+            await pilot.pause()
+            assert diff_view.has_focus
+            assert diff_view.active_pane == "old"
+
+            await pilot.press("ctrl+h")
+            await pilot.pause()
+            assert tree.has_focus
+
+    async def test_text_entry_blocks_main_and_app_single_key_bindings(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Typing in an inline text editor should not trigger app or tab actions."""
+
+        _stub_initial_loads(monkeypatch)
+
+        from rit.ui.screens.main import MainScreen
+
+        app = RitApp(owner="test", repo="repo", pr_number=123)
+        async with app.run_test() as pilot:
+            screen = cast(MainScreen, app.screen)
+            screen.store.state.pr = PR(number=123, title="Test PR")
+            screen.action_comment()
+            await pilot.pause()
+
+            tabbed = screen.query_one(TabbedContent)
+            textarea = screen.query_one("#comment-editor-body", TextArea)
+            assert textarea.has_focus
+
+            await pilot.press("q", "j", "k", "tab")
+            await pilot.pause()
+
+            assert app.is_running
+            assert tabbed.active == "pr-info"
+            assert textarea.text.startswith("qjk")
 
     async def test_files_tab_defers_pr_info_discussion_render_until_pr_info_tab(
         self, app: RitApp, monkeypatch: pytest.MonkeyPatch
@@ -259,9 +327,9 @@ class TestRitApp:
             store.state.pr = PR(
                 number=123,
                 title="Staged PR",
-                base_ref="main",
-                head_ref="feature",
-                changed_files=2,
+                baseRefName="main",
+                headRefName="feature",
+                changedFiles=2,
             )
             store.state.files_total_count = 2
             store._post_message(store.PRLoaded(pr=store.state.pr))
@@ -469,70 +537,29 @@ class TestRitApp:
             )
             assert calls == [("two.py", True)]
 
-    async def test_files_tab_e_opens_current_file_in_parent_nvim(
-        self,
-        app: RitApp,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
+    async def test_files_tab_e_focuses_file_tree(
+        self, app: RitApp, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Test that pressing e opens the current file at the diff cursor."""
+        """Test that pressing e in the diff focuses the file tree."""
 
         _stub_initial_loads(monkeypatch)
-
-        target = tmp_path / "src" / "test.py"
-        target.parent.mkdir(parents=True)
-        target.write_text("print('hello')\n")
-
-        monkeypatch.setattr(
-            "rit.ui.screens.main._resolve_repo_root",
-            lambda: tmp_path,
-        )
-
-        calls: list[tuple[Path, int, int]] = []
-
-        def fake_open(path: Path, *, line: int, column: int) -> None:
-            calls.append((path, line, column))
-
-        monkeypatch.setattr("rit.ui.screens.main._open_in_parent_nvim", fake_open)
 
         async with app.run_test() as pilot:
             await pilot.press("tab")
             await pilot.pause()
 
+            tree = app.screen.query_one("#file-tree")
             diff = app.screen.query_one("#diff-view-main")
             await diff.show_diff("src/test.py", _simple_diff("src/test.py", line_no=10))
-            diff.cursor_column = 4
+            diff.focus()
             await pilot.pause()
+
+            assert diff.has_focus
 
             await pilot.press("e")
             await pilot.pause()
 
-            assert calls == [(target, 10, 5)]
-            assert app.is_running is True
-
-    def test_open_in_parent_nvim_uses_single_remote_send(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """Test that opening in parent Nvim includes cursor placement and float close."""
-        from rit.ui.screens.main import _open_in_parent_nvim
-
-        calls: list[list[str]] = []
-
-        def fake_run(command: list[str], **_kwargs) -> SimpleNamespace:
-            calls.append(command)
-            return SimpleNamespace(stdout="")
-
-        monkeypatch.setenv("NVIM", "/tmp/nvim.sock")
-        monkeypatch.setattr("rit.ui.screens.main.subprocess.run", fake_run)
-
-        _open_in_parent_nvim(Path("/tmp/src/test.py"), line=12, column=5)
-
-        assert len(calls) == 1
-        assert calls[0][:4] == ["nvim", "--server", "/tmp/nvim.sock", "--remote-send"]
-        assert "local target_line = 12;" in calls[0][4]
-        assert "local target_column = 4;" in calls[0][4]
-        assert "vim.api.nvim_win_set_cursor" in calls[0][4]
-        assert "vim.api.nvim_win_close(origin, true)" in calls[0][4]
+            assert tree.has_focus
 
     async def test_quit_action(self, app: RitApp) -> None:
         """Test that q quits the app."""
@@ -549,7 +576,7 @@ class TestRitApp:
 
         async with app.run_test() as pilot:
             screen = app.screen
-            screen.store.state.pr = PR(head_ref="feature/test", base_ref="main")
+            screen.store.state.pr = PR(headRefName="feature/test", baseRefName="main")
             await pilot.pause()
 
             await pilot.press("ctrl+b")
@@ -569,7 +596,7 @@ class TestRitApp:
 
         async with app.run_test() as pilot:
             screen = app.screen
-            screen.store.state.pr = PR(head_ref="feature/test", base_ref="main")
+            screen.store.state.pr = PR(headRefName="feature/test", baseRefName="main")
             await pilot.pause()
 
             await pilot.press("tab")
