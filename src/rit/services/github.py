@@ -1,6 +1,8 @@
 import asyncio
 import json
 import subprocess
+import urllib.request
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from pydantic import TypeAdapter
@@ -12,10 +14,37 @@ from rit.state.models import (
     PRFile,
     PRIssueComment,
     PRReview,
+    PRTeam,
+    PRUser,
     ReviewThread,
 )
 
 _PRFileListAdapter: TypeAdapter[list[PRFile]] = TypeAdapter(list[PRFile])
+_PRUserListAdapter: TypeAdapter[list[PRUser]] = TypeAdapter(list[PRUser])
+_PRTeamListAdapter: TypeAdapter[list[PRTeam]] = TypeAdapter(list[PRTeam])
+PR_FILES_PER_PAGE = 100
+PR_FILES_MAX_REST_PAGES = 30
+PR_FILES_PAGE_CONCURRENCY = 6
+
+
+def _fetch_url_text(url: str) -> str:
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "rit"},
+    )
+    with urllib.request.urlopen(request, timeout=120) as response:
+        return response.read().decode("utf-8", errors="replace")
+
+
+def _remaining_pr_file_pages(total_count: int | None) -> list[int]:
+    if total_count is None or total_count <= PR_FILES_PER_PAGE:
+        return []
+
+    page_count = min(
+        PR_FILES_MAX_REST_PAGES,
+        (total_count + PR_FILES_PER_PAGE - 1) // PR_FILES_PER_PAGE,
+    )
+    return list(range(2, page_count + 1))
 
 
 @dataclass
@@ -97,6 +126,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
             }
             ... on Team {
               name
+              slug
             }
           }
         }
@@ -230,6 +260,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
             }
             ... on Team {
               name
+              slug
             }
           }
         }
@@ -389,25 +420,45 @@ class GitHubService:
             review_threads=pr.review_threads,
         )
 
-    async def get_pr_files(self, pr_number: int) -> list[PRFile]:
-        """Fetch files via REST API (GraphQL lacks patch data)."""
-        files: list[PRFile] = []
-        page = 1
-        per_page = 100
+    async def get_pr_diff_text(self, pr_number: int) -> str:
+        """Fetch the full raw PR diff from GitHub's web diff endpoint."""
+        repo = await self.get_repo()
+        url = f"https://github.com/{repo.full_name}/pull/{pr_number}.diff"
+        try:
+            return await asyncio.to_thread(_fetch_url_text, url)
+        except OSError as error:
+            raise GitHubError(f"Failed to fetch raw PR diff: {error}") from error
 
-        while True:
-            batch = await self.get_pr_files_page(
-                pr_number,
-                page=page,
-                per_page=per_page,
-            )
+    async def get_pr_files(
+        self,
+        pr_number: int,
+        *,
+        total_count: int | None = None,
+    ) -> list[PRFile]:
+        """Fetch PR files with a fast first page and concurrent remaining pages."""
+        first_page = await self.get_pr_files_page(
+            pr_number,
+            page=1,
+            per_page=PR_FILES_PER_PAGE,
+        )
+        if len(first_page) < PR_FILES_PER_PAGE:
+            return first_page
+
+        remaining_pages = _remaining_pr_file_pages(total_count)
+        if not remaining_pages:
+            remaining_pages = list(range(2, PR_FILES_MAX_REST_PAGES + 1))
+
+        page_batches = await self.get_pr_file_pages(
+            pr_number,
+            pages=remaining_pages,
+            per_page=PR_FILES_PER_PAGE,
+        )
+        files = list(first_page)
+        for page in remaining_pages:
+            batch = page_batches.get(page, [])
             if not batch:
                 break
             files.extend(batch)
-            if len(batch) < per_page:
-                break
-            page += 1
-
         return files
 
     async def get_pr_files_page(
@@ -429,6 +480,92 @@ class GitHubService:
         if isinstance(data, list):
             return _PRFileListAdapter.validate_python(data)
         return _PRFileListAdapter.validate_python([data])
+
+    async def get_pr_file_pages(
+        self,
+        pr_number: int,
+        *,
+        pages: Sequence[int],
+        per_page: int = PR_FILES_PER_PAGE,
+        concurrency: int = PR_FILES_PAGE_CONCURRENCY,
+    ) -> dict[int, list[PRFile]]:
+        """Fetch multiple PR file pages concurrently and return them by page number."""
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def fetch_page(page: int) -> tuple[int, list[PRFile]]:
+            async with semaphore:
+                return page, await self.get_pr_files_page(
+                    pr_number,
+                    page=page,
+                    per_page=per_page,
+                )
+
+        results = await asyncio.gather(*(fetch_page(page) for page in pages))
+        return dict(results)
+
+    def _parse_paginated_items(self, result: str) -> list[object]:
+        items: list[object] = []
+        decoder = json.JSONDecoder()
+        index = 0
+
+        while index < len(result):
+            while index < len(result) and result[index].isspace():
+                index += 1
+            if index >= len(result):
+                break
+
+            data, index = decoder.raw_decode(result, index)
+            if isinstance(data, list):
+                items.extend(data)
+            else:
+                items.append(data)
+
+        return items
+
+    async def get_reviewer_candidates(self) -> tuple[list[PRUser], list[PRTeam]]:
+        """Fetch user and team candidates for PR review requests."""
+        return await asyncio.gather(
+            self.get_reviewer_user_candidates(),
+            self.get_reviewer_team_candidates(),
+        )
+
+    async def get_reviewer_user_candidates(self) -> list[PRUser]:
+        repo = await self.get_repo()
+        result = await self._run_gh(
+            [
+                "api",
+                f"/repos/{repo.full_name}/collaborators?affiliation=all&per_page=100",
+                "--paginate",
+            ]
+        )
+        return _PRUserListAdapter.validate_python(self._parse_paginated_items(result))
+
+    async def get_reviewer_team_candidates(self) -> list[PRTeam]:
+        repo = await self.get_repo()
+        try:
+            result = await self._run_gh(
+                [
+                    "api",
+                    f"/repos/{repo.full_name}/teams?per_page=100",
+                    "--paginate",
+                ]
+            )
+        except GitHubError as error:
+            if "HTTP 404" in str(error):
+                return []
+            raise
+        return _PRTeamListAdapter.validate_python(self._parse_paginated_items(result))
+
+    async def get_assignee_candidates(self) -> list[PRUser]:
+        repo = await self.get_repo()
+        result = await self._run_gh(
+            [
+                "api",
+                f"/repos/{repo.full_name}/assignees?per_page=100",
+                "--paginate",
+            ]
+        )
+        return _PRUserListAdapter.validate_python(self._parse_paginated_items(result))
 
     async def _get_pull_request_data(
         self, pr_number: int, *, query: str
@@ -459,6 +596,100 @@ class GitHubService:
             raise GitHubError(f"PR #{pr_number} not found")
 
         return pr_data
+
+    async def request_reviewers(
+        self,
+        pr_number: int,
+        *,
+        reviewers: list[str] | None = None,
+        team_reviewers: list[str] | None = None,
+    ) -> None:
+        """Request user and team reviews on a PR."""
+        payload = self._reviewer_payload(reviewers, team_reviewers)
+        if not payload:
+            return
+        repo = await self.get_repo()
+        await self._run_gh(
+            [
+                "api",
+                "--method",
+                "POST",
+                f"/repos/{repo.full_name}/pulls/{pr_number}/requested_reviewers",
+                "--input",
+                "-",
+            ],
+            input_text=json.dumps(payload),
+        )
+
+    async def remove_requested_reviewers(
+        self,
+        pr_number: int,
+        *,
+        reviewers: list[str] | None = None,
+        team_reviewers: list[str] | None = None,
+    ) -> None:
+        """Remove requested user and team reviewers from a PR."""
+        payload = self._reviewer_payload(reviewers, team_reviewers)
+        if not payload:
+            return
+        repo = await self.get_repo()
+        await self._run_gh(
+            [
+                "api",
+                "--method",
+                "DELETE",
+                f"/repos/{repo.full_name}/pulls/{pr_number}/requested_reviewers",
+                "--input",
+                "-",
+            ],
+            input_text=json.dumps(payload),
+        )
+
+    def _reviewer_payload(
+        self,
+        reviewers: list[str] | None,
+        team_reviewers: list[str] | None,
+    ) -> dict[str, list[str]]:
+        payload: dict[str, list[str]] = {}
+        if reviewers:
+            payload["reviewers"] = reviewers
+        if team_reviewers:
+            payload["team_reviewers"] = team_reviewers
+        return payload
+
+    async def add_assignees(self, pr_number: int, assignees: list[str]) -> None:
+        """Assign users to the PR issue."""
+        if not assignees:
+            return
+        repo = await self.get_repo()
+        await self._run_gh(
+            [
+                "api",
+                "--method",
+                "POST",
+                f"/repos/{repo.full_name}/issues/{pr_number}/assignees",
+                "--input",
+                "-",
+            ],
+            input_text=json.dumps({"assignees": assignees}),
+        )
+
+    async def remove_assignees(self, pr_number: int, assignees: list[str]) -> None:
+        """Remove assignees from the PR issue."""
+        if not assignees:
+            return
+        repo = await self.get_repo()
+        await self._run_gh(
+            [
+                "api",
+                "--method",
+                "DELETE",
+                f"/repos/{repo.full_name}/issues/{pr_number}/assignees",
+                "--input",
+                "-",
+            ],
+            input_text=json.dumps({"assignees": assignees}),
+        )
 
     async def create_issue_comment(
         self,

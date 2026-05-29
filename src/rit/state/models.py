@@ -52,6 +52,7 @@ class PRUser(BaseModel):
 
 class PRTeam(BaseModel):
     name: str = ""
+    slug: str = ""
 
 
 class PRLabel(BaseModel):
@@ -163,12 +164,24 @@ class ReviewRequest(BaseModel):
         default=None, alias="requestedReviewer"
     )
 
+    @field_validator("requested_reviewer", mode="before")
+    @classmethod
+    def parse_requested_reviewer(cls, v: Any) -> PRUser | PRTeam | None:
+        if isinstance(v, (PRUser, PRTeam)) or v is None:
+            return v
+        if isinstance(v, dict):
+            if v.get("login"):
+                return PRUser.model_validate(v)
+            if v.get("slug") or v.get("name"):
+                return PRTeam.model_validate(v)
+        return None
+
     @property
     def display_name(self) -> str:
         if isinstance(self.requested_reviewer, PRUser):
             return self.requested_reviewer.login
         elif isinstance(self.requested_reviewer, PRTeam):
-            return self.requested_reviewer.name
+            return self.requested_reviewer.name or self.requested_reviewer.slug
         return ""
 
     @property
