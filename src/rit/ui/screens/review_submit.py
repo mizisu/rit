@@ -206,6 +206,13 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
     def action_cancel(self) -> None:
         self.dismiss(None)
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action in {"cursor_down", "cursor_up"} and isinstance(
+            self.focused, TextArea
+        ):
+            return False
+        return super().check_action(action, parameters)
+
     @on(OptionList.OptionSelected, "#review-submit-actions")
     def on_option_selected(self, _event: OptionList.OptionSelected) -> None:
         self.query_one("#review-submit-body", TextArea).focus()

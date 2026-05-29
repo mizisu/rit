@@ -147,6 +147,11 @@ PRInfo .placeholder {
     color: #6e738d;
 }
 
+PRInfo #pr-reviewers {
+    text-wrap: nowrap;
+    overflow: hidden;
+}
+
 /* Collapsible (details) styling */
 PRInfo Collapsible {
     height: auto;

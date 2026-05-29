@@ -108,3 +108,25 @@ def test_team_reviewer_is_marked_as_team() -> None:
     assert reviewers[0].display_name == "backend"
     assert reviewers[0].kind == "requested"
     assert reviewers[0].is_team is True
+
+
+def test_graphql_team_reviewer_preserves_slug() -> None:
+    pr = PR.model_validate(
+        {
+            "number": 123,
+            "author": {"login": "author"},
+            "reviewRequests": {
+                "nodes": [
+                    {"requestedReviewer": {"name": "Backend", "slug": "backend"}}
+                ]
+            },
+        }
+    )
+
+    request = pr.requested_reviewers[0]
+    reviewers = derive_reviewer_states(pr, [])
+
+    assert isinstance(request.requested_reviewer, PRTeam)
+    assert request.requested_reviewer.slug == "backend"
+    assert reviewers[0].display_name == "Backend"
+    assert reviewers[0].is_team is True

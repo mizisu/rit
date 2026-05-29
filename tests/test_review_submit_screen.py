@@ -151,3 +151,25 @@ async def test_review_submit_screen_returns_selected_event_and_body() -> None:
         await pilot.pause()
 
         assert app.result == ("REQUEST_CHANGES", "needs work")
+
+
+@pytest.mark.asyncio
+async def test_review_submit_body_keeps_j_and_k_as_text() -> None:
+    class TestApp(App):
+        def on_mount(self) -> None:
+            self.push_screen(ReviewSubmitScreen())
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        screen = app.screen
+        textarea = screen.query_one("#review-submit-body", TextArea)
+        options = screen.query_one("#review-submit-actions", OptionList)
+        highlighted_before = options.highlighted
+
+        await pilot.press("j", "k")
+        await pilot.pause()
+
+        assert textarea.text == "jk"
+        assert options.highlighted == highlighted_before

@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import json
-import os
-import subprocess
-from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from textual import events, getters, on
 from textual.app import ComposeResult
@@ -16,12 +12,17 @@ from textual.widgets import Footer, Input, TabbedContent, TabPane, TextArea, Tre
 from textual.worker import Worker, WorkerState
 
 from rit.app import RitApp
-from rit.state.models import FileViewedState
+from rit.state.models import FileViewedState, PRTeam, PRUser
 from rit.state.store import PRStore
 from rit.ui.components.file_changes import FileChanges
 from rit.ui.components.pr_info import PRInfo
 from rit.ui.messages import Flash
 from rit.ui.screens.branch_picker import BranchPickerScreen
+from rit.ui.screens.multi_select_picker import (
+    MultiSelectItem,
+    MultiSelectPickerScreen,
+    MultiSelectResult,
+)
 from rit.ui.screens.review_submit import ReviewSubmitScreen
 from rit.ui.widgets import DiffView, Header
 from rit.ui.widgets.comment_editor import InlineCommentEditor
@@ -34,61 +35,6 @@ _TAB_GROUP = Binding.Group("Move Tab", compact=True)
 
 _TAB_IDS = ("pr-info", "files")
 _TAB_INDEX_BY_ID = {tab_id: index for index, tab_id in enumerate(_TAB_IDS)}
-_SUBPROCESS_ERRORS = (OSError, subprocess.CalledProcessError)
-
-
-def _resolve_repo_root() -> Path | None:
-    if configured_root := os.environ.get("RIT_REPO_PATH"):
-        return Path(configured_root).expanduser()
-
-    try:
-        result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except _SUBPROCESS_ERRORS:
-        return None
-
-    repo_root = result.stdout.strip()
-    return Path(repo_root) if repo_root else None
-
-
-def _open_in_parent_nvim(path: Path, *, line: int, column: int) -> None:
-    server = os.environ.get("NVIM") or os.environ.get("NVIM_LISTEN_ADDRESS")
-    if not server:
-        raise RuntimeError("Parent Neovim server not available")
-
-    target_path = json.dumps(str(path))
-    target_line = max(1, line)
-    target_column = max(0, column - 1)
-    remote_command = (
-        "<C-\\><C-N>:lua "
-        f"local path = {target_path}; "
-        f"local target_line = {target_line}; "
-        f"local target_column = {target_column}; "
-        "local origin = vim.api.nvim_get_current_win(); "
-        "local origin_cfg = vim.api.nvim_win_get_config(origin); "
-        "vim.cmd('tabnew'); "
-        "vim.cmd('edit ' .. vim.fn.fnameescape(path)); "
-        "local last_line = math.max(1, vim.api.nvim_buf_line_count(0)); "
-        "local line_number = math.min(target_line, last_line); "
-        "local line_text = vim.api.nvim_buf_get_lines(0, line_number - 1, line_number, true)[1] or ''; "
-        "local column_number = math.min(target_column, #line_text); "
-        "vim.api.nvim_win_set_cursor(0, { line_number, column_number }); "
-        "vim.cmd('normal! zz'); "
-        "if origin_cfg.relative ~= '' and vim.api.nvim_win_is_valid(origin) then vim.api.nvim_win_close(origin, true) end"
-        "<CR>"
-    )
-
-    subprocess.run(
-        ["nvim", "--server", server, "--remote-send", remote_command],
-        check=True,
-        capture_output=True,
-    )
-
-
 _COMMON_BINDINGS = [
     Binding("ctrl+d", "scroll_half_page_down", "Half Page Down", show=False),
     Binding("ctrl+u", "scroll_half_page_up", "Half Page Up", show=False),
@@ -118,22 +64,32 @@ _PR_INFO_BINDINGS = [
     Binding("K", "prev_comment", "", group=_COMMENT_GROUP, show=False),
     Binding("c", "comment", "Comment", group=_COMMENT_GROUP),
     Binding("S", "review", "Review", group=_REVIEW_GROUP),
+    Binding(
+        "R",
+        "edit_reviewers",
+        "Reviewers",
+        key_display="shift+r",
+        group=_REVIEW_GROUP,
+    ),
+    Binding("a", "edit_assignees", "Assignees", group=_REVIEW_GROUP),
     Binding("r", "toggle_resolve", "Resolve", tooltip="Toggle thread resolution"),
 ]
 
 _FILES_BINDINGS = [
     Binding(
-        "H",
+        "ctrl+h",
         "focus_left",
         "Move Focus",
-        key_display="shift+h/l",
+        key_display="ctrl+h/l",
         group=_NAVIGATION_GROUP,
     ),
+    Binding("H", "focus_left", "", group=_NAVIGATION_GROUP, show=False),
     Binding("c", "comment", "Comment", group=_COMMENT_GROUP),
     Binding("d", "delete_pending_comment", "Delete Draft", group=_COMMENT_GROUP),
     Binding("S", "review", "Review", group=_REVIEW_GROUP),
+    Binding("ctrl+l", "focus_right", "", group=_NAVIGATION_GROUP, show=False),
     Binding("L", "focus_right", "", group=_NAVIGATION_GROUP, show=False),
-    Binding("e", "open_file_in_editor", "Edit", group=_FILE_GROUP),
+    Binding("e", "focus_file_tree", "File Tree", group=_NAVIGATION_GROUP),
     Binding(
         "E",
         "toggle_file_tree",
@@ -452,6 +408,168 @@ class MainScreen(Screen[None]):
             self._handle_review_submit,
         )
 
+    def action_edit_reviewers(self) -> None:
+        if self.current_tab != 0:
+            return
+        if self.store.state.pr is None:
+            self.post_message(Flash("PR not loaded yet", style="warning", duration=2.0))
+            return
+        self.run_worker(
+            self.store.get_reviewer_candidates(),
+            exclusive=False,
+            name="_load_reviewer_candidates",
+        )
+
+    def action_edit_assignees(self) -> None:
+        if self.current_tab != 0:
+            return
+        if self.store.state.pr is None:
+            self.post_message(Flash("PR not loaded yet", style="warning", duration=2.0))
+            return
+        self.run_worker(
+            self.store.get_assignee_candidates(),
+            exclusive=False,
+            name="_load_assignee_candidates",
+        )
+
+    def _show_reviewer_picker(self, users: list[PRUser], teams: list[PRTeam]) -> None:
+        pr = self.store.state.pr
+        if pr is None:
+            return
+
+        items_by_key: dict[str, MultiSelectItem] = {}
+        author_login = pr.user.login if pr.user else ""
+        for user in users:
+            if user.login and user.login != author_login:
+                key = f"user:{user.login}"
+                items_by_key[key] = MultiSelectItem(
+                    key=key,
+                    label=f"@{user.login}",
+                    search_text=f"user {user.login}",
+                )
+        for team in teams:
+            team_key = team.slug or team.name
+            if team_key:
+                label_name = team.name or team.slug
+                key = f"team:{team_key}"
+                items_by_key[key] = MultiSelectItem(
+                    key=key,
+                    label=label_name,
+                    search_text=f"team {team.name} {team.slug}",
+                )
+
+        selected_keys: set[str] = set()
+        for request in pr.requested_reviewers:
+            reviewer = request.requested_reviewer
+            if isinstance(reviewer, PRUser) and reviewer.login:
+                key = f"user:{reviewer.login}"
+                selected_keys.add(key)
+                items_by_key.setdefault(
+                    key,
+                    MultiSelectItem(
+                        key=key,
+                        label=f"@{reviewer.login}",
+                        search_text=f"user {reviewer.login}",
+                    ),
+                )
+            elif isinstance(reviewer, PRTeam):
+                team_key = reviewer.slug or reviewer.name
+                if team_key:
+                    key = f"team:{team_key}"
+                    selected_keys.add(key)
+                    label_name = reviewer.name or reviewer.slug
+                    items_by_key.setdefault(
+                        key,
+                        MultiSelectItem(
+                            key=key,
+                            label=label_name,
+                            search_text=f"team {reviewer.name} {reviewer.slug}",
+                        ),
+                    )
+
+        self.app.push_screen(
+            MultiSelectPickerScreen(
+                title="Edit requested reviewers",
+                items=sorted(items_by_key.values(), key=lambda item: item.label),
+                selected_keys=selected_keys,
+                placeholder="Filter reviewers or teams...",
+                empty_label="No reviewer candidates",
+            ),
+            self._handle_reviewer_picker,
+        )
+
+    def _show_assignee_picker(self, users: list[PRUser]) -> None:
+        pr = self.store.state.pr
+        if pr is None:
+            return
+
+        items_by_key: dict[str, MultiSelectItem] = {}
+        for user in users:
+            if user.login:
+                key = f"user:{user.login}"
+                items_by_key[key] = MultiSelectItem(
+                    key=key,
+                    label=f"@{user.login}",
+                    search_text=user.login,
+                )
+
+        selected_keys: set[str] = set()
+        for user in pr.assignees:
+            if user.login:
+                key = f"user:{user.login}"
+                selected_keys.add(key)
+                items_by_key.setdefault(
+                    key,
+                    MultiSelectItem(
+                        key=key,
+                        label=f"@{user.login}",
+                        search_text=user.login,
+                    ),
+                )
+
+        self.app.push_screen(
+            MultiSelectPickerScreen(
+                title="Edit assignees",
+                items=sorted(items_by_key.values(), key=lambda item: item.label),
+                selected_keys=selected_keys,
+                placeholder="Filter assignees...",
+                empty_label="No assignee candidates",
+            ),
+            self._handle_assignee_picker,
+        )
+
+    def _handle_reviewer_picker(self, result: MultiSelectResult | None) -> None:
+        if result is None:
+            return
+        users = []
+        teams = []
+        for key in result.selected_keys:
+            kind, _, value = key.partition(":")
+            if kind == "user" and value:
+                users.append(value)
+            elif kind == "team" and value:
+                teams.append(value)
+        self.run_worker(
+            self._set_requested_reviewers(users=users, teams=teams),
+            exclusive=False,
+            name="_set_requested_reviewers",
+        )
+
+    def _handle_assignee_picker(self, result: MultiSelectResult | None) -> None:
+        if result is None:
+            return
+        logins = [
+            value
+            for key in result.selected_keys
+            for kind, _, value in [key.partition(":")]
+            if kind == "user" and value
+        ]
+        self.run_worker(
+            self._set_assignees(logins),
+            exclusive=False,
+            name="_set_assignees",
+        )
+
     def action_delete_pending_comment(self) -> None:
         if self.current_tab != 1:
             return
@@ -497,6 +615,15 @@ class MainScreen(Screen[None]):
             return
 
         path, line, side = target
+        if event.mode == "post":
+            self.run_worker(
+                self._post_inline_comment(
+                    event.body, path=path, line=line, side=side
+                ),
+                exclusive=False,
+                name="_post_inline_comment",
+            )
+            return
         self.run_worker(
             self._save_inline_comment_draft(
                 event.body, path=path, line=line, side=side
@@ -566,6 +693,63 @@ class MainScreen(Screen[None]):
                 await diff_view.show_diff(current_file, diff)
                 if 0 <= current_line < len(diff_view._all_lines):
                     diff_view._move_cursor(line=current_line, pane=current_pane)
+        return True
+
+    async def _set_requested_reviewers(
+        self,
+        *,
+        users: list[str],
+        teams: list[str],
+    ) -> bool:
+        changed = await self.store.set_requested_reviewers(users=users, teams=teams)
+        self.pr_info.refresh_reviewers()
+        return changed
+
+    async def _set_assignees(self, logins: list[str]) -> bool:
+        changed = await self.store.set_assignees(logins)
+        self.pr_info.refresh_summary()
+        return changed
+
+    async def _post_inline_comment(
+        self,
+        body: str,
+        *,
+        path: str,
+        line: int,
+        side: Literal["LEFT", "RIGHT"],
+    ) -> bool:
+        diff_view = self.file_changes.diff_view
+        current_file = diff_view.current_file
+        current_line = diff_view.cursor_line
+        current_pane = diff_view.active_pane
+
+        await diff_view.close_inline_comment_editor()
+        await self.store.submit_inline_comment(
+            body,
+            path=path,
+            line=line,
+            side=side,
+        )
+        await self.store.remove_pending_inline_comment(
+            path=path,
+            line=line,
+            side=side,
+        )
+        await self.store.refresh_review_data()
+        self.pr_info.refresh_comments()
+        self.file_changes.file_tree.refresh_files()
+
+        if current_file is None:
+            return True
+
+        diff = self.store.get_file_diff(current_file)
+        if diff is None:
+            return True
+
+        await diff_view.show_diff(current_file, diff)
+        if 0 <= current_line < len(diff_view._all_lines):
+            diff_view._move_cursor(line=current_line, pane=current_pane)
+        diff_view.focus()
         return True
 
     async def _save_inline_comment_draft(
@@ -644,6 +828,52 @@ class MainScreen(Screen[None]):
                     self.notify("Failed to toggle resolve status", severity="error")
             return
 
+        if event.worker.name == "_load_reviewer_candidates":
+            if event.state == WorkerState.SUCCESS:
+                users, teams = cast(
+                    tuple[list[PRUser], list[PRTeam]], event.worker.result
+                )
+                self._show_reviewer_picker(users, teams)
+            elif event.state == WorkerState.ERROR:
+                self.notify("Failed to load reviewer candidates", severity="error")
+            return
+
+        if event.worker.name == "_load_assignee_candidates":
+            if event.state == WorkerState.SUCCESS:
+                users = cast(list[PRUser], event.worker.result)
+                self._show_assignee_picker(users)
+            elif event.state == WorkerState.ERROR:
+                self.notify("Failed to load assignee candidates", severity="error")
+            return
+
+        if event.worker.name == "_set_requested_reviewers":
+            if event.state == WorkerState.SUCCESS:
+                if event.worker.result:
+                    self.post_message(
+                        Flash("Reviewers updated", style="success", duration=2.0)
+                    )
+                else:
+                    self.post_message(
+                        Flash("Reviewers unchanged", style="warning", duration=2.0)
+                    )
+            elif event.state == WorkerState.ERROR:
+                self.notify("Failed to update reviewers", severity="error")
+            return
+
+        if event.worker.name == "_set_assignees":
+            if event.state == WorkerState.SUCCESS:
+                if event.worker.result:
+                    self.post_message(
+                        Flash("Assignees updated", style="success", duration=2.0)
+                    )
+                else:
+                    self.post_message(
+                        Flash("Assignees unchanged", style="warning", duration=2.0)
+                    )
+            elif event.state == WorkerState.ERROR:
+                self.notify("Failed to update assignees", severity="error")
+            return
+
         if event.worker.name == "_submit_issue_comment":
             if event.state == WorkerState.SUCCESS:
                 self.post_message(
@@ -669,6 +899,15 @@ class MainScreen(Screen[None]):
                 self.notify("Failed to save draft", severity="error")
             return
 
+        if event.worker.name == "_post_inline_comment":
+            if event.state == WorkerState.SUCCESS:
+                self.post_message(
+                    Flash("Comment posted", style="success", duration=2.0)
+                )
+            elif event.state == WorkerState.ERROR:
+                self.notify("Failed to post comment", severity="error")
+            return
+
         if event.worker.name == "_delete_pending_inline_comment":
             if event.state == WorkerState.SUCCESS:
                 if event.worker.result:
@@ -691,7 +930,15 @@ class MainScreen(Screen[None]):
             return
 
     def on_key(self, event: events.Key) -> None:
-        if isinstance(self.focused, (Input, TextArea)):
+        if self._text_entry_has_focus():
+            return
+        if self.current_tab == 1 and event.key in {"ctrl+h", "ctrl+l", "H", "L"}:
+            if event.key in {"ctrl+h", "H"}:
+                self.action_focus_left()
+            else:
+                self.action_focus_right()
+            event.stop()
+            event.prevent_default()
             return
         if event.key == "tab":
             self.next_tab()
@@ -704,32 +951,32 @@ class MainScreen(Screen[None]):
             event.prevent_default()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if action in {
-            "next_tab",
-            "prev_tab",
-            "focus_left",
-            "focus_right",
-        } and isinstance(self.focused, (Input, TextArea)):
+        if self._text_entry_has_focus():
             return False
         return super().check_action(action, parameters)
+
+    def _text_entry_has_focus(self) -> bool:
+        return isinstance(self.focused, (Input, TextArea))
 
     def _current_files_focus_target(self) -> str | None:
         if self.current_tab != 1:
             return None
 
         diff_view = self.file_changes.diff_view
-        if diff_view.has_focus:
+        if diff_view.has_focus_within:
             return diff_view.active_pane if diff_view.split else "diff"
 
         try:
-            tree = self.file_changes.file_tree.query_one("#file-tree", Tree)
+            self.file_changes.file_tree.query_one("#file-tree", Tree)
         except Exception:
             return None
-        return "tree" if tree.has_focus else None
+        return "tree" if self.file_changes.file_tree.has_focus_within else None
 
     def action_focus_left(self) -> None:
         target = self._current_files_focus_target()
         if target is None:
+            if self.current_tab == 1 and self.file_changes.file_tree.display:
+                self._focus_files_tree()
             return
 
         diff_view = self.file_changes.diff_view
@@ -744,6 +991,8 @@ class MainScreen(Screen[None]):
     def action_focus_right(self) -> None:
         target = self._current_files_focus_target()
         if target is None:
+            if self.current_tab == 1:
+                self.file_changes.diff_view.focus()
             return
 
         diff_view = self.file_changes.diff_view
@@ -757,63 +1006,12 @@ class MainScreen(Screen[None]):
             diff_view.active_pane = "new"
             diff_view.focus()
 
-    def action_open_file_in_editor(self) -> None:
+    def action_focus_file_tree(self) -> None:
         if self.current_tab != 1:
             return
-
-        filename = (
-            self.file_changes.diff_view.current_file or self.store.state.selected_file
-        )
-        if not filename:
-            self.post_message(Flash("No file selected", style="warning", duration=2.0))
-            return
-
-        repo_root = _resolve_repo_root()
-        if repo_root is None:
-            self.post_message(
-                Flash(
-                    "Could not determine local repository path",
-                    style="warning",
-                    duration=3.0,
-                )
-            )
-            return
-
-        path = repo_root / filename
-        if not path.exists():
-            self.post_message(
-                Flash(
-                    f"Local file not found: {filename}", style="warning", duration=3.0
-                )
-            )
-            return
-
-        current_line = self.file_changes.diff_view._current_line()
-        line = current_line.new_line_no if current_line else None
-        if line is None and current_line is not None:
-            line = current_line.old_line_no
-        column = self.file_changes.diff_view.cursor_column + 1
-
-        try:
-            _open_in_parent_nvim(
-                path,
-                line=line or 1,
-                column=max(1, column),
-            )
-        except RuntimeError:
-            self.post_message(
-                Flash(
-                    "Open in editor requires running rit inside Neovim terminal",
-                    style="warning",
-                    duration=3.0,
-                )
-            )
-            return
-        except _SUBPROCESS_ERRORS:
-            self.post_message(
-                Flash("Failed to open file in Neovim", style="error", duration=3.0)
-            )
-            return
+        if not self.file_changes.file_tree.display:
+            self.file_changes.show_file_tree()
+        self._focus_files_tree()
 
     def action_toggle_file_tree(self) -> None:
         if self.current_tab == 1:

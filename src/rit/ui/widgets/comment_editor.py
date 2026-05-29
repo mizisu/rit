@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 EditorKind = Literal["issue", "inline"]
+SubmitMode = Literal["queue", "post"]
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -42,7 +43,13 @@ class InlineCommentEditor(Vertical):
     """
 
     BINDINGS = [
-        Binding("ctrl+s", "submit", "Submit", show=False),
+        Binding("ctrl+s", "submit('queue')", "Save draft", show=False),
+        Binding(
+            "ctrl+enter,ctrl+shift+s",
+            "submit('post')",
+            "Post now",
+            show=False,
+        ),
         Binding("escape", "cancel", "Cancel", show=False),
     ]
 
@@ -50,6 +57,7 @@ class InlineCommentEditor(Vertical):
     class Submitted(Message):
         kind: EditorKind
         body: str
+        mode: SubmitMode = "queue"
 
     @dataclass
     class Cancelled(Message):
@@ -80,7 +88,11 @@ class InlineCommentEditor(Vertical):
             show_line_numbers=False,
             placeholder=self._placeholder,
         )
-        yield Static("Ctrl+S to submit • Esc to cancel")
+        if self._kind == "inline":
+            hint = "Ctrl+S queue draft • Ctrl+Enter post now • Esc cancel"
+        else:
+            hint = "Ctrl+S submit • Esc cancel"
+        yield Static(hint)
 
     def on_mount(self) -> None:
         if self._pending_focus:
@@ -114,12 +126,12 @@ class InlineCommentEditor(Vertical):
     def is_open(self) -> bool:
         return not self.has_class("-hidden")
 
-    def action_submit(self) -> None:
+    def action_submit(self, mode: SubmitMode = "queue") -> None:
         body = self.query_one("#comment-editor-body", TextArea).text.strip()
         if not body:
             self.notify("Comment cannot be empty", severity="warning")
             return
-        self.post_message(self.Submitted(self._kind, body))
+        self.post_message(self.Submitted(self._kind, body, mode))
 
     def action_cancel(self) -> None:
         self.post_message(self.Cancelled(self._kind))
