@@ -2,13 +2,19 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Callable, Literal, cast
+from typing import Callable, Iterable, Literal, cast
 
 from textual.message import Message
 
-from rit.core.diff import parse_patch
+from rit.core.diff import parse_multi_file_patch, parse_patch
 from rit.core.types import FileDiff
-from rit.services.github import GitHubService, PRDiscussion, ReviewThreadInfo
+from rit.services.github import (
+    PR_FILES_MAX_REST_PAGES,
+    PR_FILES_PER_PAGE,
+    GitHubService,
+    PRDiscussion,
+    ReviewThreadInfo,
+)
 from rit.state.models import (
     PR,
     FileViewedState,
@@ -19,6 +25,9 @@ from rit.state.models import (
     PRFile,
     PRIssueComment,
     PRReview,
+    PRTeam,
+    PRUser,
+    ReviewRequest,
     ReviewThread,
 )
 
@@ -30,6 +39,7 @@ class PRStoreState:
 
     pr: PR | None = None
     files: list[PRFile] = field(default_factory=list)
+    files_by_filename: dict[str, PRFile] = field(default_factory=dict)
     comments: list[PRComment] = field(default_factory=list)
     reviews: list[PRReview] = field(default_factory=list)
     issue_comments: list[PRIssueComment] = field(default_factory=list)
@@ -68,7 +78,7 @@ class PRStore:
     @dataclass
     class FileSelected(Message):
         filename: str
-        diff: FileDiff
+        diff: FileDiff | None = None
 
     @dataclass
     class CommentsLoaded(Message):
@@ -144,7 +154,8 @@ class PRStore:
     async def load_pr_summary(self) -> None:
         self._state.pr_loading = LoadingState.LOADING
         try:
-            pr = await self._service.get_pr_summary(self.pr_number)
+            summary = await self._service.get_pr_summary(self.pr_number)
+            pr = self._merge_pr_summary(summary)
             self._state.pr = pr
             self._state.pr_loading = LoadingState.LOADED
             self._state.files_total_count = pr.changed_files
@@ -200,72 +211,154 @@ class PRStore:
             self._post_message(self.ErrorOccurred(error=str(e), source="load_pr_data"))
 
     async def load_files(self) -> None:
-        """Load files incrementally via paginated REST API."""
+        """Load files from the full raw diff, with REST pagination fallback."""
         self._state.files_loading = LoadingState.LOADING
         self._state.files = []
+        self._state.files_by_filename = {}
         self._state.file_diffs = {}
         self._state.files_loaded_count = 0
         if self._state.pr is None:
             self._state.files_total_count = 0
 
-        page = 1
-        per_page = 100
-
         try:
-            while True:
-                batch = await self._service.get_pr_files_page(
-                    self.pr_number,
-                    page=page,
-                    per_page=per_page,
-                )
-                if not batch:
-                    break
-
-                for file in batch:
-                    file.comments = self._state.comments_by_file.get(file.filename, [])
-
-                self._state.files.extend(batch)
-                self._state.file_diffs.update(
-                    await asyncio.to_thread(self._parse_all_patches, batch)
-                )
-                self._state.files_loaded_count = len(self._state.files)
-                if self._state.files_total_count < self._state.files_loaded_count:
-                    self._state.files_total_count = self._state.files_loaded_count
-
-                self._post_message(
-                    self.LoadingProgress(
-                        current=self._state.files_loaded_count,
-                        total=self._state.files_total_count,
-                    )
-                )
-                self._post_message(
-                    self.FilesLoaded(
-                        files=list(self._state.files),
-                        loaded_count=self._state.files_loaded_count,
-                        total_count=self._state.files_total_count,
-                    )
-                )
-
-                if len(batch) < per_page:
-                    break
-                page += 1
-
-            self._state.files_loading = LoadingState.LOADED
-            if not self._state.files:
-                self._post_message(
-                    self.FilesLoaded(
-                        files=[],
-                        loaded_count=0,
-                        total_count=self._state.files_total_count,
-                    )
-                )
+            if await self._load_files_from_raw_diff():
+                return
+            await self._load_files_from_rest_pages()
         except Exception as e:
             self._state.files_loading = LoadingState.ERROR
             self._state.error = str(e)
             self._post_message(self.ErrorOccurred(error=str(e), source="load_files"))
 
-    def _parse_all_patches(self, files: list[PRFile]) -> dict[str, FileDiff]:
-        return {f.filename: parse_patch(f.patch, f.filename) for f in files}
+    async def _load_files_from_raw_diff(self) -> bool:
+        try:
+            raw_diff = await self._service.get_pr_diff_text(self.pr_number)
+            parsed_files = await asyncio.to_thread(parse_multi_file_patch, raw_diff)
+        except Exception:
+            return False
+
+        if not parsed_files:
+            return False
+
+        for parsed_file in parsed_files:
+            diff = parsed_file.diff
+            file = self._file_from_diff(diff)
+            self._state.file_diffs[diff.filename] = diff
+            self._append_file(file)
+
+        self._state.files_loading = LoadingState.LOADED
+        self._post_files_loaded()
+        return True
+
+    async def _load_files_from_rest_pages(self) -> None:
+        first_page = await self._service.get_pr_files_page(
+            self.pr_number,
+            page=1,
+            per_page=PR_FILES_PER_PAGE,
+        )
+        self._append_file_batch(first_page)
+        self._post_files_loaded()
+
+        remaining_pages = self._remaining_file_pages()
+        if remaining_pages:
+            page_batches = await self._service.get_pr_file_pages(
+                self.pr_number,
+                pages=remaining_pages,
+                per_page=PR_FILES_PER_PAGE,
+            )
+            for page in remaining_pages:
+                batch = page_batches.get(page, [])
+                if not batch:
+                    break
+                self._append_file_batch(batch)
+
+        self._state.files_loading = LoadingState.LOADED
+        self._post_files_loaded()
+
+    def _file_from_diff(self, diff: FileDiff) -> PRFile:
+        status = "modified"
+        if diff.is_new:
+            status = "added"
+        elif diff.is_deleted:
+            status = "removed"
+        elif diff.old_filename:
+            status = "renamed"
+
+        additions = diff.total_additions
+        deletions = diff.total_deletions
+        return PRFile(
+            filename=diff.filename,
+            status=status,
+            additions=additions,
+            deletions=deletions,
+            changes=additions + deletions,
+            previousFilename=diff.old_filename,
+        )
+
+    def _append_file(self, file: PRFile) -> None:
+        file.comments = self._state.comments_by_file.get(file.filename, [])
+        self._state.files.append(file)
+        self._state.files_by_filename[file.filename] = file
+        self._state.files_loaded_count = len(self._state.files)
+        if self._state.files_total_count < self._state.files_loaded_count:
+            self._state.files_total_count = self._state.files_loaded_count
+
+    def _append_file_batch(self, batch: list[PRFile]) -> None:
+        for file in batch:
+            self._append_file(file)
+
+    def _post_files_loaded(self) -> None:
+        self._post_message(
+            self.LoadingProgress(
+                current=self._state.files_loaded_count,
+                total=self._state.files_total_count,
+            )
+        )
+        self._post_message(
+            self.FilesLoaded(
+                files=list(self._state.files),
+                loaded_count=self._state.files_loaded_count,
+                total_count=self._state.files_total_count,
+            )
+        )
+
+    def _remaining_file_pages(self) -> list[int]:
+        if self._state.files_loaded_count < PR_FILES_PER_PAGE:
+            return []
+
+        if self._state.files_total_count <= PR_FILES_PER_PAGE:
+            return []
+
+        page_count = min(
+            PR_FILES_MAX_REST_PAGES,
+            (self._state.files_total_count + PR_FILES_PER_PAGE - 1)
+            // PR_FILES_PER_PAGE,
+        )
+        return list(range(2, page_count + 1))
+
+    def _parse_file_patch(self, file: PRFile) -> FileDiff:
+        diff = parse_patch(file.patch, file.filename)
+        diff.old_filename = file.previous_filename
+        diff.is_new = file.status == "added"
+        diff.is_deleted = file.status == "removed"
+        return diff
+
+    def _merge_pr_summary(self, summary: PR) -> PR:
+        existing = self._state.pr
+        if existing is None:
+            return summary
+
+        return summary.model_copy(
+            update={
+                "body": existing.body,
+                "reviews_connection": NodeList(nodes=list(self._state.reviews)),
+                "issue_comments_connection": NodeList(
+                    nodes=list(self._state.issue_comments)
+                ),
+                "review_threads_connection": NodeList(
+                    nodes=list(self._state.review_threads)
+                ),
+            }
+        )
 
     def _merge_pr_discussion(self, discussion: PRDiscussion) -> PR:
         pr = self._state.pr or PR(number=self.pr_number)
@@ -316,13 +409,55 @@ class PRStore:
         }
 
     def select_file(self, filename: str) -> None:
-        if filename in self._state.file_diffs:
-            self._state.selected_file = filename
-            diff = self._state.file_diffs[filename]
-            self._post_message(self.FileSelected(filename=filename, diff=diff))
+        if self._get_file(filename) is None and filename not in self._state.file_diffs:
+            return
+
+        self._state.selected_file = filename
+        self._post_message(
+            self.FileSelected(
+                filename=filename,
+                diff=self._state.file_diffs.get(filename),
+            )
+        )
 
     def get_file_diff(self, filename: str) -> FileDiff | None:
-        return self._state.file_diffs.get(filename)
+        cached = self._state.file_diffs.get(filename)
+        if cached is not None:
+            return cached
+
+        file = self._get_file(filename)
+        if file is None:
+            return None
+
+        diff = self._parse_file_patch(file)
+        self._state.file_diffs[filename] = diff
+        return diff
+
+    async def get_file_diff_async(self, filename: str) -> FileDiff | None:
+        cached = self._state.file_diffs.get(filename)
+        if cached is not None:
+            return cached
+
+        file = self._get_file(filename)
+        if file is None:
+            return None
+
+        diff = await asyncio.to_thread(self._parse_file_patch, file)
+        cached = self._state.file_diffs.setdefault(filename, diff)
+        return cached
+
+    def _get_file(self, filename: str) -> PRFile | None:
+        file = self._state.files_by_filename.get(filename)
+        if file is not None:
+            return file
+
+        file = next(
+            (file for file in self._state.files if file.filename == filename),
+            None,
+        )
+        if file is not None:
+            self._state.files_by_filename[filename] = file
+        return file
 
     async def get_file_content(self, filename: str) -> str | None:
         """Fetch full file content at the PR's head ref. Cached after first call."""
@@ -340,6 +475,103 @@ class PRStore:
             return content
         except Exception:
             return None
+
+    async def get_reviewer_candidates(self) -> tuple[list[PRUser], list[PRTeam]]:
+        """Fetch user and team candidates for review requests."""
+        return await self._service.get_reviewer_candidates()
+
+    async def get_assignee_candidates(self) -> list[PRUser]:
+        """Fetch users that can be assigned to this PR."""
+        return await self._service.get_assignee_candidates()
+
+    async def set_requested_reviewers(
+        self,
+        *,
+        users: Iterable[str],
+        teams: Iterable[str],
+    ) -> bool:
+        """Set requested reviewers to the provided user and team selections."""
+        pr = self._state.pr
+        if pr is None:
+            raise ValueError("PR not loaded")
+
+        author_login = pr.user.login if pr.user else ""
+        desired_users = {
+            login.strip()
+            for login in users
+            if login.strip() and login.strip() != author_login
+        }
+        desired_teams = {team.strip() for team in teams if team.strip()}
+        current_users, current_teams = self._current_requested_reviewers(pr)
+
+        add_users = sorted(desired_users - current_users)
+        add_teams = sorted(desired_teams - current_teams)
+        remove_users = sorted(current_users - desired_users)
+        remove_teams = sorted(current_teams - desired_teams)
+
+        if not add_users and not add_teams and not remove_users and not remove_teams:
+            return False
+
+        if remove_users or remove_teams:
+            await self._service.remove_requested_reviewers(
+                self.pr_number,
+                reviewers=remove_users,
+                team_reviewers=remove_teams,
+            )
+        if add_users or add_teams:
+            await self._service.request_reviewers(
+                self.pr_number,
+                reviewers=add_users,
+                team_reviewers=add_teams,
+            )
+
+        await self.load_pr_summary()
+        return True
+
+    async def set_assignees(self, logins: Iterable[str]) -> bool:
+        """Set PR assignees to the provided user logins."""
+        pr = self._state.pr
+        if pr is None:
+            raise ValueError("PR not loaded")
+
+        desired = {login.strip() for login in logins if login.strip()}
+        current = {user.login for user in pr.assignees if user.login}
+        add_logins = sorted(desired - current)
+        remove_logins = sorted(current - desired)
+
+        if not add_logins and not remove_logins:
+            return False
+
+        if remove_logins:
+            await self._service.remove_assignees(self.pr_number, remove_logins)
+        if add_logins:
+            await self._service.add_assignees(self.pr_number, add_logins)
+
+        await self.load_pr_summary()
+        return True
+
+    def _current_requested_reviewers(self, pr: PR) -> tuple[set[str], set[str]]:
+        users: set[str] = set()
+        teams: set[str] = set()
+        for request in pr.requested_reviewers:
+            kind, key = self._review_request_key(request)
+            if kind == "user":
+                users.add(key)
+            elif kind == "team":
+                teams.add(key)
+        return users, teams
+
+    def _review_request_key(
+        self, request: ReviewRequest
+    ) -> tuple[Literal["user", "team", "none"], str]:
+        reviewer = request.requested_reviewer
+        if isinstance(reviewer, PRUser) and reviewer.login:
+            return "user", reviewer.login
+        if isinstance(reviewer, PRTeam):
+            key = reviewer.slug or reviewer.name
+            if key:
+                return "team", key
+        return "none", ""
 
     async def submit_issue_comment(self, body: str) -> PRIssueComment:
         """Submit a PR-level comment and update local state."""
