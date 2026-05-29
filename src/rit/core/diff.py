@@ -1,11 +1,13 @@
 """Diff parsing and word-level diff computation."""
 
 import re
+from dataclasses import dataclass
 from difflib import SequenceMatcher
+from typing import Literal
 
 from rit.core.types import (
-    DiffLine,
     DiffHunk,
+    DiffLine,
     FileDiff,
     InlineSegment,
     SegmentType,
@@ -14,23 +16,153 @@ from rit.core.types import (
 WORD_DIFF_THRESHOLD = 0.2
 WORD_DIFF_MAX_LINE_LENGTH = 1000
 TOKEN_REFINEMENT_MAX_LENGTH = 200
+PARSE_REFINEMENT_CELL_BUDGET = 25
 TAB_SIZE = 4
+HUNK_PATTERN = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
+DIFF_GIT_PREFIX = "diff --git "
 
 
-def parse_patch(patch: str, filename: str) -> FileDiff:
+@dataclass(frozen=True)
+class ParsedFilePatch:
+    """A parsed file section from a multi-file unified diff."""
+
+    diff: FileDiff
+    patch: str
+
+
+def parse_multi_file_patch(
+    patch: str,
+    *,
+    refine: Literal["auto", "eager", "never"] = "auto",
+    refinement_cell_budget: int | None = PARSE_REFINEMENT_CELL_BUDGET,
+) -> list[ParsedFilePatch]:
+    """Parse a multi-file unified diff into per-file diffs."""
+    sections = _split_multi_file_patch(patch)
+    parsed: list[ParsedFilePatch] = []
+    for section in sections:
+        filename, old_filename, is_new, is_deleted, is_binary = _parse_file_metadata(
+            section
+        )
+        if not filename:
+            continue
+
+        diff = parse_patch(
+            section,
+            filename,
+            refine=refine,
+            refinement_cell_budget=refinement_cell_budget,
+        )
+        diff.old_filename = old_filename
+        diff.is_new = is_new
+        diff.is_deleted = is_deleted
+        diff.is_binary = is_binary
+        parsed.append(ParsedFilePatch(diff=diff, patch=section))
+    return parsed
+
+
+def _split_multi_file_patch(patch: str) -> list[str]:
+    if not patch:
+        return []
+
+    starts = [match.start() for match in re.finditer(r"(?m)^diff --git ", patch)]
+    if not starts:
+        return [patch]
+
+    sections: list[str] = []
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(patch)
+        sections.append(patch[start:end].rstrip("\n"))
+    return sections
+
+
+def _parse_file_metadata(section: str) -> tuple[str, str | None, bool, bool, bool]:
+    filename = ""
+    old_filename: str | None = None
+    is_new = False
+    is_deleted = False
+    is_binary = False
+
+    for line in section.splitlines():
+        if line.startswith(DIFF_GIT_PREFIX):
+            old_path, new_path = _parse_diff_git_paths(line)
+            filename = new_path or old_path
+            old_filename = old_path if old_path != new_path else None
+        elif line.startswith("new file mode"):
+            is_new = True
+            old_filename = None
+        elif line.startswith("deleted file mode"):
+            is_deleted = True
+        elif line.startswith("rename from "):
+            old_filename = line.removeprefix("rename from ")
+        elif line.startswith("rename to "):
+            filename = line.removeprefix("rename to ")
+        elif line.startswith("Binary files ") or line.startswith("GIT binary patch"):
+            is_binary = True
+        elif line.startswith("--- "):
+            old_path = _normalize_patch_path(line.removeprefix("--- "))
+            if old_path is None:
+                is_new = True
+                old_filename = None
+            elif old_filename is None:
+                old_filename = old_path
+        elif line.startswith("+++ "):
+            new_path = _normalize_patch_path(line.removeprefix("+++ "))
+            if new_path is None:
+                is_deleted = True
+            else:
+                filename = new_path
+        elif line.startswith("@@ "):
+            break
+
+    if old_filename == filename:
+        old_filename = None
+    return filename, old_filename, is_new, is_deleted, is_binary
+
+
+def _parse_diff_git_paths(line: str) -> tuple[str, str]:
+    rest = line.removeprefix(DIFF_GIT_PREFIX)
+    if rest.startswith("a/"):
+        separator = rest.find(" b/")
+        if separator >= 0:
+            return rest[2:separator], rest[separator + 3 :]
+    parts = rest.split(" ", 1)
+    if len(parts) == 2:
+        return _strip_diff_prefix(parts[0]), _strip_diff_prefix(parts[1])
+    return "", _strip_diff_prefix(rest)
+
+
+def _normalize_patch_path(path: str) -> str | None:
+    path = path.split("\t", 1)[0]
+    if path == "/dev/null":
+        return None
+    return _strip_diff_prefix(path)
+
+
+def _strip_diff_prefix(path: str) -> str:
+    if path.startswith("a/") or path.startswith("b/"):
+        return path[2:]
+    return path
+
+
+def parse_patch(
+    patch: str,
+    filename: str,
+    *,
+    refine: Literal["auto", "eager", "never"] = "auto",
+    refinement_cell_budget: int | None = PARSE_REFINEMENT_CELL_BUDGET,
+) -> FileDiff:
+    """Parse a unified patch with adaptive modified-line refinement."""
     if not patch:
         return FileDiff(filename=filename)
 
     hunks: list[DiffHunk] = []
     current_hunk: DiffHunk | None = None
 
-    hunk_pattern = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
-
     old_line_no = 0
     new_line_no = 0
 
     for line in patch.splitlines():
-        match = hunk_pattern.match(line)
+        match = HUNK_PATTERN.match(line) if line.startswith("@@ ") else None
         if match:
             if current_hunk:
                 hunks.append(current_hunk)
@@ -97,10 +229,73 @@ def parse_patch(patch: str, filename: str) -> FileDiff:
     if current_hunk:
         hunks.append(current_hunk)
 
-    for hunk in hunks:
-        _identify_modified_lines(hunk)
+    refinement_cost = _estimate_refinement_cost(hunks)
+    block_budget = _refinement_block_budget(
+        refine,
+        refinement_cost=refinement_cost,
+        refinement_cell_budget=refinement_cell_budget,
+    )
+    is_fully_refined = refinement_cost == 0
+    if block_budget is not False:
+        is_fully_refined = True
+        for hunk in hunks:
+            is_fully_refined &= _identify_modified_lines(
+                hunk,
+                block_cell_budget=block_budget,
+            )
 
-    return FileDiff(filename=filename, hunks=hunks)
+    return FileDiff(
+        filename=filename,
+        hunks=hunks,
+        is_fully_refined=is_fully_refined,
+    )
+
+
+def _refinement_block_budget(
+    refine: Literal["auto", "eager", "never"],
+    *,
+    refinement_cost: int,
+    refinement_cell_budget: int | None,
+) -> int | None | Literal[False]:
+    if refinement_cost == 0 or refine == "never":
+        return False
+    if refine == "eager":
+        return None
+    if refine != "auto":
+        raise ValueError(f"Unsupported refinement mode: {refine}")
+    if refinement_cell_budget is None or refinement_cost <= refinement_cell_budget:
+        return None
+    return 1
+
+
+def _estimate_refinement_cost(hunks: list[DiffHunk]) -> int:
+    cost = 0
+    for hunk in hunks:
+        cost += _estimate_hunk_refinement_cost(hunk)
+    return cost
+
+
+def _estimate_hunk_refinement_cost(hunk: DiffHunk) -> int:
+    cost = 0
+    i = 0
+    lines = hunk.lines
+    while i < len(lines):
+        if not lines[i].is_deleted:
+            i += 1
+            continue
+
+        deleted_count = 0
+        while i < len(lines) and lines[i].is_deleted:
+            deleted_count += 1
+            i += 1
+
+        added_count = 0
+        while i < len(lines) and lines[i].is_added:
+            added_count += 1
+            i += 1
+
+        cost += deleted_count * added_count
+    return cost
 
 
 def _realign_replace_block(
@@ -126,10 +321,15 @@ def _realign_replace_block(
     return realigned_lines
 
 
-def _identify_modified_lines(hunk: DiffHunk) -> None:
+def _identify_modified_lines(
+    hunk: DiffHunk,
+    *,
+    block_cell_budget: int | None = None,
+) -> bool:
     """Identify modified lines within contiguous delete/add replace blocks."""
     i = 0
     new_lines: list[DiffLine] = []
+    fully_refined = True
 
     while i < len(hunk.lines):
         line = hunk.lines[i]
@@ -150,11 +350,18 @@ def _identify_modified_lines(hunk: DiffHunk) -> None:
         added_lines = hunk.lines[added_start:i]
 
         if added_lines:
-            new_lines.extend(_realign_replace_block(deleted_lines, added_lines))
+            block_cost = len(deleted_lines) * len(added_lines)
+            if block_cell_budget is None or block_cost <= block_cell_budget:
+                new_lines.extend(_realign_replace_block(deleted_lines, added_lines))
+            else:
+                new_lines.extend(deleted_lines)
+                new_lines.extend(added_lines)
+                fully_refined = False
         else:
             new_lines.extend(deleted_lines)
 
     hunk.lines = new_lines
+    return fully_refined
 
 
 def _replace_pair_cost(old_text: str, new_text: str) -> float:
@@ -244,7 +451,17 @@ def _compute_similarity(a: str, b: str) -> float:
         return 1.0
     if not a or not b:
         return 0.0
-    return SequenceMatcher(None, a, b).ratio()
+
+    max_possible_ratio = (2 * min(len(a), len(b))) / (len(a) + len(b))
+    if max_possible_ratio < WORD_DIFF_THRESHOLD:
+        return 0.0
+
+    matcher = SequenceMatcher(None, a, b)
+    if matcher.real_quick_ratio() < WORD_DIFF_THRESHOLD:
+        return 0.0
+    if matcher.quick_ratio() < WORD_DIFF_THRESHOLD:
+        return 0.0
+    return matcher.ratio()
 
 
 def _tokenize(text: str) -> list[str]:

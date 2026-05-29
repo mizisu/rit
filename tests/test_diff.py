@@ -1,12 +1,44 @@
 """Tests for diff algorithm."""
 
-from rit.core.diff import parse_patch, compute_word_diff, compute_line_diff
+from rit.core.diff import (
+    compute_line_diff,
+    compute_word_diff,
+    parse_multi_file_patch,
+    parse_patch,
+)
 from rit.core.highlighting import highlight_lines_for_diff_range
 from rit.core.types import SegmentType
 
 
 class TestParsePatch:
     """Tests for parse_patch function."""
+
+    def test_parse_multi_file_patch_preserves_file_metadata(self):
+        patch = """diff --git a/old.py b/new.py
+similarity index 88%
+rename from old.py
+rename to new.py
+--- a/old.py
++++ b/new.py
+@@ -1 +1 @@
+-old
++new
+diff --git a/added.py b/added.py
+new file mode 100644
+--- /dev/null
++++ b/added.py
+@@ -0,0 +1 @@
++added
+"""
+
+        files = parse_multi_file_patch(patch)
+
+        assert [file.diff.filename for file in files] == ["new.py", "added.py"]
+        assert files[0].diff.old_filename == "old.py"
+        assert files[0].diff.total_additions == 1
+        assert files[0].diff.total_deletions == 1
+        assert files[1].diff.is_new is True
+        assert files[1].diff.total_additions == 1
 
     def test_simple_add(self):
         """Test parsing a simple addition."""
@@ -58,7 +90,7 @@ class TestParsePatch:
 
         hunk = diff.hunks[0]
         # The delete+add pair should be merged into a modified line
-        modified_lines = [l for l in hunk.lines if l.is_modified]
+        modified_lines = [line for line in hunk.lines if line.is_modified]
 
         assert len(modified_lines) == 1
         modified = modified_lines[0]
@@ -313,6 +345,30 @@ class TestParsePatch:
         assert [line.is_deleted for line in hunk.lines] == [True, True, False, False]
         assert [line.is_added for line in hunk.lines] == [False, False, True, True]
 
+    def test_large_replace_blocks_skip_eager_modified_line_refinement(self):
+        deleted = "\n".join(f"-old value {i}" for i in range(24))
+        added = "\n".join(f"+new value {i}" for i in range(24))
+        patch = f"@@ -1,24 +1,24 @@\n{deleted}\n{added}"
+
+        diff = parse_patch(patch, "generated.txt")
+
+        hunk = diff.hunks[0]
+        assert diff.is_fully_refined is False
+        assert len(hunk.lines) == 48
+        assert not any(line.is_modified for line in hunk.lines)
+        assert sum(line.is_deleted for line in hunk.lines) == 24
+        assert sum(line.is_added for line in hunk.lines) == 24
+
+    def test_eager_refinement_can_override_large_replace_budget(self):
+        deleted = "\n".join(f"-old value {i}" for i in range(24))
+        added = "\n".join(f"+new value {i}" for i in range(24))
+        patch = f"@@ -1,24 +1,24 @@\n{deleted}\n{added}"
+
+        diff = parse_patch(patch, "generated.txt", refine="eager")
+
+        assert diff.is_fully_refined is True
+        assert any(line.is_modified for line in diff.hunks[0].lines)
+
 
 class TestComputeWordDiff:
     """Tests for word-level diff."""
@@ -418,7 +474,7 @@ class TestComputeLineDiff:
         new = ["line1", "inserted", "line2"]
         result = compute_line_diff(old, new)
 
-        added = [l for l in result if l.is_added]
+        added = [line for line in result if line.is_added]
         assert len(added) == 1
         assert added[0].new_content == "inserted"
 
@@ -428,7 +484,7 @@ class TestComputeLineDiff:
         new = ["line1", "line2"]
         result = compute_line_diff(old, new)
 
-        deleted = [l for l in result if l.is_deleted]
+        deleted = [line for line in result if line.is_deleted]
         assert len(deleted) == 1
         assert deleted[0].old_content == "deleted"
 
@@ -439,7 +495,7 @@ class TestComputeLineDiff:
         result = compute_line_diff(old, new)
 
         # Should be detected as modified with word diff
-        modified = [l for l in result if l.is_modified]
+        modified = [line for line in result if line.is_modified]
         assert len(modified) == 1
         assert modified[0].old_content == "hello world"
         assert modified[0].new_content == "hello universe"
@@ -451,7 +507,7 @@ class TestComputeLineDiff:
 
         result = compute_line_diff(old, new)
 
-        modified = [l for l in result if l.is_modified]
+        modified = [line for line in result if line.is_modified]
         assert len(modified) == 1
         assert modified[0].old_segments == []
         assert modified[0].new_segments == []

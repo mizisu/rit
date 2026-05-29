@@ -76,6 +76,12 @@ class DiffHunk:
     header: str = ""  # Optional function/class context
 
     lines: list[DiffLine] = field(default_factory=list)
+    starts_file: bool = False
+    file_path: str | None = None
+    file_old_path: str | None = None
+    file_status: str = "modified"
+    file_additions: int = 0
+    file_deletions: int = 0
 
     @property
     def has_changes(self) -> bool:
@@ -93,6 +99,7 @@ class FileDiff:
     is_new: bool = False
     is_deleted: bool = False
     is_binary: bool = False
+    is_fully_refined: bool = True
 
     @property
     def total_additions(self) -> int:
