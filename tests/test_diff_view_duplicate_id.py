@@ -113,7 +113,9 @@ class TestDiffViewDuplicateId:
         """show_diff should not race a split-state rerender worker in auto mode."""
 
         added_only_patch = "@@ -0,0 +1,3 @@\n+line1\n+line2\n+line3"
-        regular_patch = "@@ -1,3 +1,4 @@\n line1\n line2\n+line3\n line4"
+        regular_patch = (
+            "@@ -1,4 +1,4 @@\n line1\n line2\n-line3\n+line3_v2\n line4"
+        )
 
         class TestApp(App):
             def compose(self) -> ComposeResult:
