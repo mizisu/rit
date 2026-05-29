@@ -146,6 +146,29 @@ def next_match_index_from_cursor(view: DiffView) -> int:
     return 0
 
 
+def reveal_match(view: DiffView, index: int) -> None:
+    """Scroll the viewport so the active match row is visible without moving the cursor."""
+    if not (0 <= index < len(view._search_matches)):
+        return
+
+    match = view._search_matches[index]
+    rows = view._rows_for_current_mode()
+    target_row = rows[match.row_index] if 0 <= match.row_index < len(rows) else None
+    if target_row is None:
+        return
+
+    from rit.ui.widgets import diff_cursor as _cursor
+
+    target_widget = _cursor._target_widget_for_row(view, target_row)
+    if target_widget is not None:
+        view.scroll_to_widget(target_widget, animate=False, top=True)
+        return
+
+    if view._row_is_visible(target_row):
+        return
+    _cursor._scroll_row_to_viewport_offset(view, target_row, 0)
+
+
 def activate_match(view: DiffView, index: int) -> None:
     if not (0 <= index < len(view._search_matches)):
         return

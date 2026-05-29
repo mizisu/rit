@@ -138,6 +138,7 @@ class ReviewThreadCard(Vertical):
         show_diff_hunk: bool = True,
         preview_max_lines: int = 2,
         preview_max_chars: int = 120,
+        markdown_base_url: str | None = None,
         id: str | None = None,
         classes: str | None = None,
     ) -> None:
@@ -150,6 +151,7 @@ class ReviewThreadCard(Vertical):
         self._show_diff_hunk = show_diff_hunk
         self._preview_max_lines = preview_max_lines
         self._preview_max_chars = preview_max_chars
+        self._markdown_base_url = markdown_base_url
         self._pending_markdown_mounts: list[tuple[Vertical, str]] = []
 
     def on_mount(self) -> None:
@@ -196,7 +198,11 @@ class ReviewThreadCard(Vertical):
 
     def _mount_pending_markdown(self) -> None:
         for container, body in self._pending_markdown_mounts:
-            mount_markdown_with_details(container, body)
+            mount_markdown_with_details(
+                container,
+                body,
+                base_url=self._markdown_base_url,
+            )
         self._pending_markdown_mounts.clear()
 
     @property
@@ -358,6 +364,7 @@ class ReviewThreadItem(Collapsible):
     /* Inline DiffView variant (activated by --inline class) */
 
     ReviewThreadItem.--inline {
+        width: 1fr;
         margin: 0;
         padding: 0;
         border-top: none;
@@ -389,6 +396,7 @@ class ReviewThreadItem(Collapsible):
         show_diff_hunk: bool = True,
         show_path_header: bool = True,
         collapsed: bool = False,
+        markdown_base_url: str | None = None,
         classes: str | None = None,
         id: str | None = None,
     ) -> None:
@@ -415,6 +423,7 @@ class ReviewThreadItem(Collapsible):
                 compact=compact,
                 variant="timeline",
                 show_diff_hunk=show_diff_hunk,
+                markdown_base_url=markdown_base_url,
             )
         )
 

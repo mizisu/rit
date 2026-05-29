@@ -349,9 +349,9 @@ def _clear_line_selection(view: DiffView, line_idx: int) -> None:
 
         line = view._all_lines[line_idx]
         side = view._get_line_side_for_widget(line, widget)
-        has_cursor = line_idx == view.cursor_line and view._widget_matches_cursor_side(
-            line, widget
-        )
+        has_cursor = view._diff_line_cursor_active(
+            line_idx
+        ) and view._widget_matches_cursor_side(line, widget)
         if has_cursor:
             new_content = view._build_code_content_with_cursor(
                 line,
@@ -359,8 +359,10 @@ def _clear_line_selection(view: DiffView, line_idx: int) -> None:
                 view.cursor_column,
                 side=side,
             )
+            widget.add_class("-cursor")
         else:
             new_content = view._base_code_content(line, side=side)
+            widget.remove_class("-cursor")
         widget.update(new_content)
 
 
@@ -386,9 +388,9 @@ def _apply_line_selection(
 
         actual_end = end_col if end_col is not None else len(text) - 1
         side = view._get_line_side_for_widget(line, widget)
-        has_cursor = line_idx == view.cursor_line and view._widget_matches_cursor_side(
-            line, widget
-        )
+        has_cursor = view._diff_line_cursor_active(
+            line_idx
+        ) and view._widget_matches_cursor_side(line, widget)
         cursor_col = view.cursor_column if has_cursor else None
         content = _build_code_content_with_selection(
             view,
@@ -400,6 +402,10 @@ def _apply_line_selection(
             side=side,
         )
         widget.update(content)
+        if has_cursor:
+            widget.add_class("-cursor")
+        else:
+            widget.remove_class("-cursor")
 
         if view.visual_type == "line":
             widget.add_class("-selected")

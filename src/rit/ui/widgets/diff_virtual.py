@@ -239,19 +239,44 @@ async def _remove_virtualized_lines(
     repair_ranges: list[tuple[int, int]] = []
 
     comment_widgets_map = getattr(view, "_comment_widgets_by_line", {})
+    comment_layout_widgets_map = getattr(view, "_comment_layout_widgets_by_line", {})
     pending_draft_widgets_map = getattr(view, "_pending_comment_widgets_by_line", {})
+    pending_draft_layout_widgets_map = getattr(
+        view, "_pending_comment_layout_widgets_by_line", {}
+    )
     inline_editor_line = getattr(view, "_inline_comment_editor_line_index", None)
     inline_editor_widget = getattr(view, "_inline_comment_editor_widget", None)
+    inline_editor_layout_widget = getattr(
+        view, "_inline_comment_editor_layout_widget", None
+    )
 
     for line_idx in range(start, end + 1):
-        # Remove inline comment widgets attached to this line.
-        for cw in comment_widgets_map.pop(line_idx, []):
-            await cw.remove()
-        for dw in pending_draft_widgets_map.pop(line_idx, []):
-            await dw.remove()
+        comment_layout_widgets = comment_layout_widgets_map.pop(line_idx, [])
+        if comment_layout_widgets:
+            for cw in comment_layout_widgets:
+                await cw.remove()
+            comment_widgets_map.pop(line_idx, None)
+        else:
+            for cw in comment_widgets_map.pop(line_idx, []):
+                await cw.remove()
+
+        pending_draft_layout_widgets = pending_draft_layout_widgets_map.pop(
+            line_idx, []
+        )
+        if pending_draft_layout_widgets:
+            for dw in pending_draft_layout_widgets:
+                await dw.remove()
+            pending_draft_widgets_map.pop(line_idx, None)
+        else:
+            for dw in pending_draft_widgets_map.pop(line_idx, []):
+                await dw.remove()
 
         if line_idx == inline_editor_line and inline_editor_widget is not None:
-            await inline_editor_widget.remove()
+            if inline_editor_layout_widget is not None:
+                await inline_editor_layout_widget.remove()
+                view._inline_comment_editor_layout_widget = None
+            else:
+                await inline_editor_widget.remove()
             view._inline_comment_editor_widget = None
 
         block = view._unified_blocks_by_line.get(line_idx)

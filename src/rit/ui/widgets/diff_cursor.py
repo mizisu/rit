@@ -39,20 +39,121 @@ def _consume_count(view: DiffView) -> int:
 
 def _scroll_down(view: DiffView) -> None:
     count = _consume_count(view)
-    if view._all_lines:
-        _move_cursor_rows(view, count, scroll_in_visual=view.visual_mode)
-    else:
+    if not view._all_lines:
         for _ in range(count):
             VerticalScroll.action_scroll_down(view)
+        return
+    for _ in range(count):
+        if not _step_down_one(view):
+            break
 
 
 def _scroll_up(view: DiffView) -> None:
     count = _consume_count(view)
-    if view._all_lines:
-        _move_cursor_rows(view, -count, scroll_in_visual=view.visual_mode)
-    else:
+    if not view._all_lines:
         for _ in range(count):
             VerticalScroll.action_scroll_up(view)
+        return
+    for _ in range(count):
+        if not _step_up_one(view):
+            break
+
+
+def _is_on_last_row_of_current_line(view: DiffView) -> bool:
+    rows = view._rows_for_current_mode()
+    if not rows:
+        return True
+    cur_idx = view._current_row_index()
+    if cur_idx < 0 or cur_idx >= len(rows):
+        return True
+    cur_line = rows[cur_idx].line_index
+    next_idx = cur_idx + 1
+    if next_idx >= len(rows):
+        return True
+    return rows[next_idx].line_index != cur_line
+
+
+def _is_on_first_row_of_current_line(view: DiffView) -> bool:
+    rows = view._rows_for_current_mode()
+    if not rows:
+        return True
+    cur_idx = view._current_row_index()
+    if cur_idx <= 0:
+        return True
+    cur_line = rows[cur_idx].line_index
+    return rows[cur_idx - 1].line_index != cur_line
+
+
+def _activate_comment_cursor(view: DiffView, line_index: int) -> None:
+    if view._cursor_ui.flush_pending:
+        _flush_queued_cursor_ui_updates(view)
+    _comments.update_cursor_highlight(view, line_index, line_index)
+    view._update_line_cursor(line_index)
+    widget = _comments.active_comment_widget(view, line_index)
+    if widget is not None and widget.is_mounted:
+        view.scroll_to_widget(widget, animate=False)
+
+
+def _step_down_one(view: DiffView) -> bool:
+    cur_line = view.cursor_line
+    n_comments = _comments.total_comments_at_line(view, cur_line)
+    cur_offset = view._comment_cursor_index
+
+    if cur_offset > 0:
+        if cur_offset < n_comments:
+            view._comment_cursor_index = cur_offset + 1
+            _activate_comment_cursor(view, cur_line)
+            return True
+        # past last comment — leave the line entirely
+        view._comment_cursor_index = 0
+        _comments.update_cursor_highlight(view, cur_line, cur_line)
+        moved = _move_cursor_rows(view, 1, scroll_in_visual=view.visual_mode)
+        if moved:
+            _flush_cursor_ui_now_if_safe(view)
+        return moved
+
+    if (
+        not view.visual_mode
+        and n_comments > 0
+        and _is_on_last_row_of_current_line(view)
+    ):
+        view._comment_cursor_index = 1
+        _activate_comment_cursor(view, cur_line)
+        return True
+
+    return _move_cursor_rows(view, 1, scroll_in_visual=view.visual_mode)
+
+
+def _step_up_one(view: DiffView) -> bool:
+    cur_line = view.cursor_line
+    cur_offset = view._comment_cursor_index
+
+    if cur_offset > 1:
+        view._comment_cursor_index = cur_offset - 1
+        _activate_comment_cursor(view, cur_line)
+        return True
+
+    if cur_offset == 1:
+        view._comment_cursor_index = 0
+        _comments.update_cursor_highlight(view, cur_line, cur_line)
+        view._update_line_cursor(cur_line)
+        _scroll_to_cursor(view)
+        return True
+
+    moved = _move_cursor_rows(view, -1, scroll_in_visual=view.visual_mode)
+    if not moved:
+        return False
+
+    if view.visual_mode:
+        return True
+
+    new_line = view.cursor_line
+    if new_line != cur_line and _is_on_last_row_of_current_line(view):
+        n_comments = _comments.total_comments_at_line(view, new_line)
+        if n_comments > 0:
+            view._comment_cursor_index = n_comments
+            _activate_comment_cursor(view, new_line)
+    return True
 
 
 def _scroll_home(view: DiffView) -> None:
@@ -541,19 +642,52 @@ def _scroll_to_vertical_span(
         view.scroll_to(y=target_scroll, animate=animate)
 
 
+def _target_widget_for_row(view: DiffView, row: RenderedRow):
+    """Return the most specific mounted widget for a rendered row, if any.
+
+    Estimated line offsets diverge from real heights when inline comments,
+    pending drafts, or the inline editor are present. Callers should prefer
+    `scroll_to_widget` on this widget over geometry-based scrolling.
+    """
+    target = view._row_anchor_widgets.get(row.anchor_id)
+    if target is None:
+        target = view._line_widgets_by_index.get(row.line_index)
+    if target is None or not target.is_mounted:
+        return None
+    return target
+
+
+def _has_height_estimate_drift(view: DiffView) -> bool:
+    """Return True when extras (comments, drafts, inline editor) make height estimates unreliable."""
+    if view._inline_comment_editor_line_index is not None:
+        return True
+    if view._comment_threads_by_line:
+        return True
+    if view._pending_comment_drafts_by_line:
+        return True
+    return False
+
+
 def _scroll_to_cursor(view: DiffView) -> None:
     if not view._all_lines or not view.is_mounted:
         return
     row = view._current_row()
     if row is None:
         return
-    bounds = _row_vertical_bounds(view, row)
-    if bounds is None:
-        return
-    top, bottom = bounds
+
     saved = view._suspend_scroll_virtual_window_watch
     view._suspend_scroll_virtual_window_watch = True
     try:
+        if _has_height_estimate_drift(view):
+            target_widget = _target_widget_for_row(view, row)
+            if target_widget is not None:
+                view.scroll_to_widget(target_widget, animate=False)
+                return
+
+        bounds = _row_vertical_bounds(view, row)
+        if bounds is None:
+            return
+        top, bottom = bounds
         _scroll_to_vertical_span(view, top, bottom, animate=False)
     finally:
         view._suspend_scroll_virtual_window_watch = saved
@@ -720,9 +854,14 @@ def _flush_queued_cursor_ui_updates(view: DiffView) -> None:
             cursor_lines.difference_update(selection_dirty_lines)
 
     if cursor_lines:
-        if not _blocks._refresh_grouped_blocks_for_lines(view, cursor_lines):
-            for line_idx in sorted(cursor_lines):
-                view._update_line_cursor(line_idx)
+        _blocks._refresh_grouped_blocks_for_lines(view, cursor_lines)
+        for line_idx in sorted(cursor_lines):
+            if (
+                line_idx in view._unified_blocks_by_line
+                or line_idx in view._split_blocks_by_line
+            ):
+                continue
+            view._update_line_cursor(line_idx)
 
     if selection_full_refresh:
         view._update_selection_highlighting()

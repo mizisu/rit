@@ -13,7 +13,7 @@ from textual.reactive import reactive, var
 from textual.widgets import Input, Static, Tree
 from textual.widgets.tree import TreeNode
 
-from rit.state.models import FileViewedState, LoadingState, PRFile
+from rit.state.models import FileViewedState, PRFile
 from rit.ui.messages import Flash
 
 if TYPE_CHECKING:
@@ -198,7 +198,7 @@ class FileTree(Vertical):
         self._close_search(clear_query=True)
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if action in {"copy_filename", "copy_path"} and self._search_open:
+        if self._search_open and isinstance(self.screen.focused, Input):
             return False
         return super().check_action(action, parameters)
 
@@ -554,12 +554,8 @@ class FileTree(Vertical):
     def _update_file_count_display(self) -> None:
         try:
             count_widget = self.query_one("#file-count", Static)
-            is_incremental_loading = (
-                self.store is not None
-                and self.store.state.files_loading == LoadingState.LOADING
-                and self.file_count < self.total_file_count
-            )
-            if self._search_query or is_incremental_loading:
+            is_partial_file_list = self.file_count < self.total_file_count
+            if self._search_query or is_partial_file_list:
                 count_widget.update(
                     f"Files ({self.file_count}/{self.total_file_count})"
                 )

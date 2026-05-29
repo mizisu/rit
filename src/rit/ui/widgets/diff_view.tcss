@@ -27,6 +27,23 @@ DiffView .placeholder {
     margin: 2;
 }
 
+DiffView .file-diff-header {
+    background: $surface;
+    color: $foreground;
+    padding: 0 1;
+    height: 1;
+    margin: 0;
+    text-style: bold;
+}
+
+DiffView .split-file-diff-header-scroll {
+    width: 1fr;
+    height: 1;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-size: 0 0;
+}
+
 DiffView .hunk-header {
     background: $surface;
     color: $text-disabled;
@@ -74,6 +91,44 @@ DiffView .code-content.-added {
 
 DiffView .code-content.-removed {
     background: $error 10%;
+}
+
+DiffView .code-content.-cursor {
+    background: $primary 25%;
+}
+
+DiffView .code-content.-cursor.-added {
+    background: $success 30%;
+}
+
+DiffView .code-content.-cursor.-removed {
+    background: $error 30%;
+}
+
+DiffView .diff-comment-row {
+    height: auto;
+    width: auto;
+    min-width: 100%;
+    margin: 0;
+    padding: 0;
+}
+
+DiffView .diff-comment-gutter {
+    height: auto;
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+}
+
+DiffView .diff-comment-pane {
+    width: 50%;
+    height: auto;
+    margin: 0;
+    padding: 0;
+}
+
+DiffView .diff-comment-empty-pane {
+    height: 1;
 }
 
 /* ===== Cursor & Visual Mode Styles (Vim-style) ===== */

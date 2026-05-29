@@ -119,12 +119,19 @@ async def test_split_mode_uses_explicit_placeholders_for_missing_side() -> None:
         assert "deleted_value" in _as_plain(old_code)
         assert "added_value" in _as_plain(new_code)
 
-        add_patch = "@@ -1,2 +1,3 @@\n line1\n+added_only\n line2"
+        add_patch = (
+            "@@ -1,3 +1,4 @@\n line1\n-shared_value\n+shared_value_v2\n+added_only\n line2"
+        )
         add_diff = parse_patch(add_patch, "test.py")
         await diff_view.show_diff("test.py", add_diff)
         await pilot.pause()
 
-        placeholder = diff_view.query_one("#line-1-old .code-content", Static)
+        placeholder_line = next(
+            i for i, line in enumerate(diff_view._all_lines) if line.is_added
+        )
+        placeholder = diff_view.query_one(
+            f"#line-{placeholder_line}-old .code-content", Static
+        )
         assert "╲" in _as_plain(placeholder)
 
 
@@ -152,12 +159,19 @@ async def test_split_mode_distinguishes_blank_lines_from_missing_sides() -> None
         assert "╲" not in _as_plain(old_code)
         assert "╲" not in _as_plain(new_code)
 
-        add_patch = "@@ -1,1 +1,2 @@\n line\n+"
+        add_patch = "@@ -1,2 +1,3 @@\n line\n-shared\n+shared_v2\n+"
         await diff_view.show_diff("test.py", parse_patch(add_patch, "test.py"))
         await pilot.pause()
 
-        missing_old = diff_view.query_one("#line-1-old .code-content", Static)
-        blank_new = diff_view.query_one("#line-1-new .code-content", Static)
+        added_blank_index = next(
+            i for i, line in enumerate(diff_view._all_lines) if line.is_added
+        )
+        missing_old = diff_view.query_one(
+            f"#line-{added_blank_index}-old .code-content", Static
+        )
+        blank_new = diff_view.query_one(
+            f"#line-{added_blank_index}-new .code-content", Static
+        )
 
         assert "╲" in _as_plain(missing_old)
         assert "╲" not in _as_plain(blank_new)

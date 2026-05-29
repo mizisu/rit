@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Literal
 
+from rich.text import Text
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.widget import Widget
@@ -37,6 +38,18 @@ def _get_render_request_context() -> ContextVar[int | None]:
 # ---------------------------------------------------------------------------
 
 
+def _has_only_added_deleted_changes(lines: list[DiffLine]) -> bool:
+    has_change = False
+
+    for line in lines:
+        if line.is_modified:
+            return False
+        if line.is_added or line.is_deleted:
+            has_change = True
+
+    return has_change
+
+
 def _should_force_unified_for_current_file(view: DiffView) -> bool:
     if view._showing_full_file:
         return True
@@ -47,12 +60,7 @@ def _should_force_unified_for_current_file(view: DiffView) -> bool:
         return False
     if diff.is_new or diff.is_deleted:
         return True
-    all_lines = view._all_lines
-    if not all_lines:
-        return False
-    return all(line.is_added for line in all_lines) or all(
-        line.is_deleted for line in all_lines
-    )
+    return diff.is_fully_refined and _has_only_added_deleted_changes(view._all_lines)
 
 
 def _split_prefix_width_for_layout(
@@ -285,7 +293,12 @@ async def _render_diff(view: DiffView) -> None:
     view._unified_blocks_by_line = {}
     view._split_blocks_by_line = {}
     view._line_widgets_by_index = {}
+    view._comment_widgets_by_line = {}
+    view._comment_layout_widgets_by_line = {}
+    view._pending_comment_widgets_by_line = {}
+    view._pending_comment_layout_widgets_by_line = {}
     view._inline_comment_editor_widget = None
+    view._inline_comment_editor_layout_widget = None
     view._row_anchor_widgets = {}
     view._hunk_header_widgets = {}
     view._virt.top_buffer = None
@@ -322,6 +335,63 @@ async def _render_diff(view: DiffView) -> None:
         )
     else:
         view.call_after_refresh(lambda: _finalize_render_state(view))
+
+
+def _file_status_marker(status: str) -> tuple[str, str]:
+    markers = {
+        "added": ("+", "green"),
+        "removed": ("-", "red"),
+        "renamed": ("R", "blue"),
+        "copied": ("C", "cyan"),
+        "modified": ("M", "yellow"),
+    }
+    return markers.get(status, ("M", "yellow"))
+
+
+def _create_file_header_widget(
+    view: DiffView,
+    *,
+    hunk_index: int,
+    hunk: DiffHunk,
+) -> Widget:
+    path = hunk.file_path or "unknown"
+    old_path = hunk.file_old_path
+    marker, marker_style = _file_status_marker(hunk.file_status)
+
+    text = Text()
+    text.append("▾ ", style="dim")
+    text.append(f"{marker} ", style=f"bold {marker_style}")
+    if old_path and old_path != path:
+        text.append(old_path, style="dim")
+        text.append(" → ", style="dim")
+    text.append(path, style="bold")
+    text.append("  ")
+    if hunk.file_additions:
+        text.append(f"+{hunk.file_additions}", style="bold green")
+        text.append(" ")
+    if hunk.file_deletions:
+        text.append(f"-{hunk.file_deletions}", style="bold red")
+    if not hunk.file_additions and not hunk.file_deletions:
+        text.append("no textual changes", style="dim")
+
+    header_widget = Static(
+        text,
+        classes=f"file-diff-header -{hunk.file_status}",
+        id=f"file-header-{hunk_index}",
+    )
+    if not view.split:
+        header_widget.styles.width = max(
+            1,
+            len(path) + 16,
+            _unified_content_width_for_layout(view),
+        )
+        return header_widget
+    header_widget.styles.width = max(1, len(path) + 16)
+    return SyncedCodeScroll(
+        header_widget,
+        classes="split-file-diff-header-scroll",
+        on_scroll_x=view._sync_split_horizontal_scroll,
+    )
 
 
 def _create_hunk_header_widget(
@@ -369,6 +439,11 @@ def _render_hunk(
 
     if not lines:
         return
+
+    if show_header and hunk.starts_file:
+        container.mount(
+            _create_file_header_widget(view, hunk_index=hunk_index, hunk=hunk)
+        )
 
     if show_header:
         hunk_header = (
@@ -984,7 +1059,9 @@ def _build_split_code_content(
 
     text = line.old_content if side == "old" else line.new_content
     spec = view._compute_selection_spec_for_line(line.line_index)
-    has_cursor = line.line_index == view.cursor_line and view.active_pane == side
+    has_cursor = (
+        view._diff_line_cursor_active(line.line_index) and view.active_pane == side
+    )
     cursor_col = view.cursor_column if has_cursor else None
 
     if spec is not None:
@@ -1244,7 +1321,7 @@ def _update_line_cursor(view: DiffView, line_idx: int) -> None:
     if not code_widgets:
         return
     line = view._all_lines[line_idx]
-    has_cursor = line_idx == view.cursor_line
+    has_cursor = view._diff_line_cursor_active(line_idx)
 
     for code_widget in code_widgets:
         if code_widget.has_class("-placeholder"):

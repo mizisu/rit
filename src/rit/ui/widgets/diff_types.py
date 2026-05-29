@@ -6,8 +6,9 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from rit.core.types import FileDiff
     from textual.widgets import Static
+
+    from rit.core.types import FileDiff
 
 from textual.containers import Horizontal
 from textual.content import Content
@@ -176,7 +177,7 @@ class SplitBlockLineStaticData:
 class HighlightState:
     """Syntax highlight cache and async worker coordination."""
 
-    cache: set[tuple[int, bool]] = field(default_factory=set)
+    cache: set[tuple[int, bool, bool]] = field(default_factory=set)
     request_token: int = 0
     window_inflight: tuple[int, int, bool] | None = None
     queued_window: tuple[str, FileDiff, int, int, bool, int] | None = None

@@ -52,6 +52,8 @@ def _should_use_split_block_renderer(view) -> bool:
 def _can_render_in_unified_block(view, line: DiffLine) -> bool:
     if line.line_index in view._comment_threads_by_line:
         return False
+    if line.line_index in view._pending_comment_drafts_by_line:
+        return False
     if line.line_index == getattr(view, "_inline_comment_editor_line_index", None):
         return False
     return True
@@ -59,6 +61,8 @@ def _can_render_in_unified_block(view, line: DiffLine) -> bool:
 
 def _can_render_in_split_block(view, line: DiffLine) -> bool:
     if line.line_index in view._comment_threads_by_line:
+        return False
+    if line.line_index in view._pending_comment_drafts_by_line:
         return False
     if line.line_index == getattr(view, "_inline_comment_editor_line_index", None):
         return False
@@ -145,6 +149,14 @@ def _build_unified_modified_block_prefix_content(
     return view._build_unified_modified_prefix_content(line, side=side)
 
 
+def _cursor_block_line_style(line_style: str) -> str:
+    if "$success" in line_style:
+        return "on $success 30%"
+    if "$error" in line_style:
+        return "on $error 30%"
+    return "on $primary 25%"
+
+
 def _build_unified_block_row_data(
     view,
     line: DiffLine,
@@ -152,7 +164,7 @@ def _build_unified_block_row_data(
     static_rows = _unified_block_static_rows(view, line)
     cursor_side = (
         view._cursor_side_for_line(line)
-        if line.line_index == view.cursor_line
+        if view._diff_line_cursor_active(line.line_index)
         else None
     )
     spec = view._compute_selection_spec_for_line(line.line_index)
@@ -163,9 +175,11 @@ def _build_unified_block_row_data(
 
     for row in static_rows:
         annotations.append(row.annotation)
-        line_styles.append(row.line_style)
 
         has_cursor = cursor_side == row.side
+        line_styles.append(
+            _cursor_block_line_style(row.line_style) if has_cursor else row.line_style
+        )
         cursor_col = view.cursor_column if has_cursor else None
         text = view._get_line_text(line, row.side)
 
@@ -222,13 +236,28 @@ def _build_split_block_row_data(
     line: DiffLine,
 ) -> tuple[Content, Content | None, str, Content, Content | None, str]:
     static_row = _split_block_static_row(view, line)
+    cursor_side = (
+        view._cursor_side_for_line(line)
+        if view._diff_line_cursor_active(line.line_index)
+        else None
+    )
+    left_style = (
+        _cursor_block_line_style(static_row.left_style)
+        if cursor_side == "old"
+        else static_row.left_style
+    )
+    right_style = (
+        _cursor_block_line_style(static_row.right_style)
+        if cursor_side == "new"
+        else static_row.right_style
+    )
     return (
         static_row.left_annotation,
         _build_split_block_code_content(view, line, side="old"),
-        static_row.left_style,
+        left_style,
         static_row.right_annotation,
         _build_split_block_code_content(view, line, side="new"),
-        static_row.right_style,
+        right_style,
     )
 
 
@@ -468,7 +497,7 @@ def _refresh_non_block_line_content(view, line_idx: int) -> None:
 
     line = view._all_lines[line_idx]
     selection_spec = view._compute_selection_spec_for_line(line_idx)
-    has_cursor_line = line_idx == view.cursor_line
+    has_cursor_line = view._diff_line_cursor_active(line_idx)
 
     for code_widget in code_widgets:
         if code_widget.has_class("-placeholder"):

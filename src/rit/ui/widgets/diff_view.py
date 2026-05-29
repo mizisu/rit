@@ -15,7 +15,7 @@ from textual.content import Content
 from textual.message import Message
 from textual.reactive import reactive, var
 from textual.widget import Widget
-from textual.widgets import Input, Static
+from textual.widgets import Input, Static, TextArea
 
 from rit.ui.widgets.comment_editor import InlineCommentEditor
 
@@ -126,6 +126,7 @@ class DiffView(VerticalScroll):
     visual_anchor_column: var[int | None] = var(None)
     cursor_line: var[int] = var(0)
     cursor_column: var[int] = var(0)
+    _comment_cursor_index: var[int] = var(0)
 
     _diff: var[FileDiff | None] = var(None)
     _file: var[PRFile | None] = var(None)
@@ -219,14 +220,17 @@ class DiffView(VerticalScroll):
         self._comment_threads_by_line: dict[int, list[ReviewThread]] = {}
         self._comment_line_indices: list[int] = []
         self._comment_widgets_by_line: dict[int, list[Widget]] = {}
+        self._comment_layout_widgets_by_line: dict[int, list[Widget]] = {}
         self._comment_side_by_line: dict[int, Literal["old", "new", "auto"]] = {}
         self._pending_comment_drafts_by_line: dict[int, list[PendingReviewComment]] = {}
         self._pending_comment_widgets_by_line: dict[int, list[Widget]] = {}
+        self._pending_comment_layout_widgets_by_line: dict[int, list[Widget]] = {}
         self._inline_comment_editor_line_index: int | None = None
         self._inline_comment_editor_target: (
             tuple[str, int, Literal["LEFT", "RIGHT"]] | None
         ) = None
         self._inline_comment_editor_widget: InlineCommentEditor | None = None
+        self._inline_comment_editor_layout_widget: Widget | None = None
         self._inline_comment_editor_initial_body: str = ""
         self._pending_comment_jump: str | None = None  # "first" or "last"
 
@@ -335,6 +339,9 @@ class DiffView(VerticalScroll):
             return
 
         _cursor._clamp_cursor_column_to_current_row(self)
+        if self._comment_cursor_index != 0:
+            self._comment_cursor_index = 0
+            _comments.update_cursor_highlight(self, self.cursor_line, self.cursor_line)
 
         if not self.visual_mode:
             _cursor._scroll_to_cursor(self)
@@ -362,6 +369,7 @@ class DiffView(VerticalScroll):
             self.current_hunk_index = hunk_index
 
         _virtual._maybe_update_virtual_window(self, new_line)
+        self._comment_cursor_index = 0
         _comments.update_cursor_highlight(self, old_line, new_line)
 
         if not self.visual_mode:
@@ -457,6 +465,13 @@ class DiffView(VerticalScroll):
     )
 
     def on_key(self, event: events.Key) -> None:
+        if self._text_entry_has_focus():
+            if event.key == "escape" and self._search_input_has_focus():
+                self._close_search(clear_query=True)
+                event.stop()
+                event.prevent_default()
+            return
+
         if event.character and event.character in "123456789":
             self._cursor_ui.pending_count += event.character
             event.stop()
@@ -471,21 +486,34 @@ class DiffView(VerticalScroll):
         if event.key not in self._COUNT_MOTION_KEYS:
             self._cursor_ui.pending_count = ""
 
-        if event.key == "escape":
-            bar = self._search_bar_widget
-            if bar is not None and bar.display:
-                event.stop()
-                event.prevent_default()
-                bar.display = False
-                _search.clear_state(self)
-                _search._refresh_search_display(self)
-                self.focus()
-                return
         if event.key == "enter":
             if _comments.try_toggle_current(self):
                 event.stop()
                 event.prevent_default()
                 return
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if self._text_entry_has_focus():
+            return False
+        return super().check_action(action, parameters)
+
+    def _text_entry_has_focus(self) -> bool:
+        return isinstance(self.screen.focused, (Input, TextArea))
+
+    def _search_input_has_focus(self) -> bool:
+        inp = self._search_input_widget
+        return inp is not None and self.screen.focused is inp
+
+    def _close_search(self, *, clear_query: bool) -> None:
+        bar = self._search_bar_widget
+        if bar is None or not bar.display:
+            return
+        bar.display = False
+        if clear_query:
+            _search.clear_state(self)
+        _search._refresh_search_display(self)
+        self._update_status_line()
+        self.focus()
 
     # ------------------------------------------------------------------
     # Search handlers
@@ -511,6 +539,8 @@ class DiffView(VerticalScroll):
         else:
             _search.clear_state(self)
         _search._refresh_search_display(self)
+        if self._search_match_index >= 0:
+            _search.reveal_match(self, self._search_match_index)
         self._update_status_line()
 
     @on(Input.Submitted, "#diff-search-input")
@@ -586,6 +616,10 @@ class DiffView(VerticalScroll):
             return "auto"
         return self._cursor_side_for_line(line)
 
+    def _diff_line_cursor_active(self, line_index: int) -> bool:
+        """Return True when the diff-line cursor block should be shown."""
+        return line_index == self.cursor_line and self._comment_cursor_index == 0
+
     def inline_comment_target(
         self,
     ) -> tuple[str, int, Literal["LEFT", "RIGHT"]] | None:
@@ -636,11 +670,16 @@ class DiffView(VerticalScroll):
             initial_text=self._inline_comment_editor_initial_body,
             id="diff-inline-comment-editor",
         )
-        if before is not None:
-            container.mount(widget, before=before)
-        else:
-            container.mount(widget)
+        _, _, target_side = self._inline_comment_editor_target or ("", 0, "RIGHT")
+        layout_widget = _comments.mount_side_aware_widget(
+            self,
+            container,
+            widget,
+            side="old" if target_side == "LEFT" else "new",
+            before=before,
+        )
         self._inline_comment_editor_widget = widget
+        self._inline_comment_editor_layout_widget = layout_widget
 
     def _focus_inline_comment_editor(self) -> None:
         if self._inline_comment_editor_widget is not None:
@@ -681,6 +720,7 @@ class DiffView(VerticalScroll):
         self._inline_comment_editor_line_index = None
         self._inline_comment_editor_target = None
         self._inline_comment_editor_widget = None
+        self._inline_comment_editor_layout_widget = None
         self._inline_comment_editor_initial_body = ""
         _virtual._rebuild_virtual_layout(self)
         await self._render_diff()
@@ -945,6 +985,7 @@ class DiffView(VerticalScroll):
                 self._inline_comment_editor_line_index = None
                 self._inline_comment_editor_target = None
                 self._inline_comment_editor_widget = None
+                self._inline_comment_editor_layout_widget = None
                 self._inline_comment_editor_initial_body = ""
                 self._showing_full_file = False
                 self._saved_diff = None
@@ -999,6 +1040,7 @@ class DiffView(VerticalScroll):
             self.active_pane = "new"
             self.cursor_line = 0
             self.cursor_column = 0
+            self._comment_cursor_index = 0
 
             if self.store:
                 self._file = next(
@@ -1098,7 +1140,11 @@ class DiffView(VerticalScroll):
             if 0 <= self._search_match_index < total_matches
             else 0
         )
-        header.update(f"{header_text}  [dim]search {active_match}/{total_matches}[/]")
+        if total_matches == 0:
+            suffix = f'[$warning]search "{query}" no matches[/]'
+        else:
+            suffix = f'[dim]search "{query}" {active_match}/{total_matches}[/]'
+        header.update(f"{header_text}  {suffix}")
 
     # ------------------------------------------------------------------
     # Full-file toggle

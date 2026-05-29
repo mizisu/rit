@@ -14,7 +14,7 @@ from bisect import bisect_left, bisect_right
 from typing import TYPE_CHECKING, Literal
 
 from textual.app import ComposeResult
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Collapsible, Static
 
@@ -56,9 +56,11 @@ def clear_state(view: DiffView) -> None:
     view._comment_threads_by_line.clear()
     view._comment_line_indices.clear()
     view._comment_widgets_by_line.clear()
+    view._comment_layout_widgets_by_line.clear()
     view._comment_side_by_line.clear()
     view._pending_comment_drafts_by_line.clear()
     view._pending_comment_widgets_by_line.clear()
+    view._pending_comment_layout_widgets_by_line.clear()
 
 
 def build_comment_map(view: DiffView) -> None:
@@ -306,6 +308,22 @@ def _line_number_for_side(
 # ---------------------------------------------------------------------------
 
 
+def mount_side_aware_widget(
+    view: DiffView,
+    container: VerticalScroll,
+    widget: Widget,
+    *,
+    side: Literal["old", "new", "auto"],
+    before: Widget | None = None,
+) -> Widget:
+    layout_widget = _build_side_aware_layout(view, widget, side=side)
+    if before is not None:
+        container.mount(layout_widget, before=before)
+    else:
+        container.mount(layout_widget)
+    return layout_widget
+
+
 def mount_pending_drafts_for_line(
     view: DiffView,
     container: VerticalScroll,
@@ -318,15 +336,21 @@ def mount_pending_drafts_for_line(
         return
 
     mounted: list[Widget] = []
+    layout_widgets: list[Widget] = []
     for index, draft in enumerate(drafts):
         widget = _build_pending_draft_widget(draft, line_index=line_index, index=index)
-        if before is not None:
-            container.mount(widget, before=before)
-        else:
-            container.mount(widget)
+        layout_widget = mount_side_aware_widget(
+            view,
+            container,
+            widget,
+            side=draft.anchor_side,
+            before=before,
+        )
         mounted.append(widget)
+        layout_widgets.append(layout_widget)
 
     view._pending_comment_widgets_by_line[line_index] = mounted
+    view._pending_comment_layout_widgets_by_line[line_index] = layout_widgets
 
 
 def mount_comments_for_line(
@@ -341,15 +365,106 @@ def mount_comments_for_line(
         return
 
     mounted: list[Widget] = []
+    layout_widgets: list[Widget] = []
     for thread in threads:
         widget = _build_inline_thread_widget(thread)
-        if before is not None:
-            container.mount(widget, before=before)
-        else:
-            container.mount(widget)
+        root = thread.root_comment
+        side = _comment_target_side(root, thread=thread) if root is not None else "auto"
+        layout_widget = mount_side_aware_widget(
+            view,
+            container,
+            widget,
+            side=side,
+            before=before,
+        )
         mounted.append(widget)
+        layout_widgets.append(layout_widget)
 
     view._comment_widgets_by_line[line_index] = mounted
+    view._comment_layout_widgets_by_line[line_index] = layout_widgets
+
+
+def _build_side_aware_layout(
+    view: DiffView,
+    widget: Widget,
+    *,
+    side: Literal["old", "new", "auto"],
+) -> Widget:
+    widget.styles.width = "1fr"
+    if view.split:
+        return _build_split_comment_layout(view, widget, side=side)
+    return _build_unified_comment_layout(view, widget)
+
+
+def _build_unified_comment_layout(view: DiffView, widget: Widget) -> Horizontal:
+    return Horizontal(
+        _spacer(view._unified_prefix_width_for_layout(), "diff-comment-gutter"),
+        widget,
+        classes="diff-comment-row diff-comment-row-unified",
+    )
+
+
+def _build_split_comment_layout(
+    view: DiffView,
+    widget: Widget,
+    *,
+    side: Literal["old", "new", "auto"],
+) -> Horizontal:
+    if side == "old":
+        target_side: Literal["old", "new"] = "old"
+    else:
+        target_side = "new"
+    old_pane = _split_comment_pane(
+        view,
+        widget if target_side == "old" else None,
+        side="old",
+    )
+    new_pane = _split_comment_pane(
+        view,
+        widget if target_side == "new" else None,
+        side="new",
+    )
+    return Horizontal(
+        old_pane,
+        new_pane,
+        classes=f"diff-comment-row diff-comment-row-split split-container -{target_side}-side",
+    )
+
+
+def _split_comment_pane(
+    view: DiffView,
+    widget: Widget | None,
+    *,
+    side: Literal["old", "new"],
+) -> Horizontal:
+    pane_classes = f"split-pane diff-comment-pane -{side}-side"
+    if widget is None:
+        return Horizontal(classes=f"{pane_classes} diff-comment-empty-pane")
+    return Horizontal(
+        _spacer(_split_prefix_width_for_layout(view, side), "diff-comment-gutter"),
+        widget,
+        classes=pane_classes,
+    )
+
+
+def _split_prefix_width_for_layout(
+    view: DiffView,
+    side: Literal["old", "new"],
+) -> int:
+    if not view.show_line_numbers:
+        return 2
+    line_width = (
+        view._old_line_number_width()
+        if side == "old"
+        else view._new_line_number_width()
+    )
+    return line_width + 2
+
+
+def _spacer(width: int, classes: str) -> Static:
+    spacer = Static("", classes=classes)
+    spacer.styles.width = max(0, width)
+    return spacer
 
 
 # ---------------------------------------------------------------------------
@@ -357,25 +472,81 @@ def mount_comments_for_line(
 # ---------------------------------------------------------------------------
 
 
+def comment_widgets_in_order(view: DiffView, line_index: int) -> list[Widget]:
+    """Return ordered (drafts first, then threads) widgets attached to a line."""
+    widgets: list[Widget] = list(
+        view._pending_comment_widgets_by_line.get(line_index, [])
+    )
+    widgets.extend(view._comment_widgets_by_line.get(line_index, []))
+    return widgets
+
+
+def total_comments_at_line(view: DiffView, line_index: int) -> int:
+    return len(view._pending_comment_widgets_by_line.get(line_index, [])) + len(
+        view._comment_widgets_by_line.get(line_index, [])
+    )
+
+
+def active_comment_widget(view: DiffView, line_index: int) -> Widget | None:
+    """Return the comment widget currently selected via _comment_cursor_index."""
+    index = view._comment_cursor_index
+    if index <= 0:
+        return None
+    widgets = comment_widgets_in_order(view, line_index)
+    if 1 <= index <= len(widgets):
+        return widgets[index - 1]
+    return None
+
+
+def active_thread(view: DiffView, line_index: int) -> ReviewThread | None:
+    index = view._comment_cursor_index
+    if index <= 0:
+        return None
+    drafts = view._pending_comment_drafts_by_line.get(line_index, [])
+    threads = view._comment_threads_by_line.get(line_index, [])
+    thread_index = index - 1 - len(drafts)
+    if 0 <= thread_index < len(threads):
+        return threads[thread_index]
+    return None
+
+
+def active_pending_draft(view: DiffView, line_index: int) -> PendingReviewComment | None:
+    index = view._comment_cursor_index
+    if index <= 0:
+        return None
+    drafts = view._pending_comment_drafts_by_line.get(line_index, [])
+    if 1 <= index <= len(drafts):
+        return drafts[index - 1]
+    return None
+
+
+def _clear_cursor_line_class(view: DiffView, line_index: int) -> None:
+    for w in comment_widgets_in_order(view, line_index):
+        w.remove_class("--cursor-line")
+
+
 def update_cursor_highlight(view: DiffView, old_line: int, new_line: int) -> None:
+    """Refresh `--cursor-line` highlight based on current `_comment_cursor_index`.
+
+    When the cursor enters a diff line, no comment is highlighted (index = 0).
+    Pressing j/k advances the index to step through pending drafts then threads.
+    """
     if old_line != new_line:
-        for w in view._comment_widgets_by_line.get(old_line, []):
-            w.remove_class("--cursor-line")
-        for w in view._pending_comment_widgets_by_line.get(old_line, []):
-            w.remove_class("--cursor-line")
-    for w in view._comment_widgets_by_line.get(new_line, []):
-        w.add_class("--cursor-line")
-    for w in view._pending_comment_widgets_by_line.get(new_line, []):
-        w.add_class("--cursor-line")
+        _clear_cursor_line_class(view, old_line)
+    _clear_cursor_line_class(view, new_line)
+
+    active = active_comment_widget(view, new_line)
+    if active is not None:
+        active.add_class("--cursor-line")
 
 
 def try_toggle_current(view: DiffView) -> bool:
-    widgets = view._comment_widgets_by_line.get(view.cursor_line)
-    if not widgets:
+    """Toggle the currently selected comment (only when one is selected)."""
+    target = active_comment_widget(view, view.cursor_line)
+    if target is None:
         return False
-    w = widgets[0]
-    if isinstance(w, Collapsible):
-        w.collapsed = not w.collapsed
+    if isinstance(target, Collapsible):
+        target.collapsed = not target.collapsed
         return True
     return False
 
@@ -445,17 +616,19 @@ def _jump_to_comment_line(view: DiffView, line_index: int) -> None:
 
 
 async def toggle_resolve(view: DiffView) -> None:
-    threads = view._comment_threads_by_line.get(view.cursor_line)
-    if not threads:
-        view.post_message(
-            Flash("No comment thread on this line", style="warning", duration=2.0)
-        )
-        return
+    thread = active_thread(view, view.cursor_line)
+    if thread is None:
+        threads = view._comment_threads_by_line.get(view.cursor_line)
+        if not threads:
+            view.post_message(
+                Flash("No comment thread on this line", style="warning", duration=2.0)
+            )
+            return
+        thread = threads[0]
 
     if not view.store:
         return
 
-    thread = threads[0]
     thread_id = thread.id
     root_id = thread.root_comment_id
     new_resolved = not thread.is_resolved
@@ -521,7 +694,7 @@ class PendingDraftItem(Vertical):
     DEFAULT_CSS = """
     PendingDraftItem {
         height: auto;
-        margin-left: 2;
+        margin-left: 0;
         border: round $warning;
         background: $surface;
         padding: 0 1;
@@ -589,10 +762,10 @@ def _build_inline_thread_widget(thread: ReviewThread) -> ReviewThreadItem:
         path=thread.path,
         line=line_no,
         comments=thread.comments,
-        diff_hunk=root.diff_hunk if root else "",
+        diff_hunk="",
         is_resolved=thread.is_resolved,
         compact=False,
-        show_diff_hunk=bool(root and root.diff_hunk),
+        show_diff_hunk=False,
         show_path_header=False,
         collapsed=collapsed,
         classes=classes,

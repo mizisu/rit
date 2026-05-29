@@ -61,6 +61,8 @@ def build_diff_geometry(
     offset = 0
     for hunk in diff.hunks:
         hunk_header_top_offsets.append(offset)
+        if hunk.starts_file:
+            offset += 1
         offset += 1
         for line in hunk.lines:
             line_index = line.line_index

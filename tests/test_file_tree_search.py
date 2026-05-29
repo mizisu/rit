@@ -244,6 +244,50 @@ async def test_escape_cancels_search_and_restores_list(
 
 
 @pytest.mark.asyncio
+async def test_j_and_k_type_in_search_instead_of_moving_tree(
+    sample_files: list[PRFile],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """j/k should belong to the search input while file filtering is active."""
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FileTree(id="file-tree-sidebar")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_tree = app.query_one(FileTree)
+        file_tree.refresh_files(sample_files)
+        await pilot.pause()
+
+        tree = file_tree.query_one("#file-tree", Tree)
+        tree.focus()
+        await pilot.pause()
+
+        await pilot.press("/")
+        await pilot.pause()
+
+        calls: list[str] = []
+        monkeypatch.setattr(
+            file_tree,
+            "action_cursor_down",
+            lambda: calls.append("down"),
+        )
+        monkeypatch.setattr(
+            file_tree,
+            "action_cursor_up",
+            lambda: calls.append("up"),
+        )
+
+        await pilot.press("j", "k")
+        await pilot.pause()
+
+        search = file_tree.query_one("#file-search", Input)
+        assert search.value == "jk"
+        assert calls == []
+
+
+@pytest.mark.asyncio
 async def test_y_copies_basename_of_current_file(sample_files: list[PRFile]) -> None:
     """Pressing `y` should copy the basename of the current file."""
 

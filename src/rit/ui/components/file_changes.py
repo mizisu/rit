@@ -4,19 +4,22 @@ from typing import TYPE_CHECKING, Literal, cast
 
 from textual import getters, on
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal
+from textual.reactive import reactive
 from textual.widgets import Static
 
-from textual.reactive import reactive
-from textual.binding import Binding
-
-from rit.core.types import FileDiff
+from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.state.store import PRStore
 from rit.ui.widgets import DiffView, FileTree
 from rit.ui.widgets.resize_handle import ResizeHandle
 
 if TYPE_CHECKING:
     pass
+
+
+COMBINED_DIFF_FILENAME = "All files"
+COMBINED_FILES_THRESHOLD = 2
 
 
 class GhostHandle(Static):
@@ -69,8 +72,10 @@ class FileChanges(Horizontal):
         self.store = store
         self._drag_delta = 0
         self._is_dragging = False
-        self._queued_file_render: tuple[str, FileDiff, bool, bool] | None = None
+        self._queued_file_render: tuple[str, FileDiff | None, bool, bool] | None = None
         self._file_render_worker_active = False
+        self._combined_file_line_starts: dict[str, int] = {}
+        self._showing_combined_files = False
 
     def compose(self) -> ComposeResult:
         yield FileTree(store=self.store, id="file-tree-sidebar")
@@ -127,16 +132,20 @@ class FileChanges(Horizontal):
 
         state = self.store.state
         if state.files and not state.selected_file:
+            if self._queue_combined_files_render():
+                first_file = state.files[0].filename
+                self.store.state.selected_file = first_file
+                self.file_tree.select_file(first_file, emit_message=False)
+                return
+
             filename = state.files[0].filename
             self.store.select_file(filename)
-            diff = self.store.get_file_diff(filename)
-            if diff:
-                self._queue_file_render_request(
-                    filename,
-                    diff,
-                    focus_diff=False,
-                    sync_tree_selection=True,
-                )
+            self._queue_file_render_request(
+                filename,
+                None,
+                focus_diff=False,
+                sync_tree_selection=True,
+            )
 
     def select_next_file(self) -> None:
         self.file_tree.next_item()
@@ -150,10 +159,118 @@ class FileChanges(Horizontal):
     def prev_hunk(self) -> None:
         self.diff_view.prev_hunk()
 
+    def _queue_combined_files_render(self) -> bool:
+        combined = self._build_combined_files_diff()
+        if combined is None:
+            return False
+
+        self._showing_combined_files = True
+        self._queue_file_render_request(
+            COMBINED_DIFF_FILENAME,
+            combined,
+            focus_diff=False,
+            sync_tree_selection=False,
+        )
+        return True
+
+    def _build_combined_files_diff(self) -> FileDiff | None:
+        state = self.store.state
+        if len(state.files) < COMBINED_FILES_THRESHOLD:
+            return None
+        if not all(file.filename in state.file_diffs for file in state.files):
+            return None
+
+        hunks: list[DiffHunk] = []
+        self._combined_file_line_starts = {}
+        next_line_index = 0
+        is_fully_refined = True
+
+        for file in state.files:
+            diff = state.file_diffs[file.filename]
+            is_fully_refined = is_fully_refined and diff.is_fully_refined
+            file_start_recorded = False
+
+            if not diff.hunks:
+                self._combined_file_line_starts[file.filename] = next_line_index
+                hunks.append(
+                    DiffHunk(
+                        old_start=0,
+                        old_count=0,
+                        new_start=0,
+                        new_count=0,
+                        header="no textual changes",
+                        lines=[
+                            DiffLine(
+                                old_line_no=None,
+                                new_line_no=None,
+                                old_content="",
+                                new_content="No textual changes",
+                            )
+                        ],
+                        starts_file=True,
+                        file_path=file.filename,
+                        file_old_path=file.previous_filename,
+                        file_status=file.status,
+                        file_additions=file.additions,
+                        file_deletions=file.deletions,
+                    )
+                )
+                next_line_index += 1
+                continue
+
+            for hunk in diff.hunks:
+                starts_file = not file_start_recorded
+                if starts_file:
+                    self._combined_file_line_starts[file.filename] = next_line_index
+                    file_start_recorded = True
+
+                hunks.append(
+                    DiffHunk(
+                        old_start=hunk.old_start,
+                        old_count=hunk.old_count,
+                        new_start=hunk.new_start,
+                        new_count=hunk.new_count,
+                        header=hunk.header,
+                        lines=hunk.lines,
+                        starts_file=starts_file,
+                        file_path=file.filename if starts_file else None,
+                        file_old_path=file.previous_filename if starts_file else None,
+                        file_status=file.status,
+                        file_additions=file.additions,
+                        file_deletions=file.deletions,
+                    )
+                )
+                next_line_index += len(hunk.lines)
+
+        return FileDiff(
+            filename=COMBINED_DIFF_FILENAME,
+            hunks=hunks,
+            is_fully_refined=is_fully_refined,
+        )
+
+    def _jump_to_combined_file(self, filename: str, *, focus_diff: bool) -> bool:
+        if not self._showing_combined_files:
+            return False
+
+        line_index = self._combined_file_line_starts.get(filename)
+        if line_index is None:
+            return False
+
+        self.store.state.selected_file = filename
+        self.diff_view.cursor_line = line_index
+        if 0 <= line_index < len(self.diff_view._line_top_offsets):
+            self.diff_view.scroll_to(
+                y=max(0, self.diff_view._line_top_offsets[line_index] - 2),
+                animate=False,
+            )
+        if focus_diff:
+            self.diff_view.focus()
+        return True
+
     def _queue_file_render_request(
         self,
         filename: str,
-        diff: FileDiff,
+        diff: FileDiff | None,
         *,
         focus_diff: bool,
         sync_tree_selection: bool,
@@ -186,6 +303,14 @@ class FileChanges(Horizontal):
 
             self._queued_file_render = None
             filename, diff, focus_diff, sync_tree_selection = request
+            self._showing_combined_files = filename == COMBINED_DIFF_FILENAME
+            if diff is None:
+                diff = await self.store.get_file_diff_async(filename)
+            if diff is None:
+                continue
+            if self._queued_file_render is not None:
+                continue
+
             await self.diff_view.show_diff(filename, diff)
 
             if sync_tree_selection:
@@ -198,33 +323,39 @@ class FileChanges(Horizontal):
         """Handle file selection from tree (Enter — focus moves to diff)."""
         event.stop()
 
-        diff = self.store.get_file_diff(event.filename)
-        if diff:
-            self._queue_file_render_request(
-                event.filename,
-                diff,
-                focus_diff=True,
-                sync_tree_selection=False,
-            )
+        if self._jump_to_combined_file(event.filename, focus_diff=True):
+            return
+
+        self._queue_file_render_request(
+            event.filename,
+            None,
+            focus_diff=True,
+            sync_tree_selection=False,
+        )
 
     @on(FileTree.FilePreviewed)
     def on_file_tree_file_previewed(self, event: FileTree.FilePreviewed) -> None:
         """Handle file preview from tree (Space — focus stays on tree)."""
         event.stop()
 
-        diff = self.store.get_file_diff(event.filename)
-        if diff:
-            self._queue_file_render_request(
-                event.filename,
-                diff,
-                focus_diff=False,
-                sync_tree_selection=False,
-            )
+        if self._jump_to_combined_file(event.filename, focus_diff=False):
+            return
+
+        self._queue_file_render_request(
+            event.filename,
+            None,
+            focus_diff=False,
+            sync_tree_selection=False,
+        )
 
     @on(PRStore.FileSelected)
     def on_store_file_selected(self, event: PRStore.FileSelected) -> None:
         """Handle file selection from store (external selection)."""
         event.stop()
+        if self._jump_to_combined_file(event.filename, focus_diff=False):
+            self.file_tree.select_file(event.filename, emit_message=False)
+            return
+
         self._queue_file_render_request(
             event.filename,
             event.diff,
