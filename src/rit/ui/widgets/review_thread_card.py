@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import re
-from typing import Literal
 
 from rich.text import Text
 from textual.containers import Vertical
 from textual.widget import Widget
 from textual.widgets import Collapsible, Static
 
+from rit.core.datetime_utils import datetime_sort_key, is_min_datetime
 from rit.state.models import PRComment
-from rit.ui.collapsible_markdown import mount_markdown_with_details
 from rit.ui.icons import get_file_icon
+from rit.ui.widgets.comment_card import CommentCard
 
 
 class ReviewThreadCard(Vertical):
@@ -30,102 +29,12 @@ class ReviewThreadCard(Vertical):
     ReviewThreadCard .diff-hunk {
         background: #181926;
         padding: 0 1;
+        margin-bottom: 1;
         color: #6e738d;
         overflow: hidden;
         height: auto;
     }
 
-    ReviewThreadCard .thread-comment {
-        padding: 0 1;
-        background: #1e2030;
-        height: auto;
-    }
-
-    ReviewThreadCard .thread-reply {
-        padding: 0 1 0 3;
-        background: #24273a;
-        height: auto;
-    }
-
-    ReviewThreadCard .comment-header {
-        height: 1;
-        margin: 0;
-    }
-
-    ReviewThreadCard .comment-content {
-        height: auto;
-    }
-
-    ReviewThreadCard .comment-content Markdown {
-        margin: 0;
-        padding: 0;
-    }
-
-    ReviewThreadCard .comment-content MarkdownParagraph {
-        margin: 0;
-    }
-
-    ReviewThreadCard .comment-content MarkdownFence {
-        margin: 0;
-        padding: 0 1;
-    }
-
-    ReviewThreadCard .comment-content MarkdownBulletList {
-        margin: 0;
-    }
-
-    ReviewThreadCard .comment-content MarkdownOrderedList {
-        margin: 0;
-    }
-
-    ReviewThreadCard .comment-content MarkdownBlockQuote {
-        margin: 0;
-    }
-
-    ReviewThreadCard .comment-content MarkdownH1,
-    ReviewThreadCard .comment-content MarkdownH2,
-    ReviewThreadCard .comment-content MarkdownH3 {
-        margin: 0;
-    }
-
-    ReviewThreadCard .comment-content MarkdownH1 {
-        content-align: left middle;
-    }
-
-    /* Nested markdown <details> style (shared across timeline/diff) */
-    ReviewThreadCard Collapsible {
-        height: auto;
-        margin: 0;
-        background: #181926;
-        border: solid #363a4f;
-        padding: 0;
-    }
-
-    ReviewThreadCard CollapsibleTitle {
-        color: #8aadf4;
-        padding: 0 1;
-    }
-
-    ReviewThreadCard CollapsibleTitle:hover {
-        background: #363a4f;
-    }
-
-    ReviewThreadCard Collapsible > Contents {
-        height: auto;
-        padding: 0 1;
-    }
-
-    ReviewThreadCard .details-content {
-        height: auto;
-    }
-
-    ReviewThreadCard .inline-comment-preview {
-        color: $foreground;
-        height: auto;
-        margin-left: 1;
-        text-wrap: nowrap;
-        overflow: hidden;
-    }
     """
 
     def __init__(
@@ -134,25 +43,26 @@ class ReviewThreadCard(Vertical):
         *,
         diff_hunk: str = "",
         compact: bool = False,
-        variant: Literal["timeline", "inline"] = "timeline",
         show_diff_hunk: bool = True,
         preview_max_lines: int = 2,
         preview_max_chars: int = 120,
         markdown_base_url: str | None = None,
+        body_mount_delay: float = 0.0,
         id: str | None = None,
         classes: str | None = None,
     ) -> None:
         super().__init__(id=id, classes=classes)
         self.styles.height = "auto"
-        self._comments = sorted(comments, key=lambda comment: comment.created_at)
+        self._comments = sorted(
+            comments, key=lambda comment: datetime_sort_key(comment.created_at)
+        )
         self._diff_hunk = diff_hunk
         self._compact = compact
-        self._variant = variant
         self._show_diff_hunk = show_diff_hunk
         self._preview_max_lines = preview_max_lines
         self._preview_max_chars = preview_max_chars
         self._markdown_base_url = markdown_base_url
-        self._pending_markdown_mounts: list[tuple[Vertical, str]] = []
+        self._body_mount_delay = body_mount_delay
 
     def on_mount(self) -> None:
         if self._show_diff_hunk and self._diff_hunk:
@@ -165,45 +75,19 @@ class ReviewThreadCard(Vertical):
             comment_box = self._build_comment_box(comment, is_reply=is_reply)
             self.mount(comment_box)
 
-        if self._pending_markdown_mounts:
-            self.call_after_refresh(self._mount_pending_markdown)
-
-    def _build_comment_box(self, comment: PRComment, *, is_reply: bool) -> Vertical:
+    def _build_comment_box(self, comment: PRComment, *, is_reply: bool) -> CommentCard:
         box_class = self._reply_class if is_reply else self._root_class
 
-        if self._compact:
-            preview = self._build_preview(comment.body or "")
-            return Vertical(
-                Static(
-                    self._format_comment_meta(comment, is_reply=is_reply),
-                    classes=self._meta_class,
-                ),
-                Static(preview, classes="inline-comment-preview", markup=False),
-                classes=box_class,
-            )
-
-        content_container = Vertical(classes=self._content_class)
-        self._pending_markdown_mounts.append(
-            (content_container, comment.body or "*No content*")
-        )
-
-        return Vertical(
-            Static(
-                self._format_comment_meta(comment, is_reply=is_reply),
-                classes=self._meta_class,
-            ),
-            content_container,
+        return CommentCard(
+            self._format_comment_meta(comment, is_reply=is_reply),
+            comment.body or "*No content*",
+            compact=self._compact,
+            preview_max_lines=self._preview_max_lines,
+            preview_max_chars=self._preview_max_chars,
+            markdown_base_url=self._markdown_base_url,
+            body_mount_delay=self._body_mount_delay,
             classes=box_class,
         )
-
-    def _mount_pending_markdown(self) -> None:
-        for container, body in self._pending_markdown_mounts:
-            mount_markdown_with_details(
-                container,
-                body,
-                base_url=self._markdown_base_url,
-            )
-        self._pending_markdown_mounts.clear()
 
     @property
     def _root_class(self) -> str:
@@ -213,61 +97,12 @@ class ReviewThreadCard(Vertical):
     def _reply_class(self) -> str:
         return "thread-reply"
 
-    @property
-    def _meta_class(self) -> str:
-        return "comment-header"
-
-    @property
-    def _content_class(self) -> str:
-        return "comment-content"
-
     def _format_comment_meta(self, comment: PRComment, *, is_reply: bool) -> str:
         author = comment.user.login if comment.user else "unknown"
         formatted = self._format_relative_time(comment.created_at)
         if is_reply:
             return f"[#6e738d]↳[/] [bold]{author}[/] {formatted}"
         return f"[bold]{author}[/] {formatted}"
-
-    def _build_preview(self, body: str) -> str:
-        cleaned_lines = [
-            self._sanitize_preview_line(line) for line in body.splitlines()
-        ]
-        cleaned_lines = [line for line in cleaned_lines if line]
-        if not cleaned_lines:
-            return "(No content)"
-
-        preview = " ".join(cleaned_lines[: self._preview_max_lines])
-
-        truncated = False
-        if len(cleaned_lines) > self._preview_max_lines:
-            truncated = True
-
-        if len(preview) > self._preview_max_chars:
-            preview = preview[: self._preview_max_chars].rstrip()
-            truncated = True
-
-        if truncated and not preview.endswith("…"):
-            preview += " …"
-
-        return preview
-
-    @staticmethod
-    def _sanitize_preview_line(line: str) -> str:
-        stripped = line.strip()
-        if not stripped:
-            return ""
-
-        # Remove HTML-like tags such as <details>/<summary>.
-        stripped = re.sub(r"<[^>]+>", " ", stripped)
-
-        # Remove common markdown markers.
-        stripped = stripped.replace("```", " ").replace("`", "")
-        stripped = stripped.replace("**", "").replace("__", "")
-        stripped = stripped.lstrip("-*># ")
-
-        # Collapse whitespace
-        stripped = " ".join(stripped.split())
-        return stripped
 
     @staticmethod
     def _render_diff_hunk(diff_hunk: str) -> Text:
@@ -289,12 +124,11 @@ class ReviewThreadCard(Vertical):
 
     @staticmethod
     def _format_relative_time(dt: datetime) -> str:
-        if dt == datetime.min:
+        if is_min_datetime(dt):
             return ""
 
         now = datetime.now(timezone.utc)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+        dt = datetime_sort_key(dt)
 
         diff = now - dt
         seconds = diff.total_seconds()
@@ -318,23 +152,24 @@ class ReviewThreadItem(Collapsible):
 
     ReviewThreadItem.--thread {
         height: auto;
-        background: #181926;
+        background: #1e2030;
         border: solid #363a4f;
         padding: 0;
     }
 
     ReviewThreadItem.--thread > Contents {
         height: auto;
-        padding: 0;
+        padding: 1;
     }
 
     ReviewThreadItem.--thread CollapsibleTitle {
+        background: #1e2030;
         color: #8aadf4;
         padding: 0 1;
     }
 
     ReviewThreadItem.--thread CollapsibleTitle:hover {
-        background: #363a4f;
+        background: #24273a;
     }
 
     ReviewThreadItem.--thread.--resolved {
@@ -342,6 +177,7 @@ class ReviewThreadItem(Collapsible):
     }
 
     ReviewThreadItem.--thread.--resolved CollapsibleTitle {
+        background: #1e2030;
         color: #a6da95;
     }
 
@@ -351,14 +187,15 @@ class ReviewThreadItem(Collapsible):
     }
 
     ReviewThreadItem .thread-header {
-        background: #363a4f;
+        background: #24273a;
         padding: 0 1;
         color: #8aadf4;
         height: auto;
     }
 
     ReviewThreadItem .thread-resolved .thread-header {
-        background: #2d4f3c;
+        background: #1e2030;
+        color: #a6da95;
     }
 
     /* Inline DiffView variant (activated by --inline class) */
@@ -367,18 +204,33 @@ class ReviewThreadItem(Collapsible):
         width: 1fr;
         margin: 0;
         padding: 0;
-        border-top: none;
-        border-left: blank;
+        border: solid #363a4f;
         background: #1e2030;
+    }
+
+    ReviewThreadItem.--inline CollapsibleTitle {
+        width: 1fr;
+        background: #1e2030;
+    }
+
+    ReviewThreadItem.--inline > Contents {
+        height: auto;
+        padding: 0;
     }
 
     ReviewThreadItem.--inline.--cursor-line {
         border-left: thick #8aadf4;
+    }
+
+    ReviewThreadItem.--inline.--cursor-line CollapsibleTitle {
         background: #24273a;
     }
 
     ReviewThreadItem.--inline.--resolved.--cursor-line {
         border-left: thick #a6da95;
+    }
+
+    ReviewThreadItem.--inline.--resolved.--cursor-line CollapsibleTitle {
         background: #1e2030;
     }
     """
@@ -397,6 +249,7 @@ class ReviewThreadItem(Collapsible):
         show_path_header: bool = True,
         collapsed: bool = False,
         markdown_base_url: str | None = None,
+        body_mount_delay: float = 0.0,
         classes: str | None = None,
         id: str | None = None,
     ) -> None:
@@ -421,9 +274,9 @@ class ReviewThreadItem(Collapsible):
                 comments=comments,
                 diff_hunk=diff_hunk,
                 compact=compact,
-                variant="timeline",
                 show_diff_hunk=show_diff_hunk,
                 markdown_base_url=markdown_base_url,
+                body_mount_delay=body_mount_delay,
             )
         )
 
@@ -447,9 +300,11 @@ class ReviewThreadItem(Collapsible):
 
         if is_resolved:
             self.add_class("--resolved")
+            self.collapsed = True
             self._thread_container.add_class("thread-resolved")
         else:
             self.remove_class("--resolved")
+            self.collapsed = False
             self._thread_container.remove_class("thread-resolved")
 
         if self._header_widget is not None:

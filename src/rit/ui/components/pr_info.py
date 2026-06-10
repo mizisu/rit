@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from textual import events, on
 from textual.app import ComposeResult
@@ -102,6 +103,10 @@ class PRInfo(Container):
     def refresh_comments(self) -> None:
         timeline = self.query_one(PRTimeline)
         timeline.refresh_timeline()
+
+    def refresh_thread_metadata(self) -> None:
+        timeline = self.query_one(PRTimeline)
+        timeline.refresh_thread_metadata()
 
     def cancel_comment_refresh(self) -> bool:
         return self.query_one(PRTimeline).cancel_refresh()
@@ -256,6 +261,11 @@ class PRInfo(Container):
 
     def get_current_thread_info(self) -> tuple[str, int, bool] | None:
         return self.query_one(PRTimeline).get_current_thread_info()
+
+    def get_current_thread_location(
+        self,
+    ) -> tuple[str, int, Literal["LEFT", "RIGHT"]] | None:
+        return self.query_one(PRTimeline).get_current_thread_location()
 
     async def toggle_resolve(self) -> tuple[bool, bool]:
         return await self.query_one(PRTimeline).toggle_resolve()

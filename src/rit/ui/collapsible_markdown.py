@@ -312,6 +312,13 @@ class _BaseDetailsCollapsible(Collapsible):
         if self._content_loaded:
             return
 
+        if not self.is_attached or self._closing or self._pruning:
+            return
+
+        if not self._inner_container.is_attached:
+            self.call_after_refresh(self._load_content)
+            return
+
         self._content_loaded = True
         mount_markdown_with_details(
             self._inner_container,

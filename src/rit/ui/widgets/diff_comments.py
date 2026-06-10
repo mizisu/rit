@@ -13,8 +13,7 @@ from __future__ import annotations
 from bisect import bisect_left, bisect_right
 from typing import TYPE_CHECKING, Literal
 
-from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Collapsible, Static
 
@@ -23,6 +22,7 @@ from rit.core.types import DiffHunk, DiffLine
 from rit.state.models import PendingReviewComment, PRComment, ReviewThread
 from rit.ui.icons import get_file_icon
 from rit.ui.messages import Flash
+from rit.ui.widgets.comment_card import CommentCard
 from rit.ui.widgets.review_thread_card import ReviewThreadItem
 
 if TYPE_CHECKING:
@@ -69,16 +69,13 @@ def build_comment_map(view: DiffView) -> None:
     if not view.store or not view.current_file:
         return
 
-    get_pending_file_comments = getattr(view.store, "get_pending_file_comments", None)
-    if callable(get_pending_file_comments):
-        drafts = get_pending_file_comments(view.current_file)
-        if isinstance(drafts, list):
-            for draft in drafts:
-                line_index = _resolve_pending_line_index(view, draft)
-                if line_index is not None:
-                    view._pending_comment_drafts_by_line.setdefault(
-                        line_index, []
-                    ).append(draft)
+    file_paths = _file_paths_for_current_diff(view)
+    for draft in _pending_comments_for_current_diff(view, file_paths):
+        line_index = _resolve_pending_line_index(view, draft)
+        if line_index is not None:
+            view._pending_comment_drafts_by_line.setdefault(line_index, []).append(
+                draft
+            )
 
     threads = view.store.state.review_threads
     if not threads:
@@ -86,7 +83,7 @@ def build_comment_map(view: DiffView) -> None:
         return
 
     for thread in threads:
-        if thread.path != view.current_file:
+        if thread.path not in file_paths:
             continue
         root = thread.root_comment
         if root is None:
@@ -109,6 +106,30 @@ def build_comment_map(view: DiffView) -> None:
     )
 
 
+def _file_paths_for_current_diff(view: DiffView) -> set[str]:
+    paths = {line.file_path for line in view._all_lines if line.file_path}
+    if paths:
+        return paths
+    return {view.current_file} if view.current_file else set()
+
+
+def _pending_comments_for_current_diff(
+    view: DiffView,
+    file_paths: set[str],
+) -> list[PendingReviewComment]:
+    get_pending_file_comments = getattr(view.store, "get_pending_file_comments", None)
+    if callable(get_pending_file_comments) and len(file_paths) == 1:
+        drafts = get_pending_file_comments(next(iter(file_paths)))
+        if isinstance(drafts, list):
+            return drafts
+
+    state = getattr(view.store, "state", None)
+    drafts = getattr(state, "pending_review_comments", [])
+    if not isinstance(drafts, list):
+        return []
+    return [draft for draft in drafts if draft.path in file_paths]
+
+
 def _comment_target_side(
     comment: PRComment,
     *,
@@ -128,20 +149,34 @@ def _resolve_line_index(
     target_side = _comment_target_side(comment, thread=thread)
     old_line = _old_anchor_line(comment, thread=thread)
     new_line = _new_anchor_line(comment, thread=thread)
+    file_old_map = getattr(view, "_line_index_by_file_old_number", {})
+    file_new_map = getattr(view, "_line_index_by_file_new_number", {})
 
     if target_side != "new" and old_line is not None:
+        idx = file_old_map.get((comment.path, old_line))
+        if idx is not None:
+            return idx
         idx = view._line_index_by_old_number.get(old_line)
         if idx is not None:
             return idx
     if target_side != "old" and new_line is not None:
+        idx = file_new_map.get((comment.path, new_line))
+        if idx is not None:
+            return idx
         idx = view._line_index_by_new_number.get(new_line)
         if idx is not None:
             return idx
     if target_side == "new" and old_line is not None:
+        idx = file_old_map.get((comment.path, old_line))
+        if idx is not None:
+            return idx
         idx = view._line_index_by_old_number.get(old_line)
         if idx is not None:
             return idx
     if target_side == "old" and new_line is not None:
+        idx = file_new_map.get((comment.path, new_line))
+        if idx is not None:
+            return idx
         idx = view._line_index_by_new_number.get(new_line)
         if idx is not None:
             return idx
@@ -199,8 +234,16 @@ def _resolve_pending_line_index(
     view: DiffView,
     comment: PendingReviewComment,
 ) -> int | None:
+    file_old_map = getattr(view, "_line_index_by_file_old_number", {})
+    file_new_map = getattr(view, "_line_index_by_file_new_number", {})
     if comment.side == "LEFT":
+        idx = file_old_map.get((comment.path, comment.line))
+        if idx is not None:
+            return idx
         return view._line_index_by_old_number.get(comment.line)
+    idx = file_new_map.get((comment.path, comment.line))
+    if idx is not None:
+        return idx
     return view._line_index_by_new_number.get(comment.line)
 
 
@@ -220,7 +263,12 @@ def _resolve_line_index_from_diff_hunk(
     best_hunk = None
     best_score = 0
     for target_hunk in hunk_diff.hunks:
+        active_file = view._diff.filename
         for current_hunk in view._diff.hunks:
+            if current_hunk.starts_file and current_hunk.file_path:
+                active_file = current_hunk.file_path
+            if comment.path and active_file != comment.path:
+                continue
             score = _hunk_overlap_score(target_hunk, current_hunk)
             if score > best_score:
                 best_score = score
@@ -604,10 +652,15 @@ def _jump_to_comment_line(view: DiffView, line_index: int) -> None:
             target_row,
             pane=target_pane,
             viewport_offset=2,
+            update_active_pane=target_pane is not None,
         )
     else:
         _virtual._maybe_update_virtual_window(view, line_index)
-        view._move_cursor(line=line_index, pane=target_pane)
+        view._move_cursor(
+            line=line_index,
+            pane=target_pane,
+            update_active_pane=target_pane is not None,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -690,54 +743,19 @@ def estimate_pending_draft_height(draft: PendingReviewComment) -> int:
     return max(PENDING_DRAFT_HEIGHT_ESTIMATE, body_lines + 2)
 
 
-class PendingDraftItem(Vertical):
-    DEFAULT_CSS = """
-    PendingDraftItem {
-        height: auto;
-        margin-left: 0;
-        border: round $warning;
-        background: $surface;
-        padding: 0 1;
-        width: 1fr;
-    }
-
-    PendingDraftItem.--cursor-line {
-        tint: $accent 10%;
-    }
-
-    PendingDraftItem .pending-draft-title {
-        color: $warning;
-        text-style: bold;
-    }
-
-    PendingDraftItem .pending-draft-body {
-        height: auto;
-    }
-    """
-
-    def __init__(self, draft: PendingReviewComment, *, id: str) -> None:
-        super().__init__(id=id, classes="--pending-draft")
-        self._draft = draft
-
-    def compose(self) -> ComposeResult:
-        side = "LEFT" if self._draft.side == "LEFT" else "RIGHT"
-        yield Static(
-            f"Pending comment ({side}) • c edit • d delete",
-            classes="pending-draft-title",
-        )
-        yield Static(self._draft.body, classes="pending-draft-body", markup=False)
-
-
 def _build_pending_draft_widget(
     draft: PendingReviewComment,
     *,
     line_index: int,
     index: int,
-) -> PendingDraftItem:
+) -> CommentCard:
     side = draft.side.lower()
-    return PendingDraftItem(
-        draft,
+    side_label = "LEFT" if draft.side == "LEFT" else "RIGHT"
+    return CommentCard(
+        f"Pending comment ({side_label}) • c edit • d delete",
+        draft.body,
         id=f"pending-draft-{line_index}-{side}-{index}",
+        classes="pending-draft --pending-draft",
     )
 
 

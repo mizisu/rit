@@ -3,7 +3,7 @@
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
@@ -11,8 +11,13 @@ from textual.message import Message
 from textual.worker import Worker, WorkerState
 
 from textual.widget import Widget
-from textual.widgets import Static, Collapsible, Markdown
+from textual.widgets import Collapsible
 
+from rit.core.datetime_utils import (
+    datetime_min_utc,
+    datetime_sort_key,
+    is_min_datetime,
+)
 from rit.state.models import (
     PR,
     PRReview,
@@ -22,14 +27,18 @@ from rit.state.models import (
     group_comments_into_threads,
 )
 from rit.ui.icons import get_file_icon
-from rit.ui.collapsible_markdown import mount_markdown_with_details
+from rit.ui.widgets.comment_card import CommentCard
 from rit.ui.widgets.comment_editor import InlineCommentEditor
 from rit.ui.widgets.review_thread_card import ReviewThreadItem
 
 if TYPE_CHECKING:
     from rit.state.store import PRStore
 
-MOUNT_BATCH_SIZE = 3
+MOUNT_BATCH_SIZE = 1
+QUEUED_REFRESH_DELAY = 0.05
+TIMELINE_BODY_MOUNT_DELAY = 0.85
+TIMELINE_BODY_MOUNT_STAGGER_DELAY = 0.08
+INITIAL_TIMELINE_BODY_COUNT = 3
 
 
 class PRTimeline(Vertical):
@@ -59,19 +68,39 @@ class PRTimeline(Vertical):
         self._pending_resolve_threads: set[str] = set()
         self._scroll_container: VerticalScroll | None = None
         self._refresh_worker: Worker[None] | None = None
+        self._refresh_requested: bool = False
+        self._queued_refresh_pending: bool = False
+        self._preserve_initial_scroll_home: bool = True
 
     def compose(self) -> ComposeResult:
-        with Vertical(classes="description-container"):
-            yield Static("", classes="comment-header", id="pr-author-header")
-            with Vertical(id="pr-description", classes="comment-content"):
-                yield Markdown("*Loading...*")
+        yield CommentCard(
+            "[#6e738d]Loading PR details[/]",
+            "Fetching title and description...",
+            id="pr-description-card",
+            classes="description-container timeline-loading",
+            header_id="pr-author-header",
+            content_id="pr-description",
+        )
 
-        yield Vertical(id="comments-container")
+        with Vertical(id="comments-container"):
+            yield from self._compose_loading_cards()
         yield InlineCommentEditor(
             kind="issue",
             title="Add comment",
             placeholder="Write a PR-level comment...",
             id="issue-comment-editor",
+        )
+
+    def _compose_loading_cards(self) -> ComposeResult:
+        yield CommentCard(
+            "[#6e738d]Loading discussion[/]",
+            "Fetching comments and reviews...",
+            classes="timeline-loading",
+        )
+        yield CommentCard(
+            "[#6e738d]Preparing review threads[/]",
+            "Resolving inline conversations...",
+            classes="timeline-loading",
         )
 
     def on_mount(self) -> None:
@@ -95,20 +124,23 @@ class PRTimeline(Vertical):
         if not pr:
             return
 
-        author_header = self.query_one("#pr-author-header", Static)
         author_name = pr.user.login if pr.user else "unknown"
-        author_header.update(f"[bold]{author_name}[/] [#6e738d]opened this PR[/]")
-
-        desc_widget = self.query_one("#pr-description", Vertical)
-        desc_widget.remove_children()
-        mount_markdown_with_details(
-            desc_widget,
+        description_card = self.query_one("#pr-description-card", CommentCard)
+        description_card.remove_class("timeline-loading")
+        description_card.set_content(
+            f"[bold]{author_name}[/] [#6e738d]opened this PR[/]",
             pr.body or "*No description provided.*",
-            base_url=self._markdown_base_url(),
+            markdown_base_url=self._markdown_base_url(),
         )
 
     def refresh_timeline(self) -> None:
-        self.cancel_refresh()
+        if self._refresh_worker is not None and self._refresh_worker.state in {
+            WorkerState.PENDING,
+            WorkerState.RUNNING,
+        }:
+            self._refresh_requested = True
+            return
+
         self._refresh_worker = self.run_worker(
             self._build_timeline_async(),
             exclusive=True,
@@ -118,6 +150,8 @@ class PRTimeline(Vertical):
 
     def cancel_refresh(self) -> bool:
         worker = self._refresh_worker
+        self._refresh_requested = False
+        self._queued_refresh_pending = False
         if worker is None or worker.state not in {
             WorkerState.PENDING,
             WorkerState.RUNNING,
@@ -132,14 +166,27 @@ class PRTimeline(Vertical):
             WorkerState.ERROR,
             WorkerState.SUCCESS,
         }:
+            should_refresh_again = (
+                self._refresh_requested and event.state == WorkerState.SUCCESS
+            )
             self._refresh_worker = None
+            self._refresh_requested = False
+            if should_refresh_again:
+                self._queued_refresh_pending = True
+                self.set_timer(QUEUED_REFRESH_DELAY, self._run_queued_refresh)
+
+    def _run_queued_refresh(self) -> None:
+        if not self._queued_refresh_pending:
+            return
+        self._queued_refresh_pending = False
+        self.refresh_timeline()
 
     async def _build_timeline_async(self) -> None:
         state = self.store.state
 
         container = self.query_one("#comments-container", Vertical)
 
-        container.remove_children()
+        await container.remove_children()
         self._thread_widget_info.clear()
 
         threads = group_comments_into_threads(state.comments)
@@ -166,32 +213,57 @@ class PRTimeline(Vertical):
         for review in state.reviews:
             review_threads = threads_by_review.get(review.id, [])
             if (review.body and review.body.strip()) or review_threads:
-                submitted_at = review.submitted_at or datetime.min
+                submitted_at = review.submitted_at or datetime_min_utc()
                 timeline_items.append((submitted_at, "review", review, review_threads))
 
         for thread in orphan_threads:
             timeline_items.append((thread.created_at, "thread", thread, None))
 
-        timeline_items.sort(key=lambda x: x[0])
+        timeline_items.sort(key=lambda x: datetime_sort_key(x[0]))
 
         if not timeline_items:
             return
 
         for i, (item_time, item_type, item, extra) in enumerate(timeline_items):
+            body_mount_delay = self._body_mount_delay_for_index(i)
             if item_type == "issue_comment":
-                self._mount_issue_comment(container, item)
+                self._mount_issue_comment(
+                    container,
+                    item,
+                    body_mount_delay=body_mount_delay,
+                )
             elif item_type == "review":
-                self._mount_review_with_threads(container, item, extra or [])
+                self._mount_review_with_threads(
+                    container,
+                    item,
+                    extra or [],
+                    body_mount_delay=body_mount_delay,
+                )
             elif item_type == "thread":
-                self._mount_comment_thread(container, item)
+                self._mount_comment_thread(
+                    container,
+                    item,
+                    body_mount_delay=body_mount_delay,
+                )
 
             if (i + 1) % MOUNT_BATCH_SIZE == 0:
                 await asyncio.sleep(0)
 
         self._invalidate_navigable_items()
 
+    def _body_mount_delay_for_index(self, index: int) -> float:
+        if index < INITIAL_TIMELINE_BODY_COUNT:
+            return TIMELINE_BODY_MOUNT_DELAY
+        return TIMELINE_BODY_MOUNT_DELAY + (
+            index - INITIAL_TIMELINE_BODY_COUNT + 1
+        ) * TIMELINE_BODY_MOUNT_STAGGER_DELAY
+
     def _mount_issue_comment(
-        self, container: Vertical, comment: PRIssueComment
+        self,
+        container: Vertical,
+        comment: PRIssueComment,
+        *,
+        body_mount_delay: float = TIMELINE_BODY_MOUNT_DELAY,
     ) -> None:
         if not comment.body or not comment.body.strip():
             return
@@ -200,24 +272,27 @@ class PRTimeline(Vertical):
         user_name = comment.user.login if comment.user else "unknown"
         header_text = f"[bold]{user_name}[/] [#6e738d]commented {time_str}[/]"
 
-        comment_container = Vertical(classes="comment-box")
-        header = Static(header_text, classes="comment-header")
-        content_container = Vertical(classes="comment-content")
-
-        container.mount(comment_container)
-        comment_container.mount(header)
-        comment_container.mount(content_container)
-        mount_markdown_with_details(
-            content_container,
-            comment.body,
-            base_url=self._markdown_base_url(),
+        container.mount(
+            CommentCard(
+                header_text,
+                comment.body,
+                classes="comment-box",
+                markdown_base_url=self._markdown_base_url(),
+                body_mount_delay=body_mount_delay,
+            )
         )
 
-    def _mount_review(self, container: Vertical, review: PRReview) -> None:
+    def _mount_review(
+        self,
+        container: Vertical,
+        review: PRReview,
+        *,
+        body_mount_delay: float = TIMELINE_BODY_MOUNT_DELAY,
+    ) -> None:
         if not review.body or not review.body.strip():
             return
 
-        time_str = self._format_time(review.submitted_at or datetime.min)
+        time_str = self._format_time(review.submitted_at or datetime_min_utc())
         state_display = {
             ReviewState.APPROVED: "[#a6da95]approved[/]",
             ReviewState.CHANGES_REQUESTED: "[#ed8796]requested changes[/]",
@@ -229,17 +304,14 @@ class PRTimeline(Vertical):
         user_name = review.user.login if review.user else "unknown"
         header_text = f"[bold]{user_name}[/] {state_display} {time_str}"
 
-        comment_container = Vertical(classes="comment-box")
-        header = Static(header_text, classes="comment-header")
-        content_container = Vertical(classes="comment-content")
-
-        container.mount(comment_container)
-        comment_container.mount(header)
-        comment_container.mount(content_container)
-        mount_markdown_with_details(
-            content_container,
-            review.body,
-            base_url=self._markdown_base_url(),
+        container.mount(
+            CommentCard(
+                header_text,
+                review.body,
+                classes="comment-box",
+                markdown_base_url=self._markdown_base_url(),
+                body_mount_delay=body_mount_delay,
+            )
         )
 
     def _mount_review_with_threads(
@@ -247,14 +319,30 @@ class PRTimeline(Vertical):
         container: Vertical,
         review: PRReview,
         threads: list[CommentThread],
+        *,
+        body_mount_delay: float = TIMELINE_BODY_MOUNT_DELAY,
     ) -> None:
         if review.body and review.body.strip():
-            self._mount_review(container, review)
+            self._mount_review(
+                container,
+                review,
+                body_mount_delay=body_mount_delay,
+            )
 
-        for thread in sorted(threads, key=lambda t: t.created_at):
-            self._mount_comment_thread(container, thread)
+        for thread in sorted(threads, key=lambda t: datetime_sort_key(t.created_at)):
+            self._mount_comment_thread(
+                container,
+                thread,
+                body_mount_delay=body_mount_delay,
+            )
 
-    def _mount_comment_thread(self, container: Vertical, thread: CommentThread) -> None:
+    def _mount_comment_thread(
+        self,
+        container: Vertical,
+        thread: CommentThread,
+        *,
+        body_mount_delay: float = TIMELINE_BODY_MOUNT_DELAY,
+    ) -> None:
         root = thread.root_comment
 
         thread_info = self.store.get_thread_info(root.id)
@@ -283,10 +371,11 @@ class PRTimeline(Vertical):
             is_resolved=is_resolved,
             compact=False,
             show_diff_hunk=bool(root.diff_hunk),
-            show_path_header=True,
+            show_path_header=False,
             collapsed=collapsed,
             classes=collapsible_classes,
             markdown_base_url=self._markdown_base_url(),
+            body_mount_delay=body_mount_delay,
         )
         container.mount(collapsible)
 
@@ -307,7 +396,7 @@ class PRTimeline(Vertical):
     def _select_first_item(self) -> None:
         self._collect_navigable_items()
         if self._navigable_items and self._current_index == -1:
-            self._update_selection(0)
+            self._update_selection(0, scroll_to_view=False)
 
     def _is_visible_collapsible(self, collapsible: Collapsible) -> bool:
         for ancestor in collapsible.ancestors:
@@ -363,6 +452,9 @@ class PRTimeline(Vertical):
             self._navigable_items_valid = False
 
     def _update_selection(self, new_index: int, scroll_to_view: bool = True) -> None:
+        if scroll_to_view:
+            self._preserve_initial_scroll_home = False
+
         if 0 <= self._current_index < len(self._navigable_items):
             old_item = self._navigable_items[self._current_index]
             old_item.remove_class("--selected")
@@ -402,6 +494,7 @@ class PRTimeline(Vertical):
             self._update_selection(len(self._navigable_items) - 1)
 
     def toggle_current(self) -> None:
+        self._preserve_initial_scroll_home = False
         if not (0 <= self._current_index < len(self._navigable_items)):
             return
 
@@ -428,12 +521,13 @@ class PRTimeline(Vertical):
         return None
 
     def _is_unresolved_thread_or_comment(self, widget: Widget) -> bool:
-        if isinstance(widget, Collapsible):
-            return False
         if widget in self._thread_widget_info:
             _, _, is_resolved = self._thread_widget_info[widget]
             if is_resolved:
                 return False
+            return True
+        if isinstance(widget, Collapsible):
+            return False
         return True
 
     def next_comment(self) -> None:
@@ -522,16 +616,100 @@ class PRTimeline(Vertical):
 
         return None
 
+    def get_current_thread_location(
+        self,
+    ) -> tuple[str, int, Literal["LEFT", "RIGHT"]] | None:
+        thread_info = self.get_current_thread_info()
+        if thread_info is None:
+            return None
+
+        _, root_comment_id, _ = thread_info
+        thread = self.store.get_review_thread(root_comment_id)
+        if thread is None:
+            return None
+
+        if thread.anchor_side == "old":
+            line = (
+                thread.original_line
+                if thread.original_line is not None
+                else thread.line
+            )
+            side: Literal["LEFT", "RIGHT"] = "LEFT"
+        else:
+            line = thread.line if thread.line is not None else thread.original_line
+            side = "RIGHT"
+
+        if not thread.path or line is None:
+            return None
+        return (thread.path, line, side)
+
+    def refresh_thread_metadata(self) -> None:
+        """Update rendered thread state after authoritative metadata arrives."""
+        keep_view_at_top = self._preserve_initial_scroll_home or self._is_scroll_at_top()
+        for widget, (_, root_comment_id, _) in list(
+            self._thread_widget_info.items()
+        ):
+            thread_info = self.store.get_thread_info(root_comment_id)
+            if thread_info is None:
+                continue
+
+            self._thread_widget_info[widget] = (
+                thread_info.thread_id,
+                root_comment_id,
+                thread_info.is_resolved,
+            )
+
+            if isinstance(widget, Collapsible):
+                self._apply_thread_resolved_ui(
+                    widget,
+                    root_comment_id,
+                    thread_info.is_resolved,
+                )
+        if keep_view_at_top and self._scroll_container is not None:
+            self._schedule_scroll_home_restore()
+
+    def _is_scroll_at_top(self) -> bool:
+        if self._scroll_container is None:
+            return False
+        try:
+            return self._scroll_container.scroll_offset.y <= 1
+        except Exception:
+            return False
+
+    def _restore_scroll_home(self) -> None:
+        if self._scroll_container is None:
+            return
+        try:
+            self._scroll_container.scroll_home(animate=False)
+        except Exception:
+            pass
+
+    def _schedule_scroll_home_restore(self) -> None:
+        self._restore_scroll_home()
+        self.call_after_refresh(self._restore_scroll_home)
+        for delay in (0.2, 0.6, 1.2):
+            self.set_timer(delay, self._restore_scroll_home)
+
     def _find_collapsible_by_thread_id(self, thread_id: str) -> Collapsible | None:
         for widget, (tid, _, _) in self._thread_widget_info.items():
             if tid == thread_id and isinstance(widget, Collapsible):
                 return widget
         return None
 
+    def _find_collapsible_by_root_comment_id(
+        self, root_comment_id: int
+    ) -> Collapsible | None:
+        for widget, (_, rid, _) in self._thread_widget_info.items():
+            if rid == root_comment_id and isinstance(widget, Collapsible):
+                return widget
+        return None
+
     def _update_thread_resolved_ui(
         self, thread_id: str, root_comment_id: int, is_resolved: bool
     ) -> None:
-        collapsible = self._find_collapsible_by_thread_id(thread_id)
+        collapsible = self._find_collapsible_by_thread_id(
+            thread_id
+        ) or self._find_collapsible_by_root_comment_id(root_comment_id)
         if not collapsible:
             return
 
@@ -541,16 +719,37 @@ class PRTimeline(Vertical):
             is_resolved,
         )
 
+        self._apply_thread_resolved_ui(collapsible, root_comment_id, is_resolved)
+
+    def _apply_thread_resolved_ui(
+        self,
+        collapsible: Collapsible,
+        root_comment_id: int,
+        is_resolved: bool,
+    ) -> None:
         new_title: str | None = None
-        for comment in self.store.state.comments:
-            if comment.id == root_comment_id:
-                line_info = f":{comment.anchor_line}" if comment.anchor_line else ""
-                file_icon = get_file_icon(comment.path)
-                if is_resolved:
-                    new_title = f"✓ Resolved: {file_icon} {comment.path}{line_info}"
-                else:
-                    new_title = f"{file_icon} {comment.path}{line_info}"
-                break
+        thread_info = self.store.get_thread_info(root_comment_id)
+        if thread_info is not None:
+            line_info = f":{thread_info.line}" if thread_info.line else ""
+            file_icon = get_file_icon(thread_info.path)
+            if is_resolved:
+                new_title = f"✓ Resolved: {file_icon} {thread_info.path}{line_info}"
+            else:
+                new_title = f"{file_icon} {thread_info.path}{line_info}"
+        else:
+            for comment in self.store.state.comments:
+                if comment.id == root_comment_id:
+                    line_info = (
+                        f":{comment.anchor_line}" if comment.anchor_line else ""
+                    )
+                    file_icon = get_file_icon(comment.path)
+                    if is_resolved:
+                        new_title = (
+                            f"✓ Resolved: {file_icon} {comment.path}{line_info}"
+                        )
+                    else:
+                        new_title = f"{file_icon} {comment.path}{line_info}"
+                    break
 
         if isinstance(collapsible, ReviewThreadItem):
             collapsible.set_resolved(is_resolved, title=new_title)
@@ -610,12 +809,11 @@ class PRTimeline(Vertical):
 
     @staticmethod
     def _format_time(dt: datetime) -> str:
-        if dt == datetime.min:
+        if is_min_datetime(dt):
             return ""
 
         now = datetime.now(timezone.utc)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+        dt = datetime_sort_key(dt)
 
         diff = now - dt
         seconds = diff.total_seconds()
