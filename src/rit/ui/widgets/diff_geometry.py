@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from rit.core.types import DiffLine, FileDiff
 from rit.ui.widgets.diff_types import RenderedRow
 
+FILE_DIFF_HEADER_HEIGHT = 1
+
 
 @dataclass(frozen=True)
 class DiffGeometry:
@@ -57,13 +59,15 @@ def build_diff_geometry(
     line_bottom_offsets = [0] * line_count
     total_line_render_height = 0
     extras = extra_heights_by_line or {}
+    show_hunk_headers = diff.show_hunk_headers
 
     offset = 0
     for hunk in diff.hunks:
         hunk_header_top_offsets.append(offset)
         if hunk.starts_file:
+            offset += FILE_DIFF_HEADER_HEIGHT
+        if show_hunk_headers:
             offset += 1
-        offset += 1
         for line in hunk.lines:
             line_index = line.line_index
             if line_index < 0 or line_index >= line_count:
@@ -121,7 +125,7 @@ def viewport_center_line(
 ) -> int:
     if not line_top_offsets:
         return 0
-    center_offset = int(scroll_y + dock_header_height + max(1, viewport_height) / 2)
+    center_offset = int(scroll_y + max(1, viewport_height) / 2)
     return line_index_at_vertical_offset(
         line_top_offsets=line_top_offsets,
         line_bottom_offsets=line_bottom_offsets,
@@ -248,7 +252,7 @@ def cursor_viewport_offset(
     viewport: ViewportGeometry,
 ) -> int:
     top, _ = bounds
-    return max(0, top - viewport.scroll_y - viewport.dock_header_height)
+    return max(0, top - viewport.scroll_y)
 
 
 def scroll_target_for_row_viewport_offset(
@@ -259,14 +263,12 @@ def scroll_target_for_row_viewport_offset(
     top, bottom = bounds
     target_scroll = max(
         0,
-        top - max(0, viewport_offset) - viewport.dock_header_height,
+        top - max(0, viewport_offset),
     )
-    if bottom - target_scroll - viewport.dock_header_height > max(
-        1, viewport.viewport_height
-    ):
+    if bottom - target_scroll > max(1, viewport.viewport_height):
         target_scroll = max(
             0,
-            bottom - max(1, viewport.viewport_height) - viewport.dock_header_height,
+            bottom - max(1, viewport.viewport_height),
         )
     return _clamp_scroll_y(target_scroll, viewport.max_scroll_y)
 
@@ -283,7 +285,7 @@ def scroll_target_for_row_bottom(
 
 def row_is_visible(bounds: tuple[int, int], viewport: ViewportGeometry) -> bool:
     top, bottom = bounds
-    current_top = viewport.scroll_y + viewport.dock_header_height
+    current_top = viewport.scroll_y
     current_bottom = current_top + max(1, viewport.viewport_height)
     return top >= current_top and bottom <= current_bottom
 
@@ -294,17 +296,28 @@ def scroll_target_for_span(
     bottom: int,
     viewport: ViewportGeometry,
     top_align: bool = False,
+    scrolloff: int = 0,
 ) -> int | None:
     viewport_height = max(1, viewport.viewport_height)
-    current_top = viewport.scroll_y + viewport.dock_header_height
+    current_top = viewport.scroll_y
     current_bottom = current_top + viewport_height
+    effective_scrolloff = min(
+        max(0, scrolloff),
+        max(0, (viewport_height - 1) // 2),
+    )
 
     if top_align:
-        return _clamp_scroll_y(top - viewport.dock_header_height, viewport.max_scroll_y)
-    if top < current_top:
-        return _clamp_scroll_y(top - viewport.dock_header_height, viewport.max_scroll_y)
-    if bottom > current_bottom:
-        return _clamp_scroll_y(bottom - viewport_height, viewport.max_scroll_y)
+        return _clamp_scroll_y(top, viewport.max_scroll_y)
+    if top < current_top + effective_scrolloff:
+        return _clamp_scroll_y(
+            top - effective_scrolloff,
+            viewport.max_scroll_y,
+        )
+    if bottom > current_bottom - effective_scrolloff:
+        return _clamp_scroll_y(
+            bottom - viewport_height + effective_scrolloff,
+            viewport.max_scroll_y,
+        )
     return None
 
 

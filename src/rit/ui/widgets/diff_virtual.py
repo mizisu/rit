@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
@@ -13,7 +14,7 @@ from rit.ui.widgets import diff_geometry as _geometry
 
 
 if TYPE_CHECKING:
-    pass
+    from rit.core.types import DiffLine
 
 _RENDER_REQUEST_CONTEXT: ContextVar[int | None] = ContextVar(
     "diff_view_render_request", default=None
@@ -109,6 +110,10 @@ def _maybe_update_virtual_window_from_viewport(view) -> None:
     if not view._virt.active or not view.is_mounted or not view._all_lines:
         return
 
+    if view._virt.suppress_next_viewport_shift:
+        view._virt.suppress_next_viewport_shift = False
+        return
+
     center_line = view._viewport_center_line()
     margin = _effective_virtual_window_shift_margin(view)
     start = view._virt.window_start
@@ -118,7 +123,8 @@ def _maybe_update_virtual_window_from_viewport(view) -> None:
         return
 
     if view._virt.render_pending:
-        view._virt.coalesced_center = center_line
+        if not view._virt.cursor_shift_pending:
+            view._virt.coalesced_center = center_line
         return
 
     view._virt.coalesced_center = None
@@ -180,7 +186,7 @@ def _set_virtual_window_around(view, center_line: int) -> None:
 
 
 def _maybe_update_virtual_window(view, line_index: int) -> None:
-    if not view._virt.active or view._virt.render_pending:
+    if not view._virt.active:
         return
 
     margin = _effective_virtual_window_shift_margin(view)
@@ -188,6 +194,11 @@ def _maybe_update_virtual_window(view, line_index: int) -> None:
     end = view._virt.window_end
 
     if line_index < start + margin or line_index > end - margin:
+        if view._virt.render_pending:
+            view._virt.coalesced_center = line_index
+            view._virt.cursor_shift_pending = True
+            return
+
         _set_virtual_window_around(view, line_index)
         view._virt.cursor_shift_pending = True
         view._virt.render_pending = True
@@ -337,6 +348,8 @@ async def _sync_visible_virtual_hunk_headers(
 ) -> None:
     if view._diff is None:
         return
+    if not view._diff.show_hunk_headers:
+        return
 
     for hunk_index, hunk in enumerate(view._diff.hunks):
         if not view._should_render_hunk_header(hunk_index, window_start, window_end):
@@ -414,6 +427,41 @@ async def _sync_virtual_buffers(
         view._virt.bottom_buffer = None
 
 
+def _iter_virtualized_line_groups(
+    view,
+    start: int,
+    end: int,
+) -> Iterator[list[DiffLine]]:
+    if view._diff is None or start > end or not view._all_lines:
+        return
+
+    start = max(0, start)
+    end = min(len(view._all_lines) - 1, end)
+    if start > end:
+        return
+
+    current_hunk_index: int | None = None
+    current_group: list[DiffLine] = []
+    for line in view._all_lines[start : end + 1]:
+        line_index = line.line_index
+        if not (0 <= line_index < len(view._hunk_index_by_line)):
+            continue
+
+        hunk_index = view._hunk_index_by_line[line_index]
+        if current_hunk_index is None or hunk_index == current_hunk_index:
+            current_hunk_index = hunk_index
+            current_group.append(line)
+            continue
+
+        if current_group:
+            yield current_group
+        current_hunk_index = hunk_index
+        current_group = [line]
+
+    if current_group:
+        yield current_group
+
+
 def _mount_virtualized_lines_at_bottom(
     view,
     container: VerticalScroll,
@@ -425,11 +473,7 @@ def _mount_virtualized_lines_at_bottom(
 
     bottom_buffer = view._virt.bottom_buffer
 
-    for hunk in view._diff.hunks:
-        lines = [line for line in hunk.lines if start <= line.line_index <= end]
-        if not lines:
-            continue
-
+    for lines in _iter_virtualized_line_groups(view, start, end):
         if view.split:
             view._mount_split_lines(container, lines, before=bottom_buffer)
         else:
@@ -452,11 +496,7 @@ def _mount_virtualized_lines_at_top(
         anchor = child
         break
 
-    for hunk in view._diff.hunks:
-        lines = [line for line in hunk.lines if start <= line.line_index <= end]
-        if not lines:
-            continue
-
+    for lines in _iter_virtualized_line_groups(view, start, end):
         if view.split:
             view._mount_split_lines(container, lines, before=anchor)
         else:
@@ -500,20 +540,10 @@ async def _try_shift_virtual_window_incremental(view) -> bool:
     content = view.query_one("#diff-content", VerticalScroll)
 
     if grouped_blocks_active:
-        # Large jumps or non-monotonic shifts still remount only the current
-        # visible grouped window inside the existing container.
+        # For large jumps, clearing and rendering the new window is cheaper than
+        # individually removing every old block/header.
         if new_start > old_end + 1 or new_end < old_start - 1:
-            await view._remount_grouped_visible_window(
-                content,
-                old_start,
-                old_end,
-                new_start,
-                new_end,
-            )
-            view._virt.rendered_start = new_start
-            view._virt.rendered_end = new_end
-            view._visual_selection_specs = {}
-            return True
+            return False
 
     # Downward shift (append bottom, drop top)
     if new_start >= old_start and new_end >= old_end:
@@ -595,6 +625,7 @@ def _reveal_cursor_after_virtual_render(view, request_token: int) -> None:
     _cursor._scroll_to_cursor(view)
     _cursor._scroll_to_cursor_horizontal(view)
     _cursor._flush_cursor_ui_now_if_safe(view)
+    view._virt.suppress_next_viewport_shift = True
 
 
 async def _run_virtual_window_render_for_request(view, request_token: int) -> None:
@@ -635,6 +666,24 @@ async def _render_virtual_window_and_finalize(view) -> None:
     queued_center = view._virt.coalesced_center
     view._virt.coalesced_center = None
     if cursor_driven:
+        if queued_center is not None and view._virt.active and view.is_mounted:
+            margin = _effective_virtual_window_shift_margin(view)
+            if (
+                queued_center < view._virt.window_start + margin
+                or queued_center > view._virt.window_end - margin
+            ):
+                _set_virtual_window_around(view, queued_center)
+                view._virt.cursor_shift_pending = True
+                view._virt.render_pending = True
+                view.run_worker(
+                    _run_virtual_window_render_for_request(
+                        view, view._render_request_token
+                    ),
+                    exclusive=True,
+                    name="diff-virtual-window-shift",
+                )
+                return
+
         view.call_after_refresh(
             lambda: _reveal_cursor_after_virtual_render(view, request_token)
         )

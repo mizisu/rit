@@ -186,8 +186,11 @@ class TestDiffViewDuplicateId:
             content = "\n".join(f"line {i}" for i in range(1, 151))
             diff = _build_full_file_diff("preview.py", content)
 
+            diff_view.current_file = "preview.py"
             diff_view._showing_full_file = True
             await diff_view.show_diff("preview.py", diff)
             await pilot.pause()
 
+            assert diff_view._showing_full_file is True
             assert len(diff_view.query(".diff-block")) >= 1
+            assert len(diff_view.query(".preview-hunk-boundary")) == 0

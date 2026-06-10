@@ -2,11 +2,13 @@
 
 from rit.core.diff import parse_patch
 from rit.ui.widgets.diff_geometry import (
+    FILE_DIFF_HEADER_HEIGHT,
     ViewportGeometry,
     build_diff_geometry,
     cursor_viewport_offset,
     line_index_at_vertical_offset,
     row_vertical_bounds,
+    row_is_visible,
     scroll_target_for_row_viewport_offset,
     scroll_target_for_span,
     should_render_hunk_header,
@@ -66,6 +68,22 @@ def test_build_diff_geometry_accounts_for_modified_rows_and_inline_extras() -> N
         )
         == 1
     )
+
+
+def test_build_diff_geometry_accounts_for_large_file_headers() -> None:
+    patch = """@@ -1,2 +1,2 @@
+ line1
+ line2"""
+    diff = _planned_diff(patch)
+    diff.hunks[0].starts_file = True
+    diff.show_hunk_headers = False
+
+    geometry = build_diff_geometry(diff, split=True)
+
+    assert FILE_DIFF_HEADER_HEIGHT == 1
+    assert geometry.hunk_header_top_offsets == [0]
+    assert geometry.line_top_offsets == [1, 2]
+    assert geometry.virtual_content_height == 3
 
 
 def test_virtual_buffer_geometry_respects_visible_hunk_headers() -> None:
@@ -141,6 +159,53 @@ def test_row_bounds_and_reveal_targets_are_pure_geometry() -> None:
         max_scroll_y=20,
         dock_header_height=1,
     )
-    assert cursor_viewport_offset((3, 4), viewport) == 2
-    assert scroll_target_for_row_viewport_offset((3, 4), viewport, 0) == 2
+    assert cursor_viewport_offset((3, 4), viewport) == 3
+    assert scroll_target_for_row_viewport_offset((3, 4), viewport, 0) == 3
     assert scroll_target_for_span(top=3, bottom=4, viewport=viewport) == 2
+
+
+def test_row_visibility_uses_scrollable_content_coordinates() -> None:
+    """Docked headers should not expand the visible diff-line range."""
+
+    viewport = ViewportGeometry(
+        scroll_y=142,
+        viewport_height=15,
+        max_scroll_y=260,
+        dock_header_height=3,
+    )
+
+    assert row_is_visible((156, 157), viewport)
+    assert not row_is_visible((158, 159), viewport)
+
+
+def test_scroll_target_for_span_respects_vertical_scrolloff() -> None:
+    """Cursor reveal should keep Vim-like context around the target row."""
+
+    viewport = ViewportGeometry(
+        scroll_y=0,
+        viewport_height=9,
+        max_scroll_y=80,
+        dock_header_height=3,
+    )
+
+    assert (
+        scroll_target_for_span(top=10, bottom=11, viewport=viewport, scrolloff=2)
+        == 4
+    )
+
+    scrolled_viewport = ViewportGeometry(
+        scroll_y=20,
+        viewport_height=9,
+        max_scroll_y=80,
+        dock_header_height=3,
+    )
+
+    assert (
+        scroll_target_for_span(
+            top=21,
+            bottom=22,
+            viewport=scrolled_viewport,
+            scrolloff=2,
+        )
+        == 19
+    )

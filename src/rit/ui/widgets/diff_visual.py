@@ -37,8 +37,7 @@ class LineContent(Visual):
 
         for y, (line, color) in enumerate(zip(self.code_lines, self.line_styles)):
             if line is None:
-                # Empty line - show diagonal pattern
-                line = Content.styled("╲" * width, "$foreground 15%")
+                line = Content.empty()
             else:
                 # Apply selection if present
                 if selection is not None:
@@ -48,9 +47,9 @@ class LineContent(Visual):
                             end = len(line)
                         line = line.stylize(selection_style, start, end)
 
-                # Pad line to width if needed
-                if line.cell_length < width:
-                    line = line.pad_right(width - line.cell_length)
+            # Pad line to width if needed
+            if line.cell_length < width:
+                line = line.pad_right(width - line.cell_length)
 
             # Apply line background style and base style
             line = line.stylize_before(color).stylize_before(style)

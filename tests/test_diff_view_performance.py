@@ -1330,20 +1330,10 @@ async def test_half_page_scroll_flushes_cursor_ui_immediately_after_scroll_adjus
         await pilot.pause()
         await pilot.pause()
 
-        flush_calls = {"count": 0}
-        original_flush = diff_view._flush_queued_cursor_ui_updates
-
-        def counted_flush() -> None:
-            flush_calls["count"] += 1
-            original_flush()
-
-        object.__setattr__(diff_view, "_flush_queued_cursor_ui_updates", counted_flush)
         await diff_view.action_half_page_down()
 
         assert diff_view._cursor_ui.flush_pending is False
-        assert flush_calls["count"] >= 1
-
-        object.__setattr__(diff_view, "_flush_queued_cursor_ui_updates", original_flush)
+        assert diff_view._cursor_ui.dirty_lines == set()
         await pilot.pause()
         await pilot.pause()
 
@@ -1351,22 +1341,10 @@ async def test_half_page_scroll_flushes_cursor_ui_immediately_after_scroll_adjus
         await pilot.pause()
         await pilot.pause()
 
-        flush_calls = {"count": 0}
-        original_flush = diff_view._flush_queued_cursor_ui_updates
-
-        def counted_flush_up() -> None:
-            flush_calls["count"] += 1
-            original_flush()
-
-        object.__setattr__(
-            diff_view, "_flush_queued_cursor_ui_updates", counted_flush_up
-        )
         await diff_view.action_half_page_up()
 
         assert diff_view._cursor_ui.flush_pending is False
-        assert flush_calls["count"] >= 1
-
-        object.__setattr__(diff_view, "_flush_queued_cursor_ui_updates", original_flush)
+        assert diff_view._cursor_ui.dirty_lines == set()
 
 
 @pytest.mark.asyncio
@@ -1566,6 +1544,72 @@ async def test_scroll_coalesces_pending_virtual_window_updates(
             <= queued_center
             <= diff_view._virt.rendered_end
         )
+
+
+@pytest.mark.asyncio
+async def test_cursor_coalesces_pending_virtual_window_updates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rapid cursor jumps should coalesce to the latest virtual-window target."""
+
+    context_lines = "\n".join(f" line{i}" for i in range(1, 1501))
+    patch = f"@@ -1,1500 +1,1500 @@\n{context_lines}"
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test(size=(100, 12)) as pilot:
+        diff_view = app.query_one(DiffView)
+        diff_view.VIRTUALIZE_LINE_THRESHOLD = 10
+        diff_view.VIRTUAL_WINDOW_RADIUS = 3
+        diff_view.VIRTUAL_WINDOW_SHIFT_MARGIN = 1
+
+        diff = parse_patch(patch, "big.py")
+        await diff_view.show_diff("big.py", diff)
+        await pilot.pause()
+        await pilot.pause()
+
+        calls = {"count": 0}
+        started = threading.Event()
+        unblock = threading.Event()
+        original = _virtual_mod._render_virtual_window_and_finalize
+
+        async def blocking_render_finalize(view) -> None:
+            calls["count"] += 1
+            if calls["count"] == 1:
+                started.set()
+                await asyncio.to_thread(unblock.wait, 1.0)
+            await original(view)
+
+        monkeypatch.setattr(
+            _virtual_mod,
+            "_render_virtual_window_and_finalize",
+            blocking_render_finalize,
+        )
+
+        diff_view.cursor_line = 80
+        await pilot.pause()
+        await pilot.pause()
+
+        assert started.wait(timeout=1.0) is True
+
+        diff_view.cursor_line = 360
+        await pilot.pause()
+        await pilot.pause()
+
+        queued_center = diff_view._virt.coalesced_center
+        assert queued_center == 360
+
+        unblock.set()
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert calls["count"] == 2
+        assert diff_view._virt.rendered_start <= 360 <= diff_view._virt.rendered_end
 
 
 @pytest.mark.asyncio
@@ -1796,3 +1840,127 @@ async def test_virtual_window_up_shift_avoids_full_rerender(
 
         # Still no additional full rerender; incremental path should handle it.
         assert render_calls["count"] == after_down_calls
+
+
+@pytest.mark.asyncio
+async def test_grouped_virtual_large_jump_mounts_without_scanning_all_hunk_lines() -> (
+    None
+):
+    """Grouped virtual-window jumps should mount from the visible line window."""
+
+    hunks: list[str] = []
+    for hunk_index in range(50):
+        start = hunk_index * 100 + 1
+        lines = "\n".join(f" line{line_no}" for line_no in range(start, start + 100))
+        hunks.append(f"@@ -{start},100 +{start},100 @@\n{lines}")
+    patch = "\n".join(hunks)
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    class CountingLines(list):
+        def __iter__(self):
+            iterated["count"] += len(self)
+            return super().__iter__()
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+
+        diff_view.VIRTUALIZE_LINE_THRESHOLD = 10
+        diff_view.VIRTUAL_WINDOW_RADIUS = 3
+        diff_view.VIRTUAL_WINDOW_SHIFT_MARGIN = 1
+
+        diff = parse_patch(patch, "big.py")
+        await diff_view.show_diff("big.py", diff)
+        await pilot.pause()
+
+        iterated = {"count": 0}
+        for hunk in diff.hunks:
+            hunk.lines = CountingLines(hunk.lines)
+
+        diff_view.cursor_line = 4000
+        await pilot.pause()
+        await pilot.pause()
+
+        assert diff_view._virt.window_start <= 4000 <= diff_view._virt.window_end
+        window_size = diff_view._virt.window_end - diff_view._virt.window_start + 1
+        assert iterated["count"] <= window_size * 2
+
+
+@pytest.mark.asyncio
+async def test_grouped_virtual_large_jump_uses_full_window_rerender() -> None:
+    """No-overlap grouped jumps should use the cheaper full window rerender path."""
+
+    context_lines = "\n".join(f" line{i}" for i in range(1, 101))
+    patch = f"@@ -1,100 +1,100 @@\n{context_lines}"
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff_view.VIRTUALIZE_LINE_THRESHOLD = 10
+        diff_view.VIRTUAL_WINDOW_RADIUS = 3
+        diff_view.VIRTUAL_WINDOW_SHIFT_MARGIN = 1
+
+        render_calls = {"count": 0}
+        original_render_diff = diff_view._render_diff
+
+        async def counted_render_diff() -> None:
+            render_calls["count"] += 1
+            await original_render_diff()
+
+        diff_view._render_diff = counted_render_diff  # type: ignore[method-assign]
+
+        diff = parse_patch(patch, "big.py")
+        await diff_view.show_diff("big.py", diff)
+        await pilot.pause()
+
+        baseline_calls = render_calls["count"]
+        assert baseline_calls >= 1
+
+        diff_view.cursor_line = 80
+        await pilot.pause()
+        await pilot.pause()
+
+        assert render_calls["count"] == baseline_calls + 1
+
+
+@pytest.mark.asyncio
+async def test_virtualized_show_diff_does_not_build_content_for_layout_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Large virtualized diffs should avoid content construction for width scans."""
+
+    context_lines = "\n".join(f" line{i}" for i in range(1, 5001))
+    patch = f"@@ -1,5000 +1,5000 @@\n{context_lines}"
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff_view.VIRTUALIZE_LINE_THRESHOLD = 10
+        diff_view.VIRTUAL_WINDOW_RADIUS = 3
+        diff_view.VIRTUAL_WINDOW_SHIFT_MARGIN = 1
+
+        base_calls = {"count": 0}
+        original_base = diff_view._compute_base_code_content
+
+        def counted_base(line, *, side="auto", empty_fallback=""):
+            base_calls["count"] += 1
+            return original_base(line, side=side, empty_fallback=empty_fallback)
+
+        diff_view._compute_base_code_content = counted_base  # type: ignore[method-assign]
+
+        diff = parse_patch(patch, "big.py")
+        await diff_view.show_diff("big.py", diff)
+        await pilot.pause()
+
+        assert base_calls["count"] < 100

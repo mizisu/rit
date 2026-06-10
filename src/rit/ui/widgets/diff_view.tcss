@@ -7,9 +7,9 @@ DiffView {
 
 DiffView .diff-header {
     dock: top;
-    text-style: bold;
     padding: 0 1;
-    background: $surface;
+    background: #181926;
+    border-bottom: solid #363a4f;
     height: 3;
     content-align: left middle;
 }
@@ -28,17 +28,19 @@ DiffView .placeholder {
 }
 
 DiffView .file-diff-header {
-    background: $surface;
+    background: #11111b;
     color: $foreground;
     padding: 0 1;
     height: 1;
+    min-height: 1;
     margin: 0;
-    text-style: bold;
+    content-align: left middle;
 }
 
 DiffView .split-file-diff-header-scroll {
     width: 1fr;
     height: 1;
+    min-height: 1;
     overflow-x: auto;
     overflow-y: hidden;
     scrollbar-size: 0 0;
@@ -50,6 +52,13 @@ DiffView .hunk-header {
     padding: 0 1;
     height: 1;
     margin: 0;
+}
+
+DiffView .hunk-header.preview-hunk-boundary {
+    background: #24273a;
+    color: $foreground;
+    text-style: bold;
+    outline-left: thick #f5bde6;
 }
 
 /* ===== Line Structure: Horizontal(line-prefix, code-content) ===== */
@@ -86,11 +95,11 @@ DiffView .code-content {
 }
 
 DiffView .code-content.-added {
-    background: $success 10%;
+    background: $success 6%;
 }
 
 DiffView .code-content.-removed {
-    background: $error 10%;
+    background: $error 6%;
 }
 
 DiffView .code-content.-cursor {
@@ -98,11 +107,11 @@ DiffView .code-content.-cursor {
 }
 
 DiffView .code-content.-cursor.-added {
-    background: $success 30%;
+    background: $success 18%;
 }
 
 DiffView .code-content.-cursor.-removed {
-    background: $error 30%;
+    background: $error 18%;
 }
 
 DiffView .diff-comment-row {
@@ -141,11 +150,11 @@ DiffView.-visual .code-content.-selected {
 }
 
 DiffView.-visual .code-content.-selected.-added {
-    background: $success 30%;
+    background: $success 18%;
 }
 
 DiffView.-visual .code-content.-selected.-removed {
-    background: $error 30%;
+    background: $error 18%;
 }
 
 DiffView.-visual .code-content.-anchor {
@@ -183,6 +192,7 @@ DiffView.-split .split-pane .code-content {
 }
 
 DiffView .code-content.-placeholder {
+    background: $surface 35%;
     color: $text-disabled;
 }
 

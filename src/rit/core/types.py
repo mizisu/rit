@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Literal
 
 from textual.content import Content
 
@@ -49,6 +50,9 @@ class DiffLine:
 
     is_selected: bool = False  # Visual mode selection
     is_current: bool = False  # Current cursor line
+    file_path: str | None = None
+    preview_change: Literal["added", "modified"] | None = None
+    preview_deleted_before: bool = False
 
     @property
     def has_old_side(self) -> bool:
@@ -100,6 +104,7 @@ class FileDiff:
     is_deleted: bool = False
     is_binary: bool = False
     is_fully_refined: bool = True
+    show_hunk_headers: bool = True
 
     @property
     def total_additions(self) -> int:

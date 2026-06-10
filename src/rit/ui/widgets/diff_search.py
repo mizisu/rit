@@ -198,6 +198,7 @@ def activate_match(view: DiffView, index: int) -> None:
             column=match.column,
             viewport_offset=0,
             reveal_horizontal=True,
+            update_active_pane=match.side != "auto",
         )
         return
 
@@ -206,6 +207,7 @@ def activate_match(view: DiffView, index: int) -> None:
         pane=None if match.side == "auto" else match.side,
         column=match.column,
         scroll_in_visual=view.visual_mode,
+        update_active_pane=match.side != "auto",
     )
     view._scroll_to_cursor_horizontal()
     view._update_status_line()

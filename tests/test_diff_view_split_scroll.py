@@ -3,15 +3,32 @@
 import pytest
 from textual.app import App, ComposeResult
 from textual.containers import HorizontalScroll
+from textual.style import Style
+from textual.visual import RenderOptions
 from textual.widgets import Static
 
 from rit.core.diff import parse_patch
 from rit.ui.widgets.diff_view import DiffView
+from rit.ui.widgets.diff_visual import LineContent
 
 
 def _as_plain(widget: Static) -> str:
     content = getattr(widget, "content", "")
     return str(getattr(content, "plain", content))
+
+
+def test_block_missing_side_placeholder_renders_as_plain_space() -> None:
+    """Block-rendered missing sides should stay visually quiet."""
+    content = LineContent([None], [""], width=5)
+
+    strips = content.render_strips(
+        5,
+        None,
+        Style.null(),
+        RenderOptions(lambda _: Style.null(), {}, None, None, None),
+    )
+
+    assert strips[0].text == " " * 5
 
 
 @pytest.mark.asyncio
@@ -96,8 +113,8 @@ async def test_split_cursor_horizontal_reveal_scrolls_code_panes_not_view() -> N
 
 
 @pytest.mark.asyncio
-async def test_split_mode_uses_explicit_placeholders_for_missing_side() -> None:
-    """Added/deleted rows in split mode should show visible placeholder content."""
+async def test_split_mode_uses_quiet_placeholders_for_missing_side() -> None:
+    """Added/deleted rows in split mode should leave missing sides quiet."""
 
     patch = "@@ -1,3 +1,3 @@\n line1\n-deleted_value\n+added_value\n line2"
 
@@ -132,7 +149,7 @@ async def test_split_mode_uses_explicit_placeholders_for_missing_side() -> None:
         placeholder = diff_view.query_one(
             f"#line-{placeholder_line}-old .code-content", Static
         )
-        assert "╲" in _as_plain(placeholder)
+        assert _as_plain(placeholder).strip() == ""
 
 
 @pytest.mark.asyncio
@@ -173,7 +190,7 @@ async def test_split_mode_distinguishes_blank_lines_from_missing_sides() -> None
             f"#line-{added_blank_index}-new .code-content", Static
         )
 
-        assert "╲" in _as_plain(missing_old)
+        assert _as_plain(missing_old).strip() == ""
         assert "╲" not in _as_plain(blank_new)
 
 

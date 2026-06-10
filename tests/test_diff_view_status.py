@@ -1,18 +1,62 @@
 """Tests for DiffView hunk navigation and layout behavior."""
 
+from pathlib import Path
 import threading
+from types import SimpleNamespace
 
 import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Static
 
 from rit.core.diff import parse_patch
+from rit.core.types import DiffLine
+from rit.ui.widgets import diff_blocks as _blocks
+from rit.ui.widgets import diff_render as _render
 from rit.ui.widgets.diff_view import DiffView
 
 
 def _as_plain(widget: Static) -> str:
     content = getattr(widget, "content", "")
     return str(getattr(content, "plain", content))
+
+
+def test_change_background_styles_remain_subtle() -> None:
+    """Change markers should stay readable over syntax-highlighted code."""
+    view = SimpleNamespace(_showing_full_file=False)
+    added = DiffLine(old_line_no=None, new_line_no=1, new_content="new", is_added=True)
+    deleted = DiffLine(
+        old_line_no=1,
+        new_line_no=None,
+        old_content="old",
+        is_deleted=True,
+    )
+    modified = DiffLine(
+        old_line_no=1,
+        new_line_no=1,
+        old_content="old",
+        new_content="new",
+        is_modified=True,
+    )
+
+    assert _render._unified_line_style(view, added) == "on $success 6%"
+    assert _render._unified_line_style(view, deleted) == "on $error 6%"
+    assert _render._unified_line_style(view, modified, side="old") == "on $error 6%"
+    assert (
+        _render._unified_line_style(view, modified, side="new") == "on $success 6%"
+    )
+    assert _render._split_line_style(view, modified, side="old") == "on $error 6%"
+    assert _render._split_line_style(view, modified, side="new") == "on $success 6%"
+    assert _blocks._cursor_block_line_style("on $success 6%") == "on $success 18%"
+    assert _blocks._cursor_block_line_style("on $error 6%") == "on $error 18%"
+
+    css = Path("src/rit/ui/widgets/diff_view.tcss").read_text()
+    for expected in (
+        "background: $success 6%;",
+        "background: $error 6%;",
+        "background: $success 18%;",
+        "background: $error 18%;",
+    ):
+        assert expected in css
 
 
 @pytest.mark.asyncio
@@ -188,8 +232,7 @@ async def test_hunk_jump_places_target_near_top_of_viewport() -> None:
         assert row is not None
         top, _ = diff_view._row_vertical_bounds(row) or (None, None)
         assert top is not None
-        header_h = diff_view._dock_header_height()
-        assert abs(top - int(diff_view.scroll_y) - header_h) <= 1
+        assert abs(top - int(diff_view.scroll_y)) <= 1
 
 
 @pytest.mark.asyncio
@@ -222,7 +265,8 @@ async def test_unified_modified_line_navigation_uses_rendered_rows() -> None:
         old_code = diff_view.query_one("#line-1-old .code-content", Static)
         new_code = diff_view.query_one("#line-1-new .code-content", Static)
         assert diff_view.cursor_line == 1
-        assert diff_view.active_pane == "old"
+        assert diff_view.cursor_pane == "old"
+        assert diff_view.active_pane == "new"
         assert old_code.has_class("-cursor")
         assert not new_code.has_class("-cursor")
 
@@ -230,6 +274,7 @@ async def test_unified_modified_line_navigation_uses_rendered_rows() -> None:
         await pilot.pause()
 
         assert diff_view.cursor_line == 1
+        assert diff_view.cursor_pane == "new"
         assert diff_view.active_pane == "new"
         assert not old_code.has_class("-cursor")
         assert new_code.has_class("-cursor")
@@ -238,6 +283,58 @@ async def test_unified_modified_line_navigation_uses_rendered_rows() -> None:
         await pilot.pause()
 
         assert diff_view.cursor_line == 2
+
+
+@pytest.mark.asyncio
+async def test_split_cursor_movement_preserves_selected_pane_across_missing_sides() -> (
+    None
+):
+    """Moving through added/deleted lines should not rewrite the selected pane."""
+
+    patch = """@@ -1,3 +1,4 @@
+ line1
++added only
+-old content here
++new content here
+ line3"""
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="split", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff = parse_patch(patch, "test.py")
+
+        await diff_view.show_diff("test.py", diff)
+        await pilot.pause()
+        diff_view.focus()
+        await pilot.pause()
+
+        diff_view.action_cycle_active_pane()
+        await pilot.pause()
+        assert diff_view.active_pane == "old"
+
+        await pilot.press("j")
+        await pilot.pause()
+
+        added_old_code = diff_view.query_one("#line-1-old .code-content", Static)
+        added_new_code = diff_view.query_one("#line-1-new .code-content", Static)
+        assert diff_view.cursor_line == 1
+        assert diff_view.active_pane == "old"
+        assert not added_old_code.has_class("-cursor")
+        assert added_new_code.has_class("-cursor")
+
+        await pilot.press("j")
+        await pilot.pause()
+
+        modified_old_code = diff_view.query_one("#line-2-old .code-content", Static)
+        modified_new_code = diff_view.query_one("#line-2-new .code-content", Static)
+        assert diff_view.cursor_line == 2
+        assert diff_view.active_pane == "old"
+        assert modified_old_code.has_class("-cursor")
+        assert not modified_new_code.has_class("-cursor")
 
 
 @pytest.mark.asyncio
