@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
+from rit.core.datetime_utils import datetime_sort_key
 from rit.state.models import PR, PRReview, PRTeam, ReviewRequest, ReviewState
 
 ReviewerKind = Literal[
@@ -63,7 +64,7 @@ def derive_reviewer_states(
         if not login or login == author_login:
             continue
 
-        review_key = (review.submitted_at or datetime.min, index)
+        review_key = (datetime_sort_key(review.submitted_at), index)
         existing = latest_reviews.get(login)
         if existing is None or review_key >= existing[1]:
             latest_reviews[login] = (review, review_key)

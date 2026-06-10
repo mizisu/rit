@@ -6,6 +6,7 @@ from typing import Any, Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from rit.core.datetime_utils import datetime_min_utc, datetime_sort_key
 
 T = TypeVar("T")
 
@@ -72,10 +73,10 @@ class PRIssueComment(BaseModel):
     body: str = ""
     user: PRUser | None = Field(default=None, alias="author")
     created_at: datetime = Field(
-        default_factory=lambda: datetime.min, alias="createdAt"
+        default_factory=datetime_min_utc, alias="createdAt"
     )
     updated_at: datetime = Field(
-        default_factory=lambda: datetime.min, alias="updatedAt"
+        default_factory=datetime_min_utc, alias="updatedAt"
     )
     html_url: str = Field(default="", alias="htmlUrl")
 
@@ -93,10 +94,10 @@ class PRComment(BaseModel):
     original_line: int | None = Field(default=None, alias="originalLine")
     side: str = ""
     created_at: datetime = Field(
-        default_factory=lambda: datetime.min, alias="createdAt"
+        default_factory=datetime_min_utc, alias="createdAt"
     )
     updated_at: datetime = Field(
-        default_factory=lambda: datetime.min, alias="updatedAt"
+        default_factory=datetime_min_utc, alias="updatedAt"
     )
     in_reply_to_id: int | None = Field(default=None, alias="replyTo")
     diff_hunk: str = Field(default="", alias="diffHunk")
@@ -320,10 +321,10 @@ class PR(BaseModel):
     user: PRUser | None = Field(default=None, alias="author")
 
     created_at: datetime = Field(
-        default_factory=lambda: datetime.min, alias="createdAt"
+        default_factory=datetime_min_utc, alias="createdAt"
     )
     updated_at: datetime = Field(
-        default_factory=lambda: datetime.min, alias="updatedAt"
+        default_factory=datetime_min_utc, alias="updatedAt"
     )
     merged_at: datetime | None = Field(default=None, alias="mergedAt")
     closed_at: datetime | None = Field(default=None, alias="closedAt")
@@ -442,7 +443,9 @@ class CommentThread(BaseModel):
 
     @property
     def all_comments(self) -> list[PRComment]:
-        return [self.root_comment] + sorted(self.replies, key=lambda c: c.created_at)
+        return [self.root_comment] + sorted(
+            self.replies, key=lambda c: datetime_sort_key(c.created_at)
+        )
 
     @property
     def created_at(self) -> datetime:
@@ -480,6 +483,6 @@ def group_comments_into_threads(comments: list[PRComment]) -> list[CommentThread
         )
         threads.append(thread)
 
-    threads.sort(key=lambda t: t.created_at)
+    threads.sort(key=lambda t: datetime_sort_key(t.created_at))
 
     return threads

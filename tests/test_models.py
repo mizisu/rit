@@ -185,6 +185,30 @@ class TestCommentThread:
         assert all_comments[1].id == 2  # reply1 (earlier)
         assert all_comments[2].id == 3  # reply2 (later)
 
+    def test_all_comments_sorts_missing_and_aware_reply_dates(self) -> None:
+        root = make_comment(1, "Root comment")
+        missing_date_reply = PRComment(
+            id=2,
+            body="Missing date",
+            user=PRUser(login="user"),
+            path="test.py",
+            line=10,
+            in_reply_to_id=1,
+        )
+        aware_reply = make_comment(
+            3,
+            "Aware date",
+            in_reply_to_id=1,
+            created_at=datetime(2024, 1, 1, 13, tzinfo=timezone.utc),
+        )
+
+        thread = CommentThread(
+            root_comment=root,
+            replies=[aware_reply, missing_date_reply],
+        )
+
+        assert [comment.id for comment in thread.all_comments] == [1, 2, 3]
+
     def test_file_path_property(self) -> None:
         """Test file_path property returns root comment's path."""
         root = make_comment(1, "Root", path="src/main.py")
@@ -263,6 +287,24 @@ class TestGroupCommentsIntoThreads:
         assert threads[0].root_comment.id == 3  # earliest
         assert threads[1].root_comment.id == 1
         assert threads[2].root_comment.id == 2  # latest
+
+    def test_missing_and_aware_root_comment_dates_sort_together(self) -> None:
+        missing_date = PRComment(
+            id=1,
+            body="Missing date",
+            user=PRUser(login="user"),
+            path="test.py",
+            line=10,
+        )
+        aware_date = make_comment(
+            2,
+            "Aware date",
+            created_at=datetime(2024, 1, 1, 10, tzinfo=timezone.utc),
+        )
+
+        threads = group_comments_into_threads([aware_date, missing_date])
+
+        assert [thread.root_comment.id for thread in threads] == [1, 2]
 
     def test_thread_with_replies(self) -> None:
         """Test grouping replies with their root comment."""
