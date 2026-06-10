@@ -12,6 +12,7 @@ from rit.cli import parse_pr_reference
 from rit.core.diff import parse_patch
 from rit.state.models import PR, FileViewedState, LoadingState, PRFile
 from rit.ui.screens.branch_picker import BranchPickerScreen
+from rit.ui.screens.file_picker import FilePickerScreen
 
 
 def _stub_initial_loads(
@@ -48,6 +49,21 @@ def _simple_diff(
 def _static_text(widget: Static) -> str:
     content = getattr(widget, "content", "")
     return str(getattr(content, "plain", content))
+
+
+def test_copy_to_clipboard_updates_textual_and_system_clipboards(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """App clipboard copy should update Textual state and native clipboard."""
+    copied: list[str] = []
+    monkeypatch.setattr("rit.app.pyperclip.copy", copied.append)
+
+    app = RitApp()
+
+    app.copy_to_clipboard("src/rit/app.py")
+
+    assert app.clipboard == "src/rit/app.py"
+    assert copied == ["src/rit/app.py"]
 
 
 class TestPRReferenceParsing:
@@ -118,6 +134,34 @@ class TestRitApp:
     def app(self) -> RitApp:
         """Create a test app instance."""
         return RitApp(owner="test", repo="repo", pr_number=123)
+
+    async def test_pr_loaded_refreshes_description_before_discussion(
+        self, app: RitApp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Summary load should paint the PR description without waiting for comments."""
+
+        _stub_initial_loads(monkeypatch)
+
+        from rit.state.store import PRStore
+        from rit.ui.components.pr_info import PRInfo
+        from rit.ui.screens.main import MainScreen
+
+        calls: list[str] = []
+
+        def fake_refresh_pr_data(pr_info: PRInfo) -> None:
+            calls.append(pr_info.store.state.pr.body if pr_info.store.state.pr else "")
+
+        monkeypatch.setattr(PRInfo, "refresh_pr_data", fake_refresh_pr_data)
+
+        async with app.run_test() as pilot:
+            screen = cast(MainScreen, app.screen)
+            pr = PR(number=123, title="Loaded PR", body="Loaded body")
+            screen.store.state.pr = pr
+
+            screen.on_pr_loaded(PRStore.PRLoaded(pr=pr))
+            await pilot.pause()
+
+            assert calls == ["Loaded body"]
 
     async def test_app_starts(self, app: RitApp) -> None:
         """Test that the app starts without errors."""
@@ -317,7 +361,7 @@ class TestRitApp:
             assert calls == ["data", "comments"]
             assert screen._pr_info_refresh_pending is False
 
-    async def test_staged_load_paints_summary_and_first_file_before_full_load(
+    async def test_staged_load_paints_first_file_then_combined_diff(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         release = threading.Event()
@@ -389,7 +433,8 @@ class TestRitApp:
             await pilot.pause()
             await pilot.pause()
 
-            assert screen.file_changes.diff_view.current_file == "one.py"
+            assert screen.file_changes.diff_view.current_file == "All files"
+            assert screen.store.state.selected_file == "one.py"
             assert _static_text(file_count) == "Files (2)"
 
     async def test_files_tab_shift_hl_moves_between_tree_and_split_panes(
@@ -560,6 +605,76 @@ class TestRitApp:
             await pilot.pause()
 
             assert tree.has_focus
+
+    async def test_files_tab_ctrl_o_opens_go_to_file_picker(
+        self, app: RitApp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ctrl+o on Files tab should open the go-to-file picker."""
+
+        _stub_initial_loads(monkeypatch)
+
+        async with app.run_test() as pilot:
+            await pilot.press("tab")
+            await pilot.pause()
+
+            screen = app.screen
+            screen.store.state.files = [
+                PRFile(filename="one.py", status="modified"),
+                PRFile(filename="two.py", status="modified"),
+            ]
+            screen.file_changes.refresh_files()
+            await pilot.pause()
+
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+
+            assert isinstance(app.screen, FilePickerScreen)
+
+    async def test_file_picker_reselects_current_file_without_reloading_diff(
+        self, app: RitApp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Picking the active file should focus the diff without re-rendering it."""
+
+        _stub_initial_loads(monkeypatch)
+        patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+
+        async with app.run_test() as pilot:
+            await pilot.press("tab")
+            await pilot.pause()
+
+            screen = app.screen
+            screen.store.state.files = [
+                PRFile(filename="one.py", status="modified", patch=patch)
+            ]
+            screen.store.state.file_diffs = {"one.py": parse_patch(patch, "one.py")}
+            screen.store.state.selected_file = "one.py"
+            screen.file_changes.refresh_files()
+            await pilot.pause()
+            await pilot.pause()
+
+            diff = screen.file_changes.diff_view
+            await diff.show_diff("one.py", screen.store.state.file_diffs["one.py"])
+            screen.file_changes.file_tree.focus()
+            await pilot.pause()
+
+            calls: list[str] = []
+
+            async def counted_show_diff(filename: str, diff_arg) -> None:
+                calls.append(filename)
+
+            diff.show_diff = counted_show_diff  # type: ignore[method-assign]
+
+            await pilot.press("ctrl+o")
+            await pilot.pause()
+            assert isinstance(app.screen, FilePickerScreen)
+
+            await pilot.press("enter")
+            await pilot.pause()
+            await pilot.pause()
+
+            assert calls == []
+            assert screen.file_changes.diff_view.has_focus
+            assert screen.store.state.selected_file == "one.py"
 
     async def test_quit_action(self, app: RitApp) -> None:
         """Test that q quits the app."""
