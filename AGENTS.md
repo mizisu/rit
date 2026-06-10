@@ -22,6 +22,7 @@
 - Focus on tracked code in:
   - `src/rit/`
   - `tests/`
+- You can run test server: textual serve "rit https://github.com/mizisu/rit/pull/1"
 
 ## Architecture quick map
 

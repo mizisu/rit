@@ -1,13 +1,17 @@
 import asyncio
 import json
+import queue
 import subprocess
+import threading
 import urllib.request
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Iterator, Sequence
 from dataclasses import dataclass
+from typing import Any, cast
 
 from pydantic import TypeAdapter
 
 from rit.state.models import (
+    NodeList,
     PR,
     PendingReviewComment,
     PRComment,
@@ -17,9 +21,15 @@ from rit.state.models import (
     PRTeam,
     PRUser,
     ReviewThread,
+    group_comments_into_threads,
 )
 
+_PRCommentListAdapter: TypeAdapter[list[PRComment]] = TypeAdapter(list[PRComment])
 _PRFileListAdapter: TypeAdapter[list[PRFile]] = TypeAdapter(list[PRFile])
+_PRIssueCommentListAdapter: TypeAdapter[list[PRIssueComment]] = TypeAdapter(
+    list[PRIssueComment]
+)
+_PRReviewListAdapter: TypeAdapter[list[PRReview]] = TypeAdapter(list[PRReview])
 _PRUserListAdapter: TypeAdapter[list[PRUser]] = TypeAdapter(list[PRUser])
 _PRTeamListAdapter: TypeAdapter[list[PRTeam]] = TypeAdapter(list[PRTeam])
 PR_FILES_PER_PAGE = 100
@@ -34,6 +44,25 @@ def _fetch_url_text(url: str) -> str:
     )
     with urllib.request.urlopen(request, timeout=120) as response:
         return response.read().decode("utf-8", errors="replace")
+
+
+def _iter_url_diff_sections(url: str) -> Iterator[str]:
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "rit"},
+    )
+    with urllib.request.urlopen(request, timeout=120) as response:
+        current_section: list[str] = []
+        for raw_line in response:
+            line = raw_line.decode("utf-8", errors="replace")
+            if line.startswith("diff --git ") and current_section:
+                yield "".join(current_section).rstrip("\n")
+                current_section = [line]
+            else:
+                current_section.append(line)
+
+        if current_section:
+            yield "".join(current_section).rstrip("\n")
 
 
 def _remaining_pr_file_pages(total_count: int | None) -> list[int]:
@@ -80,6 +109,41 @@ class GitHubError(Exception):
         self.status_code = status_code
 
 
+def _review_threads_from_rest_comments(
+    comments: list[PRComment],
+) -> list[ReviewThread]:
+    threads: list[ReviewThread] = []
+    normalized_comments = [
+        _comment_with_normalized_author(comment) for comment in comments
+    ]
+    for thread in group_comments_into_threads(normalized_comments):
+        root = thread.root_comment
+        threads.append(
+            ReviewThread.model_validate(
+                {
+                    "id": "",
+                    "isResolved": False,
+                    "path": root.path,
+                    "line": root.line,
+                    "originalLine": root.original_line,
+                    "diffSide": root.side,
+                    "comments": NodeList(nodes=thread.all_comments),
+                }
+            )
+        )
+    return threads
+
+
+def _comment_with_normalized_author(comment: PRComment) -> PRComment:
+    user = comment.user
+    if user is None or not user.login.endswith("[bot]"):
+        return comment
+
+    return comment.model_copy(
+        update={"user": user.model_copy(update={"login": user.login[: -len("[bot]")]})}
+    )
+
+
 _PR_SUMMARY_GRAPHQL_QUERY = """
 query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
@@ -87,6 +151,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
       id
       number
       title
+      body
       state
       isDraft
       additions
@@ -188,6 +253,41 @@ query($owner: String!, $repo: String!, $number: Int!) {
               }
             }
           }
+        }
+      }
+      comments(first: 100) {
+        nodes {
+          databaseId
+          author {
+            login
+            avatarUrl
+          }
+          body
+          createdAt
+          updatedAt
+        }
+      }
+    }
+  }
+}
+"""
+
+
+_PR_FAST_DISCUSSION_GRAPHQL_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      body
+      reviews(first: 100) {
+        nodes {
+          databaseId
+          author {
+            login
+            avatarUrl
+          }
+          state
+          body
+          submittedAt
         }
       }
       comments(first: 100) {
@@ -420,6 +520,44 @@ class GitHubService:
             review_threads=pr.review_threads,
         )
 
+    async def get_pr_discussion_fast(self, pr_number: int) -> PRDiscussion:
+        """Fetch comments and reviews quickly via REST for early timeline paint."""
+        repo = await self.get_repo()
+        pr_result, review_comments_result = await asyncio.gather(
+            self._run_gh(
+                [
+                    "api",
+                    "graphql",
+                    "-f",
+                    f"query={_PR_FAST_DISCUSSION_GRAPHQL_QUERY}",
+                    "-F",
+                    f"owner={repo.owner}",
+                    "-F",
+                    f"repo={repo.name}",
+                    "-F",
+                    f"number={pr_number}",
+                ]
+            ),
+            self._run_gh(
+                [
+                    "api",
+                    f"/repos/{repo.full_name}/pulls/{pr_number}/comments?per_page=100",
+                ]
+            ),
+        )
+        pr = PR.model_validate(
+            self._parse_pull_request_graphql_result(pr_result, pr_number)
+        )
+        review_comments = _PRCommentListAdapter.validate_python(
+            json.loads(review_comments_result)
+        )
+        return PRDiscussion(
+            body=pr.body,
+            reviews=pr.reviews,
+            issue_comments=pr.issue_comments,
+            review_threads=_review_threads_from_rest_comments(review_comments),
+        )
+
     async def get_pr_diff_text(self, pr_number: int) -> str:
         """Fetch the full raw PR diff from GitHub's web diff endpoint."""
         repo = await self.get_repo()
@@ -428,6 +566,40 @@ class GitHubService:
             return await asyncio.to_thread(_fetch_url_text, url)
         except OSError as error:
             raise GitHubError(f"Failed to fetch raw PR diff: {error}") from error
+
+    async def iter_pr_diff_sections(self, pr_number: int) -> AsyncIterator[str]:
+        """Stream raw PR diff sections as each file patch arrives."""
+        repo = await self.get_repo()
+        url = f"https://github.com/{repo.full_name}/pull/{pr_number}.diff"
+        items: queue.Queue[str | BaseException | None] = queue.Queue(maxsize=20)
+
+        def read_sections() -> None:
+            try:
+                for section in _iter_url_diff_sections(url):
+                    items.put(section)
+            except BaseException as error:
+                items.put(error)
+            finally:
+                items.put(None)
+
+        thread = threading.Thread(
+            target=read_sections,
+            name="rit-pr-diff-stream",
+            daemon=True,
+        )
+        thread.start()
+
+        while True:
+            item = await asyncio.to_thread(items.get)
+            if item is None:
+                break
+            if isinstance(item, BaseException):
+                if isinstance(item, OSError):
+                    raise GitHubError(
+                        f"Failed to fetch raw PR diff: {item}"
+                    ) from item
+                raise item
+            yield item
 
     async def get_pr_files(
         self,
@@ -588,14 +760,38 @@ class GitHubService:
 
         data = json.loads(result)
 
-        if "errors" in data:
-            raise GitHubError(f"GraphQL error: {data['errors']}")
+        return self._parse_pull_request_graphql_data(data, pr_number)
 
-        pr_data = data.get("data", {}).get("repository", {}).get("pullRequest")
-        if not pr_data:
+    def _parse_pull_request_graphql_result(
+        self, result: str, pr_number: int
+    ) -> dict[str, object]:
+        data = json.loads(result)
+        return self._parse_pull_request_graphql_data(data, pr_number)
+
+    def _parse_pull_request_graphql_data(
+        self, data: object, pr_number: int
+    ) -> dict[str, object]:
+        if not isinstance(data, dict):
             raise GitHubError(f"PR #{pr_number} not found")
 
-        return pr_data
+        graphql_data = cast(dict[str, Any], data)
+        errors = graphql_data.get("errors")
+        if errors:
+            raise GitHubError(f"GraphQL error: {errors}")
+
+        data_node = graphql_data.get("data")
+        if not isinstance(data_node, dict):
+            raise GitHubError(f"PR #{pr_number} not found")
+
+        repository = data_node.get("repository")
+        if not isinstance(repository, dict):
+            raise GitHubError(f"PR #{pr_number} not found")
+
+        pr_data = repository.get("pullRequest")
+        if not isinstance(pr_data, dict):
+            raise GitHubError(f"PR #{pr_number} not found")
+
+        return cast(dict[str, object], pr_data)
 
     async def request_reviewers(
         self,

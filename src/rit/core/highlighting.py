@@ -11,6 +11,8 @@ from rit.core.types import DiffLine, FileDiff
 
 
 _HIGHLIGHTER_PREWARMED = False
+WORD_DIFF_ADDED_STYLE = "on $success 20%"
+WORD_DIFF_DELETED_STYLE = "on $error 20%"
 
 
 def _syntax_theme_class(dark_mode: bool) -> type[HighlightTheme]:
@@ -38,6 +40,62 @@ def prewarm_highlighter() -> None:
 def _iter_diff_lines(diff: FileDiff) -> Iterable[DiffLine]:
     for hunk in diff.hunks:
         yield from hunk.lines
+
+
+def _iter_diff_lines_in_range(
+    diff: FileDiff,
+    start_line: int,
+    end_line: int,
+) -> Iterable[DiffLine]:
+    for hunk in diff.hunks:
+        if not hunk.lines:
+            continue
+
+        hunk_start = hunk.lines[0].line_index
+        hunk_end = hunk.lines[-1].line_index
+        if hunk_end < start_line:
+            continue
+        if hunk_start > end_line:
+            break
+
+        start_index = max(0, start_line - hunk_start)
+        end_index = min(len(hunk.lines) - 1, end_line - hunk_start)
+        yield from hunk.lines[start_index : end_index + 1]
+
+
+def _count_side_lines(lines: Iterable[DiffLine]) -> tuple[int, int]:
+    old_count = 0
+    new_count = 0
+    for line in lines:
+        if line.has_old_side:
+            old_count += 1
+        if line.has_new_side:
+            new_count += 1
+    return old_count, new_count
+
+
+def _iter_diff_line_context_windows(
+    diff: FileDiff,
+    start_line: int,
+    end_line: int,
+) -> Iterable[tuple[list[DiffLine], list[DiffLine], int, int]]:
+    for hunk in diff.hunks:
+        if not hunk.lines:
+            continue
+
+        hunk_start = hunk.lines[0].line_index
+        hunk_end = hunk.lines[-1].line_index
+        if hunk_end < start_line:
+            continue
+        if hunk_start > end_line:
+            break
+
+        selected_start = max(0, start_line - hunk_start)
+        selected_end = min(len(hunk.lines) - 1, end_line - hunk_start)
+        context_lines = hunk.lines[: selected_end + 1]
+        selected_lines = hunk.lines[selected_start : selected_end + 1]
+        old_offset, new_offset = _count_side_lines(hunk.lines[:selected_start])
+        yield context_lines, selected_lines, old_offset, new_offset
 
 
 def _collect_line_text(lines: Iterable[DiffLine]) -> tuple[list[str], list[str]]:
@@ -112,9 +170,9 @@ def apply_word_diff_spans(
         length = len(text)
 
         if change_type == "+":
-            spans.append(Span(pos, pos + length, "on $success 40%"))
+            spans.append(Span(pos, pos + length, WORD_DIFF_ADDED_STYLE))
         elif change_type == "-":
-            spans.append(Span(pos, pos + length, "on $error 40%"))
+            spans.append(Span(pos, pos + length, WORD_DIFF_DELETED_STYLE))
 
         pos += length
 
@@ -127,9 +185,11 @@ def _apply_highlighted_content_to_lines(
     old_lines: list[Content],
     new_lines: list[Content],
     include_word_diff: bool,
+    old_start_idx: int = 0,
+    new_start_idx: int = 0,
 ) -> None:
-    old_idx = 0
-    new_idx = 0
+    old_idx = old_start_idx
+    new_idx = new_start_idx
 
     for line in lines:
         if line.has_old_side and old_idx < len(old_lines):
@@ -186,27 +246,27 @@ def highlight_lines_for_diff_range(
     if start_line > end_line:
         return
 
-    selected_lines = [
-        line
-        for line in _iter_diff_lines(diff)
-        if start_line <= line.line_index <= end_line
-    ]
-    if not selected_lines:
-        return
-
-    old_lines_text, new_lines_text = _collect_line_text(selected_lines)
-    old_lines, new_lines = _highlight_text_lines(
-        filename=diff.filename,
-        old_lines_text=old_lines_text,
-        new_lines_text=new_lines_text,
-        dark_mode=dark_mode,
-    )
-    _apply_highlighted_content_to_lines(
+    for (
+        context_lines,
         selected_lines,
-        old_lines=old_lines,
-        new_lines=new_lines,
-        include_word_diff=include_word_diff,
-    )
+        old_offset,
+        new_offset,
+    ) in _iter_diff_line_context_windows(diff, start_line, end_line):
+        old_lines_text, new_lines_text = _collect_line_text(context_lines)
+        old_lines, new_lines = _highlight_text_lines(
+            filename=diff.filename,
+            old_lines_text=old_lines_text,
+            new_lines_text=new_lines_text,
+            dark_mode=dark_mode,
+        )
+        _apply_highlighted_content_to_lines(
+            selected_lines,
+            old_lines=old_lines,
+            new_lines=new_lines,
+            include_word_diff=include_word_diff,
+            old_start_idx=old_offset,
+            new_start_idx=new_offset,
+        )
 
 
 def _apply_word_diff_to_content(content: Content, segments: list) -> Content:
@@ -219,9 +279,9 @@ def _apply_word_diff_to_content(content: Content, segments: list) -> Content:
         length = len(segment.text)
 
         if segment.type == SegmentType.ADDED:
-            spans.append(Span(pos, pos + length, "on $success 40%"))
+            spans.append(Span(pos, pos + length, WORD_DIFF_ADDED_STYLE))
         elif segment.type == SegmentType.DELETED:
-            spans.append(Span(pos, pos + length, "on $error 40%"))
+            spans.append(Span(pos, pos + length, WORD_DIFF_DELETED_STYLE))
 
         pos += length
 

@@ -1,18 +1,22 @@
 """Tests for file-selection behavior in the Files tab."""
 
 import asyncio
-import threading
 from collections.abc import Sequence
 from typing import Any, cast
 
 import pytest
 from textual.app import App, ComposeResult
 from textual.signal import Signal
+from textual.widgets import Static
 
 from rit.core.diff import parse_patch
+from rit.core.types import DiffHunk, DiffLine, FileDiff
+from rit.services.github import PRDiscussion
 from rit.state.models import PR, PRFile
 from rit.state.store import PRStore
 from rit.ui.components.file_changes import FileChanges
+from rit.ui.widgets.diff_render import _create_file_header_widget
+from rit.ui.widgets.diff_view import DiffView
 
 
 class FakeRawDiffService:
@@ -23,6 +27,42 @@ class FakeRawDiffService:
     async def get_pr_diff_text(self, pr_number: int) -> str:
         self.calls.append(pr_number)
         return self.raw_diff
+
+
+class FakeStreamingRawDiffService:
+    def __init__(self, sections: list[str]) -> None:
+        self.sections = sections
+        self.calls: list[int] = []
+        self.first_section_loaded = asyncio.Event()
+        self.continue_streaming = asyncio.Event()
+
+    async def iter_pr_diff_sections(self, pr_number: int):
+        self.calls.append(pr_number)
+        yield self.sections[0]
+        self.first_section_loaded.set()
+        await self.continue_streaming.wait()
+        for section in self.sections[1:]:
+            yield section
+
+
+class FakeSlowSummaryStreamingService:
+    def __init__(self, section: str) -> None:
+        self.section = section
+        self.summary_requested = asyncio.Event()
+        self.allow_summary = asyncio.Event()
+        self.first_section_loaded = asyncio.Event()
+
+    async def get_pr_summary(self, pr_number: int) -> PR:
+        self.summary_requested.set()
+        await self.allow_summary.wait()
+        return PR(number=pr_number, changedFiles=1)
+
+    async def get_pr_discussion(self, pr_number: int) -> PRDiscussion:
+        return PRDiscussion(body="", reviews=[], issue_comments=[], review_threads=[])
+
+    async def iter_pr_diff_sections(self, pr_number: int):
+        yield self.section
+        self.first_section_loaded.set()
 
 
 class FakeFilesService:
@@ -50,6 +90,17 @@ class FakeFilesService:
     ) -> dict[int, list[PRFile]]:
         self.multi_page_calls.append((pr_number, tuple(pages), per_page))
         return {page: self.pages.get(page, []) for page in pages}
+
+
+class FakeFilesAndStreamingService(FakeFilesService):
+    def __init__(self, pages: dict[int, list[PRFile]], section: str) -> None:
+        super().__init__(pages)
+        self.section = section
+        self.stream_calls: list[int] = []
+
+    async def iter_pr_diff_sections(self, pr_number: int):
+        self.stream_calls.append(pr_number)
+        yield self.section
 
 
 def test_store_get_file_diff_parses_lazily_and_caches_status_metadata() -> None:
@@ -101,6 +152,87 @@ new file mode 100644
 
 
 @pytest.mark.asyncio
+async def test_store_load_files_streams_first_raw_diff_file_before_completion() -> None:
+    first_section = """diff --git a/one.py b/one.py
+--- a/one.py
++++ b/one.py
+@@ -1 +1 @@
+-old
++new
+"""
+    second_section = """diff --git a/two.py b/two.py
+--- a/two.py
++++ b/two.py
+@@ -1 +1 @@
+-old
++new
+"""
+    service = FakeStreamingRawDiffService([first_section, second_section])
+    messages = []
+    store = PRStore(pr_number=123)
+    store.state.pr = PR(number=123, changedFiles=2)
+    store.state.files_total_count = 2
+    store._service = cast(Any, service)
+    store.set_message_sink(messages.append)
+
+    task = asyncio.create_task(store.load_files())
+    await asyncio.wait_for(service.first_section_loaded.wait(), timeout=1.0)
+
+    loaded_messages = [
+        message for message in messages if isinstance(message, PRStore.FilesLoaded)
+    ]
+    assert [message.loaded_count for message in loaded_messages] == [1]
+    assert [file.filename for file in store.state.files] == ["one.py"]
+    assert store.state.file_diffs == {}
+
+    diff = store.get_file_diff("one.py")
+    assert diff is not None
+    assert diff.filename == "one.py"
+    assert set(store.state.file_diffs) == {"one.py"}
+
+    service.continue_streaming.set()
+    await task
+
+    loaded_messages = [
+        message for message in messages if isinstance(message, PRStore.FilesLoaded)
+    ]
+    assert [message.loaded_count for message in loaded_messages] == [1, 2]
+    assert [file.filename for file in store.state.files] == ["one.py", "two.py"]
+    assert set(store.state.file_diffs) == {"one.py"}
+    assert store.state.files[1].additions == 1
+    assert store.state.files[1].deletions == 1
+
+
+@pytest.mark.asyncio
+async def test_store_load_all_starts_streaming_files_before_summary_finishes() -> None:
+    section = """diff --git a/one.py b/one.py
+--- a/one.py
++++ b/one.py
+@@ -1 +1 @@
+-old
++new
+"""
+    service = FakeSlowSummaryStreamingService(section)
+    messages = []
+    store = PRStore(pr_number=123)
+    store._service = cast(Any, service)
+    store.set_message_sink(messages.append)
+
+    task = asyncio.create_task(store.load_all())
+    await asyncio.wait_for(service.summary_requested.wait(), timeout=1.0)
+    await asyncio.wait_for(service.first_section_loaded.wait(), timeout=1.0)
+
+    loaded_messages = [
+        message for message in messages if isinstance(message, PRStore.FilesLoaded)
+    ]
+    assert [message.loaded_count for message in loaded_messages] == [1]
+    assert [file.filename for file in store.state.files] == ["one.py"]
+
+    service.allow_summary.set()
+    await task
+
+
+@pytest.mark.asyncio
 async def test_store_load_files_paints_first_page_then_concurrent_rest_without_eager_parsing() -> (
     None
 ):
@@ -129,6 +261,85 @@ async def test_store_load_files_paints_first_page_then_concurrent_rest_without_e
     assert len(store.state.files) == 101
     assert store.state.file_diffs == {}
     assert store.state.files_by_filename["file-100.py"].filename == "file-100.py"
+
+
+@pytest.mark.asyncio
+async def test_store_load_files_prefers_rest_files_before_raw_diff_stream() -> None:
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    raw_section = """diff --git a/raw.py b/raw.py
+--- a/raw.py
++++ b/raw.py
+@@ -1 +1 @@
+-old
++new
+"""
+    service = FakeFilesAndStreamingService(
+        {1: [PRFile(filename="rest.py", status="modified", patch=patch)]},
+        raw_section,
+    )
+    store = PRStore(pr_number=123)
+    store._service = cast(Any, service)
+
+    await store.load_files()
+
+    assert service.page_calls == [(123, 1, 100)]
+    assert service.stream_calls == []
+    assert [file.filename for file in store.state.files] == ["rest.py"]
+
+
+@pytest.mark.asyncio
+async def test_store_load_files_fetches_rest_until_empty_when_total_unknown() -> None:
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    first_page = [
+        PRFile(filename=f"file-{index}.py", status="modified", patch=patch)
+        for index in range(100)
+    ]
+    second_page = [PRFile(filename="file-100.py", status="modified", patch=patch)]
+    service = FakeFilesService({1: first_page, 2: second_page})
+    messages = []
+    store = PRStore(pr_number=123)
+    store._service = cast(Any, service)
+    store.set_message_sink(messages.append)
+
+    await store.load_files()
+
+    loaded_messages = [
+        message for message in messages if isinstance(message, PRStore.FilesLoaded)
+    ]
+    assert service.page_calls == [(123, 1, 100)]
+    assert service.multi_page_calls == [(123, tuple(range(2, 8)), 100)]
+    assert [message.loaded_count for message in loaded_messages] == [100, 101]
+    assert len(store.state.files) == 101
+
+
+@pytest.mark.asyncio
+async def test_store_load_files_switches_to_raw_stream_when_rest_limit_is_exceeded() -> (
+    None
+):
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    raw_section = """diff --git a/raw.py b/raw.py
+--- a/raw.py
++++ b/raw.py
+@@ -1 +1 @@
+-old
++new
+"""
+    first_page = [
+        PRFile(filename=f"file-{index}.py", status="modified", patch=patch)
+        for index in range(100)
+    ]
+    service = FakeFilesAndStreamingService({1: first_page}, raw_section)
+    store = PRStore(pr_number=123)
+    store.state.pr = PR(number=123, changedFiles=3001)
+    store.state.files_total_count = 3001
+    store._service = cast(Any, service)
+
+    await store.load_files()
+
+    assert service.page_calls == [(123, 1, 100)]
+    assert service.multi_page_calls == []
+    assert service.stream_calls == [123]
+    assert store.state.files[-1].filename == "raw.py"
 
 
 class DummySettings:
@@ -327,8 +538,783 @@ async def test_file_changes_renders_loaded_file_diffs_as_combined_scroll() -> No
 
 
 @pytest.mark.asyncio
-async def test_rapid_file_tree_selection_coalesces_to_latest_pending_diff() -> None:
-    """Rapid file-tree selection should skip intermediate pending diff renders."""
+async def test_combined_diff_uses_prominent_file_headers_without_hunk_headers() -> None:
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    store = PRStore()
+    store.state.files = [
+        PRFile(
+            filename="one.py",
+            status="modified",
+            patch=patch,
+            additions=12,
+            deletions=3,
+        ),
+        PRFile(
+            filename="two.py",
+            status="modified",
+            patch=patch,
+            additions=4,
+            deletions=1,
+        ),
+    ]
+    store.state.file_diffs = {
+        filename: parse_patch(patch, filename) for filename in ["one.py", "two.py"]
+    }
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert len(file_changes.diff_view.query(".hunk-header")) == 0
+
+        first_header = file_changes.diff_view.query_one("#file-header-0", Static)
+        header_text = str(getattr(first_header.content, "plain", first_header.content))
+
+        assert first_header.outer_size.height == 1
+        assert "one.py" in header_text
+        assert "+12" in header_text
+        assert "-3" in header_text
+        assert "Unviewed" not in header_text
+        assert "Modified" not in header_text
+        assert "[M]" not in header_text
+        assert "@@" not in header_text
+        assert "auto" not in header_text.lower()
+        assert "split" not in header_text.lower()
+        assert "hunk" not in header_text.lower()
+
+
+def test_file_header_prefers_current_file_stats_over_stale_hunk_metadata() -> None:
+    store = PRStore()
+    store.state.files = [
+        PRFile(
+            filename="one.py",
+            status="modified",
+            additions=12,
+            deletions=3,
+        )
+    ]
+    view = DiffView(store=store)
+    view.split = False
+
+    header = _create_file_header_widget(
+        view,
+        hunk_index=0,
+        hunk=DiffHunk(
+            old_start=1,
+            old_count=1,
+            new_start=1,
+            new_count=1,
+            starts_file=True,
+            file_path="one.py",
+            file_additions=12,
+            file_deletions=0,
+        ),
+    )
+
+    assert isinstance(header, Static)
+    header_text = str(getattr(header.content, "plain", header.content))
+    assert "+12" in header_text
+    assert "-3" in header_text
+
+
+def test_file_header_prefers_visible_file_list_over_stale_lookup_cache() -> None:
+    store = PRStore()
+    store.state.files = [
+        PRFile(
+            filename="one.py",
+            status="modified",
+            additions=12,
+            deletions=3,
+        )
+    ]
+    store.state.files_by_filename["one.py"] = PRFile(
+        filename="one.py",
+        status="modified",
+        additions=12,
+        deletions=0,
+    )
+    view = DiffView(store=store)
+    view.split = False
+
+    header = _create_file_header_widget(
+        view,
+        hunk_index=0,
+        hunk=DiffHunk(
+            old_start=1,
+            old_count=1,
+            new_start=1,
+            new_count=1,
+            starts_file=True,
+            file_path="one.py",
+            file_additions=12,
+            file_deletions=0,
+        ),
+    )
+
+    assert isinstance(header, Static)
+    header_text = str(getattr(header.content, "plain", header.content))
+    assert "+12" in header_text
+    assert "-3" in header_text
+
+
+@pytest.mark.asyncio
+async def test_file_header_keeps_change_counts_visible_in_narrow_panes() -> None:
+    store = PRStore()
+    store.state.files = [
+        PRFile(
+            filename="lemonbase/common/openapi.py",
+            status="modified",
+            additions=95,
+            deletions=100,
+        )
+    ]
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test(size=(72, 48)) as pilot:
+        diff_view = app.query_one(FileChanges).diff_view
+        diff = FileDiff(
+            filename="All files",
+            show_hunk_headers=False,
+            hunks=[
+                DiffHunk(
+                    old_start=1,
+                    old_count=1,
+                    new_start=1,
+                    new_count=1,
+                    starts_file=True,
+                    file_path="lemonbase/common/openapi.py",
+                    file_status="modified",
+                    file_additions=0,
+                    file_deletions=100,
+                    lines=[
+                        DiffLine(
+                            old_line_no=1,
+                            new_line_no=None,
+                            is_deleted=True,
+                            file_path="lemonbase/common/openapi.py",
+                        ),
+                        DiffLine(
+                            old_line_no=None,
+                            new_line_no=1,
+                            is_added=True,
+                            file_path="lemonbase/common/openapi.py",
+                        ),
+                    ],
+                )
+            ],
+        )
+
+        await diff_view.show_diff("All files", diff)
+        await pilot.pause()
+        await pilot.pause()
+
+        header = diff_view.query_one("#file-header-0", Static)
+        header_text = str(getattr(header.content, "plain", header.content))
+
+        assert header.outer_size.height == 1
+        assert header_text.startswith("▾ -100 +95 ")
+        assert "openapi.py" in header_text
+
+
+@pytest.mark.asyncio
+async def test_file_changes_loads_lazy_file_diffs_as_combined_scroll() -> None:
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename="one.py", status="modified", patch=patch),
+        PRFile(filename="two.py", status="modified", patch=patch),
+    ]
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert file_changes.diff_view.current_file == "All files"
+        assert file_changes._showing_combined_files is True
+        assert file_changes._combined_file_line_starts == {"one.py": 0, "two.py": 2}
+        assert set(store.state.file_diffs) == {"one.py", "two.py"}
+
+
+@pytest.mark.asyncio
+async def test_open_file_during_combined_load_does_not_render_single_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    filenames = ["one.py", "two.py"]
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename=filename, status="modified", patch=patch)
+        for filename in filenames
+    ]
+    one_requested = asyncio.Event()
+    release_one = asyncio.Event()
+
+    async def delayed_get_file_diff(filename: str) -> FileDiff:
+        if filename == "one.py":
+            one_requested.set()
+            await release_one.wait()
+        diff = parse_patch(patch, filename)
+        store.state.file_diffs[filename] = diff
+        return diff
+
+    monkeypatch.setattr(store, "get_file_diff_async", delayed_get_file_diff)
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await asyncio.wait_for(one_requested.wait(), timeout=1.0)
+        await pilot.pause()
+
+        calls: list[str] = []
+        original_show_diff = file_changes.diff_view.show_diff
+
+        async def counted_show_diff(filename: str, diff, **kwargs) -> None:
+            calls.append(filename)
+            await original_show_diff(filename, diff, **kwargs)
+
+        file_changes.diff_view.show_diff = counted_show_diff  # type: ignore[method-assign]
+
+        file_changes.open_file("two.py", focus_diff=True)
+        await pilot.pause()
+        await pilot.pause()
+
+        assert calls == []
+
+        release_one.set()
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert calls == ["All files"]
+        assert file_changes.diff_view.current_file == "All files"
+        assert file_changes.diff_view.cursor_line == 2
+        assert store.state.selected_file == "two.py"
+
+
+@pytest.mark.asyncio
+async def test_file_changes_renders_combined_scroll_without_line_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import rit.ui.components.file_changes as file_changes_module
+
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename="one.py", status="modified", patch=patch),
+        PRFile(filename="two.py", status="modified", patch=patch),
+    ]
+    store.state.file_diffs = {
+        filename: parse_patch(patch, filename) for filename in ["one.py", "two.py"]
+    }
+    monkeypatch.setattr(
+        file_changes_module,
+        "COMBINED_DIFF_LINE_THRESHOLD",
+        1,
+        raising=False,
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert file_changes.diff_view.current_file == "All files"
+        assert file_changes._showing_combined_files is True
+        assert file_changes._combined_file_line_starts == {"one.py": 0, "two.py": 2}
+        assert store.state.selected_file == "one.py"
+
+
+@pytest.mark.asyncio
+async def test_combined_hunk_navigation_syncs_current_file_selection() -> None:
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    filenames = ["one.py", "two.py"]
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename=filename, status="modified", patch=patch)
+        for filename in filenames
+    ]
+    store.state.file_diffs = {
+        filename: parse_patch(patch, filename) for filename in filenames
+    }
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert store.state.selected_file == "one.py"
+
+        file_changes.next_hunk()
+        await pilot.pause()
+
+        assert file_changes.diff_view.cursor_line == 2
+        assert store.state.selected_file == "two.py"
+        assert file_changes.file_tree.selected_file == "two.py"
+
+
+@pytest.mark.asyncio
+async def test_combined_full_preview_uses_current_line_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    filenames = ["one.py", "two.py"]
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename=filename, status="modified", patch=patch)
+        for filename in filenames
+    ]
+    store.state.file_diffs = {
+        filename: parse_patch(patch, filename) for filename in filenames
+    }
+    content_requests: list[str] = []
+
+    async def fake_get_file_content(filename: str) -> str:
+        content_requests.append(filename)
+        return "new\nrestored context"
+
+    monkeypatch.setattr(store, "get_file_content", fake_get_file_content)
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert file_changes.diff_view.current_file == "All files"
+        assert file_changes._showing_combined_files is True
+
+        file_changes.diff_view.action_toggle_full_file()
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert content_requests == ["one.py"]
+        assert file_changes.diff_view.current_file == "one.py"
+        assert file_changes.diff_view._showing_full_file is True
+        assert file_changes._showing_combined_files is False
+        assert store.state.selected_file == "one.py"
+        prefix_texts = [
+            str(getattr(node.content, "plain", node.content))
+            for node in file_changes.diff_view.query(".line-prefix")
+        ]
+        assert len(file_changes.diff_view.query(".preview-hunk-boundary")) == 0
+        assert any("┃" in text for text in prefix_texts)
+
+
+@pytest.mark.asyncio
+async def test_combined_full_preview_opens_at_current_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch = "@@ -2,1 +2,1 @@\n-old\n+line 2"
+    filenames = ["one.py", "two.py"]
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename=filename, status="modified", patch=patch)
+        for filename in filenames
+    ]
+    store.state.file_diffs = {
+        filename: parse_patch(patch, filename) for filename in filenames
+    }
+    content_requests: list[str] = []
+
+    async def fake_get_file_content(filename: str) -> str:
+        content_requests.append(filename)
+        return "\n".join(f"line {line}" for line in range(1, 6))
+
+    monkeypatch.setattr(store, "get_file_content", fake_get_file_content)
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert file_changes.jump_to_file_location(
+            "two.py",
+            2,
+            "RIGHT",
+            focus_diff=False,
+        )
+        await pilot.pause()
+
+        file_changes.diff_view.action_toggle_full_file()
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+
+        current = file_changes.diff_view._current_line()
+        assert content_requests == ["two.py"]
+        assert file_changes.diff_view.current_file == "two.py"
+        assert current is not None
+        assert current.new_line_no == 2
+
+
+@pytest.mark.asyncio
+async def test_combined_full_preview_restore_returns_to_original_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch = """@@ -1,4 +1,4 @@
+ line 1
+-line 2 old
++line 2
+ line 3
+-line 4 old
++line 4"""
+    filenames = ["one.py", "two.py"]
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename=filename, status="modified", patch=patch)
+        for filename in filenames
+    ]
+    store.state.file_diffs = {
+        filename: parse_patch(patch, filename) for filename in filenames
+    }
+
+    async def fake_get_file_content(filename: str) -> str:
+        return "\n".join(f"line {line}" for line in range(1, 6))
+
+    monkeypatch.setattr(store, "get_file_content", fake_get_file_content)
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert file_changes.jump_to_file_location(
+            "two.py",
+            4,
+            "RIGHT",
+            focus_diff=False,
+        )
+        await pilot.pause()
+
+        file_changes.diff_view.action_toggle_full_file()
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+
+        file_changes.diff_view.action_toggle_full_file()
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+
+        current = file_changes.diff_view._current_line()
+        assert file_changes.diff_view.current_file == "All files"
+        assert current is not None
+        assert current.file_path == "two.py"
+        assert current.new_line_no == 4
+
+
+@pytest.mark.asyncio
+async def test_combined_full_preview_restores_combined_scroll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    filenames = ["one.py", "two.py"]
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename=filename, status="modified", patch=patch)
+        for filename in filenames
+    ]
+    store.state.file_diffs = {
+        filename: parse_patch(patch, filename) for filename in filenames
+    }
+
+    async def fake_get_file_content(filename: str) -> str:
+        return "new\nrestored context"
+
+    monkeypatch.setattr(store, "get_file_content", fake_get_file_content)
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await pilot.pause()
+        await pilot.pause()
+
+        file_changes.diff_view.action_toggle_full_file()
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+
+        file_changes.diff_view.action_toggle_full_file()
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert file_changes.diff_view.current_file == "All files"
+        assert file_changes._showing_combined_files is True
+
+        calls: list[str] = []
+
+        async def counted_show_diff(filename: str, diff) -> None:
+            calls.append(filename)
+
+        file_changes.diff_view.show_diff = counted_show_diff  # type: ignore[method-assign]
+
+        file_changes.file_tree.select_file("two.py")
+        await pilot.pause()
+
+        assert calls == []
+        assert file_changes.diff_view.cursor_line == 2
+        assert store.state.selected_file == "two.py"
+
+
+@pytest.mark.asyncio
+async def test_combined_location_jump_uses_cached_line_lookup() -> None:
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    filenames = ["one.py", "two.py"]
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename=filename, status="modified", patch=patch)
+        for filename in filenames
+    ]
+    store.state.file_diffs = {
+        filename: parse_patch(patch, filename) for filename in filenames
+    }
+
+    class ExplodingLines(list):
+        def __iter__(self):
+            raise AssertionError("line lookup should not scan hunk lines")
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await pilot.pause()
+        await pilot.pause()
+
+        diff = file_changes.diff_view._diff
+        assert diff is not None
+        diff.hunks[1].lines = cast(Any, ExplodingLines(diff.hunks[1].lines))
+
+        assert (
+            file_changes.jump_to_file_location(
+                "two.py",
+                1,
+                "RIGHT",
+                focus_diff=False,
+            )
+            is True
+        )
+
+        line = file_changes.diff_view._current_line()
+        assert line is not None
+        assert line.new_line_no == 1
+        assert store.state.selected_file == "two.py"
+
+
+@pytest.mark.asyncio
+async def test_location_jump_during_combined_load_does_not_render_single_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    filenames = ["one.py", "two.py"]
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename=filename, status="modified", patch=patch)
+        for filename in filenames
+    ]
+    one_requested = asyncio.Event()
+    release_one = asyncio.Event()
+
+    async def delayed_get_file_diff(filename: str) -> FileDiff:
+        if filename == "one.py":
+            one_requested.set()
+            await release_one.wait()
+        diff = parse_patch(patch, filename)
+        store.state.file_diffs[filename] = diff
+        return diff
+
+    monkeypatch.setattr(store, "get_file_diff_async", delayed_get_file_diff)
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await asyncio.wait_for(one_requested.wait(), timeout=1.0)
+        await pilot.pause()
+
+        calls: list[str] = []
+        original_show_diff = file_changes.diff_view.show_diff
+
+        async def counted_show_diff(filename: str, diff, **kwargs) -> None:
+            calls.append(filename)
+            await original_show_diff(filename, diff, **kwargs)
+
+        file_changes.diff_view.show_diff = counted_show_diff  # type: ignore[method-assign]
+
+        assert (
+            file_changes.jump_to_file_location(
+                "two.py",
+                1,
+                "RIGHT",
+                focus_diff=True,
+            )
+            is True
+        )
+        await pilot.pause()
+        await pilot.pause()
+
+        assert calls == []
+
+        release_one.set()
+        await pilot.pause()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert calls == ["All files"]
+        assert file_changes.diff_view.current_file == "All files"
+        line = file_changes.diff_view._current_line()
+        assert line is not None
+        assert line.file_path == "two.py"
+        assert line.new_line_no == 1
+        assert store.state.selected_file == "two.py"
+
+
+@pytest.mark.asyncio
+async def test_combined_inline_comment_target_uses_line_file_path() -> None:
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    filenames = ["one.py", "two.py"]
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename=filename, status="modified", patch=patch)
+        for filename in filenames
+    ]
+    store.state.file_diffs = {
+        filename: parse_patch(patch, filename) for filename in filenames
+    }
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert (
+            file_changes.jump_to_file_location(
+                "two.py",
+                1,
+                "RIGHT",
+                focus_diff=False,
+            )
+            is True
+        )
+
+        assert file_changes.diff_view._inline_comment_target_for_current_line() == (
+            "two.py",
+            1,
+            "RIGHT",
+        )
+
+
+@pytest.mark.asyncio
+async def test_combined_diff_maps_pending_drafts_by_file_path() -> None:
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    filenames = ["one.py", "two.py"]
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename=filename, status="modified", patch=patch)
+        for filename in filenames
+    ]
+    store.state.file_diffs = {
+        filename: parse_patch(patch, filename) for filename in filenames
+    }
+    store.save_pending_inline_comment(
+        "draft for two",
+        path="two.py",
+        line=1,
+        side="RIGHT",
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert sorted(file_changes.diff_view._pending_comment_drafts_by_line) == [3]
+
+
+@pytest.mark.asyncio
+async def test_rapid_file_tree_selection_in_combined_scroll_jumps_without_rerender() -> (
+    None
+):
+    """Rapid file-tree selection should jump inside the combined diff."""
 
     patch = "@@ -1,2 +1,2 @@\n-old\n+new"
     filenames = ["one.py", "two.py", "three.py"]
@@ -355,30 +1341,58 @@ async def test_rapid_file_tree_selection_coalesces_to_latest_pending_diff() -> N
         await pilot.pause()
 
         calls: list[str] = []
-        started = threading.Event()
-        unblock = threading.Event()
 
         async def blocking_show_diff(filename: str, diff) -> None:
             calls.append(filename)
-            if len(calls) == 1:
-                started.set()
-                await asyncio.to_thread(unblock.wait, 1.0)
 
         file_changes.diff_view.show_diff = blocking_show_diff  # type: ignore[method-assign]
-
-        file_changes.file_tree.select_file("one.py")
-        await pilot.pause()
-        assert started.wait(timeout=1.0) is True
 
         file_changes.file_tree.select_file("two.py")
         file_changes.file_tree.select_file("three.py")
         await pilot.pause()
         await pilot.pause()
 
-        unblock.set()
-        await pilot.pause()
+        assert calls == []
+        assert file_changes.diff_view.cursor_line == 4
+        assert file_changes.file_tree.selected_file == "three.py"
+
+
+@pytest.mark.asyncio
+async def test_open_file_focuses_current_diff_without_rerender() -> None:
+    patch = "@@ -1,2 +1,2 @@\n-old\n+new"
+    store = PRStore()
+    store.state.files = [PRFile(filename="one.py", status="modified", patch=patch)]
+    store.state.file_diffs = {"one.py": parse_patch(patch, "one.py")}
+    store.state.selected_file = "one.py"
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
         await pilot.pause()
         await pilot.pause()
 
-        assert calls == ["one.py", "three.py"]
-        assert file_changes.file_tree.selected_file == "three.py"
+        await file_changes.diff_view.show_diff(
+            "one.py",
+            store.state.file_diffs["one.py"],
+        )
+        file_changes.file_tree.focus()
+        await pilot.pause()
+
+        calls: list[str] = []
+
+        async def counted_show_diff(filename: str, diff) -> None:
+            calls.append(filename)
+
+        file_changes.diff_view.show_diff = counted_show_diff  # type: ignore[method-assign]
+
+        file_changes.open_file("one.py", focus_diff=True)
+        await pilot.pause()
+
+        assert calls == []
+        assert file_changes.diff_view.has_focus
+        assert store.state.selected_file == "one.py"

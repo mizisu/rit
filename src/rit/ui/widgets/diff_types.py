@@ -54,6 +54,7 @@ class DiffLayout:
     unified_prefix_width: int = 18
     split_prefix_width: int = 8
 
+    vertical_scrolloff: int = 2
     horizontal_scroll_edge_padding: int = 5
     horizontal_scroll_reveal_padding: int = 10
 
@@ -198,6 +199,7 @@ class VirtualState:
     render_pending: bool = False
     cursor_shift_pending: bool = False
     coalesced_center: int | None = None
+    suppress_next_viewport_shift: bool = False
     top_buffer: Static | None = None
     bottom_buffer: Static | None = None
 

@@ -22,6 +22,8 @@ class DiffPlan:
     all_lines: list[DiffLine]
     line_index_by_new_number: dict[int, int]
     line_index_by_old_number: dict[int, int]
+    line_index_by_file_new_number: dict[tuple[str, int], int]
+    line_index_by_file_old_number: dict[tuple[str, int], int]
     hunk_index_by_line: list[int]
     hunk_line_ranges: list[tuple[int, int, int]]
     modified_line_count: int
@@ -141,14 +143,21 @@ def build_diff_plan(diff: FileDiff) -> DiffPlan:
     all_lines: list[DiffLine] = []
     line_index_by_new_number: dict[int, int] = {}
     line_index_by_old_number: dict[int, int] = {}
+    line_index_by_file_new_number: dict[tuple[str, int], int] = {}
+    line_index_by_file_old_number: dict[tuple[str, int], int] = {}
     hunk_index_by_line: list[int] = []
     hunk_line_ranges: list[tuple[int, int, int]] = []
     modified_line_count = 0
+    active_file = diff.filename
 
     line_index = 0
     for hunk_index, hunk in enumerate(diff.hunks):
+        if hunk.starts_file and hunk.file_path:
+            active_file = hunk.file_path
         hunk_start = line_index
         for line in hunk.lines:
+            if line.file_path is None:
+                line.file_path = active_file
             line.line_index = line_index
             all_lines.append(line)
             hunk_index_by_line.append(hunk_index)
@@ -158,8 +167,16 @@ def build_diff_plan(diff: FileDiff) -> DiffPlan:
 
             if line.new_line_no is not None:
                 line_index_by_new_number.setdefault(line.new_line_no, line_index)
+                line_index_by_file_new_number.setdefault(
+                    (line.file_path or active_file, line.new_line_no),
+                    line_index,
+                )
             if line.old_line_no is not None:
                 line_index_by_old_number.setdefault(line.old_line_no, line_index)
+                line_index_by_file_old_number.setdefault(
+                    (line.file_path or active_file, line.old_line_no),
+                    line_index,
+                )
 
             line_index += 1
 
@@ -170,6 +187,8 @@ def build_diff_plan(diff: FileDiff) -> DiffPlan:
         all_lines=all_lines,
         line_index_by_new_number=line_index_by_new_number,
         line_index_by_old_number=line_index_by_old_number,
+        line_index_by_file_new_number=line_index_by_file_new_number,
+        line_index_by_file_old_number=line_index_by_file_old_number,
         hunk_index_by_line=hunk_index_by_line,
         hunk_line_ranges=hunk_line_ranges,
         modified_line_count=modified_line_count,

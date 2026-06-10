@@ -1,9 +1,10 @@
 import pytest
 from textual.app import App
-from textual.widgets import OptionList, TextArea
+from textual.widgets import Markdown, OptionList, TextArea
 
 from rit.state.models import PendingReviewComment
 from rit.ui.screens.review_submit import ReviewSubmitScreen
+from rit.ui.widgets.comment_card import CommentCard
 
 
 @pytest.mark.asyncio
@@ -60,21 +61,23 @@ async def test_review_submit_screen_shows_pending_draft_details() -> None:
         screen = app.screen
         children = list(screen.query_one("#review-submit-dialog").children)
         pending_list = screen.query_one("#review-submit-pending-list")
-        first_item_children = list(
-            screen.query_one("#review-submit-pending-item-0").children
-        )
-        second_item_children = list(
-            screen.query_one("#review-submit-pending-item-1").children
-        )
+        first_item = screen.query_one("#review-submit-pending-item-0", CommentCard)
+        second_item = screen.query_one("#review-submit-pending-item-1", CommentCard)
+        markdown_widgets = list(screen.query(Markdown))
 
         assert children[3].id == "review-submit-pending"
         assert pending_list.region.height >= 8
-        assert str(first_item_children[0].render()) == "src/app.py:7 • new side"
-        assert str(first_item_children[1].render()) == "first draft line"
-        assert (
-            str(second_item_children[0].render()) == "tests/test_app.py:11 • old side"
+        assert len(screen.query("CommentCard.review-submit-pending-item")) == 2
+        assert str(first_item.query_one(".comment-header").render()) == (
+            "src/app.py:7 • new side"
         )
-        assert str(second_item_children[1].render()) == "second draft line"
+        assert str(second_item.query_one(".comment-header").render()) == (
+            "tests/test_app.py:11 • old side"
+        )
+        assert [widget.source for widget in markdown_widgets] == [
+            "first draft line",
+            "second draft line",
+        ]
 
 
 @pytest.mark.asyncio
@@ -118,6 +121,31 @@ async def test_review_submit_screen_allows_empty_comment_when_pending_drafts_exi
         await pilot.pause()
 
         assert app.result == ("COMMENT", "")
+
+
+@pytest.mark.asyncio
+async def test_review_submit_screen_submits_selected_action_with_enter() -> None:
+    class TestApp(App):
+        def __init__(self) -> None:
+            super().__init__()
+            self.result: tuple[str, str] | None = None
+
+        def on_mount(self) -> None:
+            self.push_screen(ReviewSubmitScreen(initial_body="ship it"), self._capture)
+
+        def _capture(self, result: tuple[str, str] | None) -> None:
+            self.result = result
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        await pilot.press("tab")
+        await pilot.press("j")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert app.result == ("APPROVE", "ship it")
 
 
 @pytest.mark.asyncio

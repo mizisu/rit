@@ -6,7 +6,13 @@ from rit.core.diff import (
     parse_multi_file_patch,
     parse_patch,
 )
-from rit.core.highlighting import highlight_lines_for_diff_range
+from textual.content import Content
+
+from rit.core.highlighting import (
+    apply_word_diff_spans,
+    highlight_lines_for_diff,
+    highlight_lines_for_diff_range,
+)
 from rit.core.types import SegmentType
 
 
@@ -554,6 +560,50 @@ class TestComputeLineDiff:
 class TestDiffHighlighting:
     """Tests for range-based diff highlighting."""
 
+    def _assign_line_indexes(self, diff):
+        line_index = 0
+        for hunk in diff.hunks:
+            for line in hunk.lines:
+                line.line_index = line_index
+                line_index += 1
+
+    def _style_signature(self, content):
+        assert content is not None
+        return [(span.start, span.end, str(span.style)) for span in content.spans]
+
+    def test_word_diff_highlights_use_subtle_backgrounds(self):
+        """Inline word-diff marks should not overpower syntax colors."""
+        content = apply_word_diff_spans(
+            Content("old new"),
+            [("old", "-"), (" ", " "), ("new", "+")],
+        )
+
+        assert self._style_signature(content) == [
+            (0, 3, "on $error 20%"),
+            (4, 7, "on $success 20%"),
+        ]
+
+        diff = parse_patch(
+            "@@ -1,1 +1,1 @@\n"
+            "-def make_confirmed(self) -> None:\n"
+            "+def make_confirmed(self, with_save: bool = True) -> None:",
+            "test.py",
+        )
+        self._assign_line_indexes(diff)
+
+        highlight_lines_for_diff(diff)
+
+        line = diff.hunks[0].lines[0]
+        assert line.is_modified
+        assert any(
+            style == "on $error 20%"
+            for _, _, style in self._style_signature(line.highlighted_old_content)
+        )
+        assert any(
+            style == "on $success 20%"
+            for _, _, style in self._style_signature(line.highlighted_new_content)
+        )
+
     def test_highlight_lines_for_diff_range_updates_only_requested_window(self):
         """Range highlighting should leave lines outside the window untouched."""
         patch = """@@ -1,4 +1,4 @@
@@ -563,11 +613,7 @@ class TestDiffHighlighting:
  line3"""
         diff = parse_patch(patch, "test.py")
 
-        line_index = 0
-        for hunk in diff.hunks:
-            for line in hunk.lines:
-                line.line_index = line_index
-                line_index += 1
+        self._assign_line_indexes(diff)
 
         highlight_lines_for_diff_range(diff, 1, 2)
 
@@ -581,3 +627,43 @@ class TestDiffHighlighting:
         assert changed_line.highlighted_new_content is not None
         assert last_line.highlighted_old_content is not None
         assert last_line.highlighted_new_content is not None
+
+    def test_highlight_lines_for_diff_range_uses_hunk_context_for_python_docstrings(
+        self,
+    ):
+        """Windowed highlighting should match full highlighting inside a hunk."""
+        patch = '''@@ -0,0 +1,13 @@
++class PeerReviewNominationApprovalService:
++    """
++    동료 선택 방식의 '평가권자의 승인 필요' 관련 도메인 서비스
++    """
++
++    @classmethod
++    @transaction.atomic
++    def enable_approval(cls, review_cycle: ReviewCycle) -> None:
++        """
++        '승인 필요' off -> on 변경 처리
++        """
++        return None
++'''
+        filename = "peer_review_nomination_approval_service.py"
+        full_diff = parse_patch(patch, filename)
+        range_diff = parse_patch(patch, filename)
+        self._assign_line_indexes(full_diff)
+        self._assign_line_indexes(range_diff)
+
+        highlight_lines_for_diff(full_diff, include_word_diff=False)
+        highlight_lines_for_diff_range(
+            range_diff,
+            3,
+            10,
+            include_word_diff=False,
+        )
+
+        full_lines = full_diff.hunks[0].lines
+        range_lines = range_diff.hunks[0].lines
+        for line_index in (5, 6, 7, 9):
+            assert range_lines[line_index].highlighted_new_content is not None
+            assert self._style_signature(
+                range_lines[line_index].highlighted_new_content
+            ) == self._style_signature(full_lines[line_index].highlighted_new_content)

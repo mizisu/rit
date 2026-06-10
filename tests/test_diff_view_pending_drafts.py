@@ -5,6 +5,7 @@ from textual.widgets import Static, TextArea
 from rit.core.diff import parse_patch
 from rit.state.models import PRComment, ReviewThread
 from rit.state.store import PRStore
+from rit.ui.widgets.comment_card import CommentCard
 from rit.ui.widgets.diff_view import DiffView
 
 
@@ -55,6 +56,8 @@ async def test_diff_view_renders_pending_draft_below_line() -> None:
         line_widget = app.query_one("#line-1")
         draft_widget = app.query_one("#pending-draft-1-right-0")
 
+        assert isinstance(draft_widget, CommentCard)
+        assert len(app.query("CommentCard.pending-draft")) == 1
         assert draft_widget.region.y > line_widget.region.y
 
 

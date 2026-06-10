@@ -5,6 +5,7 @@ from textual.app import App, ComposeResult
 from textual.widgets import Static
 
 from rit.core.diff import parse_patch
+from rit.ui.widgets import diff_cursor as _cursor
 from rit.ui.widgets.diff_view import DiffView
 
 
@@ -188,6 +189,31 @@ class TestDiffViewVisualMode:
             assert diff_view.visual_mode is False
 
     @pytest.mark.asyncio
+    async def test_normal_mode_yank_uses_app_clipboard(
+        self, sample_patch: str
+    ) -> None:
+        """Normal yank should use the same app clipboard path as other copy actions."""
+
+        class TestApp(App):
+            def compose(self) -> ComposeResult:
+                yield DiffView(id="diff-view")
+
+        app = TestApp()
+        async with app.run_test() as pilot:
+            diff_view = app.query_one(DiffView)
+            diff = parse_patch(sample_patch, "test.py")
+
+            await diff_view.show_diff("test.py", diff)
+            await pilot.pause()
+            diff_view.focus()
+            await pilot.pause()
+
+            await pilot.press("y")
+            await pilot.pause()
+
+            assert app.clipboard == "line1\n"
+
+    @pytest.mark.asyncio
     async def test_ctrl_d_keeps_cursor_near_same_viewport_row(self) -> None:
         """`Ctrl-D` should keep the cursor near the same screen row."""
 
@@ -222,6 +248,47 @@ class TestDiffViewVisualMode:
             assert after is not None
             assert diff_view.cursor_line > 20
             assert abs(after - before) <= 1
+
+    @pytest.mark.asyncio
+    async def test_ctrl_d_jumps_without_walking_each_intermediate_row(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`Ctrl-D` should jump once instead of moving through each cursor row."""
+
+        patch = "@@ -1,80 +1,80 @@\n" + "\n".join(f" line{i}" for i in range(1, 81))
+        move_calls = 0
+        original_move_rows = _cursor._move_cursor_rows
+
+        def count_move_rows(*args, **kwargs) -> bool:
+            nonlocal move_calls
+            move_calls += 1
+            return original_move_rows(*args, **kwargs)
+
+        monkeypatch.setattr(_cursor, "_move_cursor_rows", count_move_rows)
+
+        class TestApp(App):
+            def compose(self) -> ComposeResult:
+                yield DiffView(id="diff-view")
+
+        app = TestApp()
+        async with app.run_test(size=(100, 12)) as pilot:
+            diff_view = app.query_one(DiffView)
+            diff = parse_patch(patch, "test.py")
+
+            await diff_view.show_diff("test.py", diff)
+            await pilot.pause()
+            diff_view.focus()
+            await pilot.pause()
+
+            diff_view.cursor_line = 20
+            await pilot.pause()
+
+            await pilot.press("ctrl+d")
+            await pilot.pause()
+
+            assert diff_view.cursor_line > 20
+            assert move_calls <= 1
 
     @pytest.mark.asyncio
     async def test_ctrl_u_keeps_cursor_near_same_viewport_row(self) -> None:

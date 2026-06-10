@@ -11,6 +11,7 @@ from textual.widgets import OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from rit.state.models import PendingReviewComment
+from rit.ui.widgets.comment_card import CommentCard
 
 ReviewEvent = Literal["APPROVE", "COMMENT", "REQUEST_CHANGES"]
 
@@ -84,23 +85,6 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
         margin-bottom: 1;
     }
 
-    .review-submit-pending-item {
-        height: auto;
-        margin: 0 0 1 0;
-        padding-bottom: 1;
-        border-bottom: solid $panel-lighten-1;
-    }
-
-    .review-submit-pending-meta {
-        color: $text-muted;
-        text-style: bold;
-    }
-
-    .review-submit-pending-body {
-        height: auto;
-        margin-left: 1;
-    }
-
     .review-submit-pending-empty {
         color: $text-muted;
     }
@@ -139,27 +123,19 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
                     with VerticalScroll(id="review-submit-pending-list"):
                         if self._pending_comments:
                             for index, comment in enumerate(self._pending_comments):
-                                with Vertical(
+                                yield CommentCard(
+                                    self._pending_comment_meta(comment),
+                                    comment.body.strip(),
                                     id=f"review-submit-pending-item-{index}",
-                                    classes="review-submit-pending-item",
-                                ):
-                                    yield Static(
-                                        self._pending_comment_meta(comment),
-                                        classes="review-submit-pending-meta",
-                                        markup=False,
-                                    )
-                                    yield Static(
-                                        comment.body.strip() or "(No content)",
-                                        classes="review-submit-pending-body",
-                                        markup=False,
-                                    )
+                                    classes="pending-draft review-submit-pending-item",
+                                )
                         else:
                             yield Static(
                                 f"{self._pending_comments_count} pending comments ready to submit",
                                 classes="review-submit-pending-empty",
                             )
             yield Static(
-                "Write summary • Tab to action • Ctrl+S to submit • Esc to cancel"
+                "Write summary • Tab to action • Enter/Ctrl+S to submit • Esc to cancel"
             )
 
     def on_mount(self) -> None:
@@ -215,4 +191,4 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
 
     @on(OptionList.OptionSelected, "#review-submit-actions")
     def on_option_selected(self, _event: OptionList.OptionSelected) -> None:
-        self.query_one("#review-submit-body", TextArea).focus()
+        self.action_submit()

@@ -78,60 +78,6 @@ PRInfo .sidebar-section-title {
     color: #6e738d;
 }
 
-/* Description */
-PRInfo .description-container {
-    height: auto;
-    background: #1e2030;
-    border: solid #363a4f;
-    padding: 1;
-    margin-bottom: 1;
-}
-
-PRInfo .comment-header {
-    margin-bottom: 1;
-}
-
-/* Comment content container */
-PRInfo .comment-content {
-    height: auto;
-}
-
-/* Comment box for timeline items */
-PRInfo .comment-box {
-    background: #1e2030;
-    border: solid #363a4f;
-    padding: 1;
-    margin-bottom: 1;
-    height: auto;
-}
-
-PRInfo .comment-author {
-    text-style: bold;
-}
-
-PRInfo .comment-time {
-    color: #6e738d;
-}
-
-PRInfo .review-state-approved {
-    color: #a6da95;
-}
-
-PRInfo .review-state-changes {
-    color: #ed8796;
-}
-
-PRInfo .review-state-commented {
-    color: #6e738d;
-}
-
-/* Comments section title */
-PRInfo .comments-section-title {
-    text-style: bold;
-    color: #6e738d;
-    margin: 1 0;
-}
-
 /* Comments container - must be auto height for scrolling */
 PRInfo #comments-container {
     height: auto;
@@ -139,7 +85,7 @@ PRInfo #comments-container {
 
 /* Review thread layout (visual style lives in ReviewThreadItem) */
 PRInfo ReviewThreadItem.--thread {
-    margin: 1 0 1 4;
+    margin: 1 0;
 }
 
 /* Placeholder text */
@@ -152,39 +98,12 @@ PRInfo #pr-reviewers {
     overflow: hidden;
 }
 
-/* Collapsible (details) styling */
-PRInfo Collapsible {
-    height: auto;
-    margin: 1 0;
-    background: #181926;
-    border: solid #363a4f;
-    padding: 0;
-}
-
-PRInfo CollapsibleTitle {
-    color: #8aadf4;
-    padding: 0 1;
-}
-
-PRInfo CollapsibleTitle:hover {
-    background: #363a4f;
-}
-
-PRInfo Collapsible > Contents {
-    height: auto;
-    padding: 1;
-}
-
-PRInfo .details-content {
-    height: auto;
-}
-
 /* Selected item highlight */
-PRInfo .description-container.--selected {
+PRInfo CommentCard.description-container.--selected {
     border: solid #8aadf4;
 }
 
-PRInfo .comment-box.--selected {
+PRInfo CommentCard.comment-box.--selected {
     border: solid #8aadf4;
 }
 
@@ -200,13 +119,4 @@ PRInfo ReviewThreadItem.--thread.--selected {
 PRInfo Collapsible.--thread.--resolved.--selected,
 PRInfo ReviewThreadItem.--thread.--resolved.--selected {
     border: solid #8aadf4;
-}
-
-/* Resolved thread header inside container (for resolved indicator) */
-PRInfo .thread-resolved .thread-header {
-    background: #2d4f3c;
-}
-
-PRInfo .resolved-indicator {
-    color: #a6da95;
 }

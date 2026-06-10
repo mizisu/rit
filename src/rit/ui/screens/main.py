@@ -18,6 +18,7 @@ from rit.ui.components.file_changes import FileChanges
 from rit.ui.components.pr_info import PRInfo
 from rit.ui.messages import Flash
 from rit.ui.screens.branch_picker import BranchPickerScreen
+from rit.ui.screens.file_picker import FilePickerScreen
 from rit.ui.screens.multi_select_picker import (
     MultiSelectItem,
     MultiSelectPickerScreen,
@@ -63,6 +64,7 @@ _PR_INFO_BINDINGS = [
     ),
     Binding("K", "prev_comment", "", group=_COMMENT_GROUP, show=False),
     Binding("c", "comment", "Comment", group=_COMMENT_GROUP),
+    Binding("o", "open_thread_in_diff", "Open Diff", group=_NAVIGATION_GROUP),
     Binding("S", "review", "Review", group=_REVIEW_GROUP),
     Binding(
         "R",
@@ -99,6 +101,7 @@ _FILES_BINDINGS = [
     ),
     Binding("[", "prev_file", "Files", key_display="[/]", group=_FILE_GROUP),
     Binding("]", "next_file", "", group=_FILE_GROUP, show=False),
+    Binding("ctrl+o", "go_to_file", "Go File", group=_FILE_GROUP),
     Binding("n", "next_hunk", "Hunks", key_display="n/N", group=_FILE_GROUP),
     Binding("N", "prev_hunk", "", group=_FILE_GROUP, show=False),
     Binding(
@@ -240,7 +243,7 @@ class MainScreen(Screen[None]):
     @on(PRStore.PRLoaded)
     def on_pr_loaded(self, event: PRStore.PRLoaded) -> None:
         self.header.update_from_pr(event.pr)
-        self.pr_info.refresh_summary()
+        self.pr_info.refresh_pr_data()
 
     @on(PRStore.PRDiscussionLoaded)
     def on_pr_discussion_loaded(self, _event: PRStore.PRDiscussionLoaded) -> None:
@@ -253,6 +256,19 @@ class MainScreen(Screen[None]):
         self._pr_info_refresh_pending = True
         if self.current_tab == 0:
             self._refresh_pending_pr_info()
+
+    @on(PRStore.PRDiscussionMetadataLoaded)
+    def on_pr_discussion_metadata_loaded(
+        self, _event: PRStore.PRDiscussionMetadataLoaded
+    ) -> None:
+        self.file_changes.file_tree.refresh_files()
+        self.run_worker(
+            self._refresh_current_diff_after_discussion(),
+            exclusive=False,
+            name="_refresh_current_diff_after_metadata",
+        )
+        if self.current_tab == 0:
+            self.pr_info.refresh_thread_metadata()
 
     def _refresh_pending_pr_info(self) -> None:
         if not self._pr_info_refresh_pending:
@@ -377,6 +393,31 @@ class MainScreen(Screen[None]):
                 )
             else:
                 self.notify("No thread selected", severity="warning")
+
+    def action_open_thread_in_diff(self) -> None:
+        if self.current_tab != 0:
+            return
+
+        location = self.pr_info.get_current_thread_location()
+        if location is None:
+            self.notify("No review thread selected", severity="warning")
+            return
+
+        filename, line, side = location
+        self.switch_tab(1)
+        if not self.file_changes.jump_to_file_location(
+            filename,
+            line,
+            side,
+            focus_diff=True,
+        ):
+            self.post_message(
+                Flash(
+                    f"Could not find {filename}:{line} in the current diff",
+                    style="warning",
+                    duration=2.0,
+                )
+            )
 
     def action_comment(self) -> None:
         if self.store.state.pr is None:
@@ -664,7 +705,37 @@ class MainScreen(Screen[None]):
         current_pane = diff_view.active_pane
         await diff_view.show_diff(current_file, diff)
         if 0 <= current_line < len(diff_view._all_lines):
-            diff_view._move_cursor(line=current_line, pane=current_pane)
+            diff_view._move_cursor(
+                line=current_line,
+                pane=current_pane,
+                update_active_pane=True,
+            )
+
+    async def _refresh_diff_preserving_cursor(
+        self,
+        current_file: str | None,
+        current_line: int,
+        current_pane: Literal["old", "new"] | None,
+        *,
+        focus_diff: bool = False,
+    ) -> None:
+        if current_file is None:
+            return
+
+        diff_view = self.file_changes.diff_view
+        diff = self.store.get_file_diff(current_file)
+        if diff is None:
+            return
+
+        await diff_view.show_diff(current_file, diff)
+        if 0 <= current_line < len(diff_view._all_lines):
+            diff_view._move_cursor(
+                line=current_line,
+                pane=current_pane,
+                update_active_pane=True,
+            )
+        if focus_diff:
+            diff_view.focus()
 
     async def _submit_issue_comment(self, body: str) -> bool:
         await self.store.submit_issue_comment(body)
@@ -692,7 +763,11 @@ class MainScreen(Screen[None]):
             if diff is not None:
                 await diff_view.show_diff(current_file, diff)
                 if 0 <= current_line < len(diff_view._all_lines):
-                    diff_view._move_cursor(line=current_line, pane=current_pane)
+                    diff_view._move_cursor(
+                        line=current_line,
+                        pane=current_pane,
+                        update_active_pane=True,
+                    )
         return True
 
     async def _set_requested_reviewers(
@@ -748,7 +823,11 @@ class MainScreen(Screen[None]):
 
         await diff_view.show_diff(current_file, diff)
         if 0 <= current_line < len(diff_view._all_lines):
-            diff_view._move_cursor(line=current_line, pane=current_pane)
+            diff_view._move_cursor(
+                line=current_line,
+                pane=current_pane,
+                update_active_pane=True,
+            )
         diff_view.focus()
         return True
 
@@ -765,26 +844,39 @@ class MainScreen(Screen[None]):
         current_line = diff_view.cursor_line
         current_pane = diff_view.active_pane
 
-        await diff_view.close_inline_comment_editor()
-        await self.store.upsert_pending_inline_comment(
+        snapshot = self.store.snapshot_pending_review()
+        self.store.save_pending_inline_comment(
             body,
             path=path,
             line=line,
             side=side,
         )
+        rollback_version = self.store.pending_review_version
+
+        await diff_view.close_inline_comment_editor()
         self.file_changes.file_tree.refresh_files()
+        await self._refresh_diff_preserving_cursor(
+            current_file,
+            current_line,
+            current_pane,
+            focus_diff=True,
+        )
 
-        if current_file is None:
-            return True
+        try:
+            await self.store.sync_pending_review(
+                rollback_to=snapshot,
+                rollback_if_version=rollback_version,
+            )
+        except Exception:
+            self.file_changes.file_tree.refresh_files()
+            await self._refresh_diff_preserving_cursor(
+                current_file,
+                current_line,
+                current_pane,
+                focus_diff=True,
+            )
+            raise
 
-        diff = self.store.get_file_diff(current_file)
-        if diff is None:
-            return True
-
-        await diff_view.show_diff(current_file, diff)
-        if 0 <= current_line < len(diff_view._all_lines):
-            diff_view._move_cursor(line=current_line, pane=current_pane)
-        diff_view.focus()
         return True
 
     async def _delete_pending_inline_comment(self) -> bool:
@@ -797,23 +889,39 @@ class MainScreen(Screen[None]):
             return False
 
         path, line, side = target
-        deleted = await self.store.remove_pending_inline_comment(
+        snapshot = self.store.snapshot_pending_review()
+        deleted = self.store.delete_pending_inline_comment(
             path=path,
             line=line,
             side=side,
         )
         if not deleted:
             return False
+        rollback_version = self.store.pending_review_version
 
         self.file_changes.file_tree.refresh_files()
-        diff = self.store.get_file_diff(current_file)
-        if diff is None:
-            return True
+        await self._refresh_diff_preserving_cursor(
+            current_file,
+            current_line,
+            current_pane,
+            focus_diff=True,
+        )
 
-        await diff_view.show_diff(current_file, diff)
-        if 0 <= current_line < len(diff_view._all_lines):
-            diff_view._move_cursor(line=current_line, pane=current_pane)
-        diff_view.focus()
+        try:
+            await self.store.sync_pending_review(
+                rollback_to=snapshot,
+                rollback_if_version=rollback_version,
+            )
+        except Exception:
+            self.file_changes.file_tree.refresh_files()
+            await self._refresh_diff_preserving_cursor(
+                current_file,
+                current_line,
+                current_pane,
+                focus_diff=True,
+            )
+            raise
+
         return True
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
@@ -1023,6 +1131,36 @@ class MainScreen(Screen[None]):
     def action_next_file(self) -> None:
         self.file_changes.select_next_file()
 
+    def action_go_to_file(self) -> None:
+        if self.current_tab != 1:
+            return
+
+        files = list(self.store.state.files)
+        if not files:
+            self.post_message(Flash("No files loaded", style="warning", duration=2.0))
+            return
+
+        selected_file = (
+            self.store.state.selected_file
+            or self.file_changes.diff_view.current_file
+            or files[0].filename
+        )
+        total_count = self.store.state.files_total_count or len(files)
+        self.app.push_screen(
+            FilePickerScreen(
+                files=files,
+                selected_file=selected_file,
+                total_count=total_count,
+            ),
+            self._handle_file_picker,
+        )
+
+    def _handle_file_picker(self, filename: str | None) -> None:
+        if filename is None:
+            return
+        self.switch_tab(1)
+        self.file_changes.open_file(filename, focus_diff=True)
+
     def action_next_hunk(self) -> None:
         self.file_changes.next_hunk()
 
@@ -1041,11 +1179,8 @@ class MainScreen(Screen[None]):
     def _navigate_to_file_with_comments(self, direction: int) -> None:
         """Find and switch to the next file with review threads.
 
-        Sets ``_pending_comment_jump`` on the DiffView so the jump executes
-        after ``show_diff`` completes in ``_finalize_render_state``.  If the
-        target file turns out to have no *visible* comment lines (threads
-        exist but don't map to diff lines), the DiffView automatically
-        re-posts ``CrossFileComment`` to continue the search.
+        File navigation stays inside the combined diff when multiple files are
+        loaded, so comment jumps do not fall back to per-file rendering.
         """
         store = self.store
         files = store.state.files
@@ -1061,21 +1196,26 @@ class MainScreen(Screen[None]):
         for offset in range(1, n + 1):
             idx = (current_idx + direction * offset) % n
             filename = files[idx].filename
-            has_threads = any(
-                t for t in store.state.review_threads if t.path == filename
-            )
-            if has_threads:
-                diff = store.get_file_diff(filename)
-                if diff:
-                    dv = self.file_changes.diff_view
-                    dv._pending_comment_jump = "first" if direction == 1 else "last"
-                    self.file_changes._queue_file_render_request(
-                        filename,
-                        diff,
-                        focus_diff=True,
-                        sync_tree_selection=True,
-                    )
-                return
+            threads = [t for t in store.state.review_threads if t.path == filename]
+            if not threads:
+                continue
+
+            target_thread = threads[0] if direction == 1 else threads[-1]
+            target_line = target_thread.anchor_line
+            if target_line is not None:
+                target_side: Literal["LEFT", "RIGHT"] = (
+                    "LEFT" if target_thread.anchor_side == "old" else "RIGHT"
+                )
+                if self.file_changes.jump_to_file_location(
+                    filename,
+                    target_line,
+                    target_side,
+                    focus_diff=True,
+                ):
+                    return
+
+            self.file_changes.open_file(filename, focus_diff=True)
+            return
 
         self.app.post_message(
             Flash("No more files with comments", style="warning", duration=2.0)

@@ -30,6 +30,20 @@ class ParsedFilePatch:
     patch: str
 
 
+@dataclass(frozen=True)
+class ParsedFilePatchSummary:
+    """Lightweight metadata for a file section from a multi-file unified diff."""
+
+    filename: str
+    patch: str
+    old_filename: str | None = None
+    is_new: bool = False
+    is_deleted: bool = False
+    is_binary: bool = False
+    additions: int = 0
+    deletions: int = 0
+
+
 def parse_multi_file_patch(
     patch: str,
     *,
@@ -58,6 +72,27 @@ def parse_multi_file_patch(
         diff.is_binary = is_binary
         parsed.append(ParsedFilePatch(diff=diff, patch=section))
     return parsed
+
+
+def parse_file_patch_summary(section: str) -> ParsedFilePatchSummary | None:
+    """Parse file metadata and line counts without building diff line objects."""
+    filename, old_filename, is_new, is_deleted, is_binary = _parse_file_metadata(
+        section
+    )
+    if not filename:
+        return None
+
+    additions, deletions = _count_patch_changes(section)
+    return ParsedFilePatchSummary(
+        filename=filename,
+        patch=section,
+        old_filename=old_filename,
+        is_new=is_new,
+        is_deleted=is_deleted,
+        is_binary=is_binary,
+        additions=additions,
+        deletions=deletions,
+    )
 
 
 def _split_multi_file_patch(patch: str) -> list[str]:
@@ -117,6 +152,19 @@ def _parse_file_metadata(section: str) -> tuple[str, str | None, bool, bool, boo
     if old_filename == filename:
         old_filename = None
     return filename, old_filename, is_new, is_deleted, is_binary
+
+
+def _count_patch_changes(section: str) -> tuple[int, int]:
+    additions = 0
+    deletions = 0
+    for line in section.splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            additions += 1
+        elif line.startswith("-"):
+            deletions += 1
+    return additions, deletions
 
 
 def _parse_diff_git_paths(line: str) -> tuple[str, str]:

@@ -34,6 +34,15 @@ def _make_review_thread(
     )
 
 
+def _block_row_content_bounds(diff_view: DiffView, line_index: int) -> tuple[int, int]:
+    block = diff_view._unified_blocks_by_line[line_index]
+    row_offset = list(block.line_indices).index(line_index)
+    top = int(diff_view.scroll_y) + (
+        block.region.y - diff_view.scrollable_content_region.y
+    ) + row_offset
+    return top, top + 1
+
+
 @pytest.mark.asyncio
 async def test_landing_on_diff_line_does_not_select_comment() -> None:
     """When cursor lands on a diff line, none of its comments should be highlighted."""
@@ -419,3 +428,60 @@ async def test_cursor_line_after_comment_is_highlighted_inside_grouped_block() -
         assert isinstance(visual, LineContent)
         block_row = list(block.line_indices).index(31)
         assert visual.line_styles[block_row] == "on $primary 25%"
+
+
+@pytest.mark.asyncio
+async def test_cursor_line_after_many_comments_stays_visible_inside_grouped_block() -> (
+    None
+):
+    """Leaving a tall comment stack should reveal the next grouped-block row."""
+
+    patch = "@@ -1,180 +1,180 @@\n" + "\n".join(
+        f" line{i}" for i in range(1, 181)
+    )
+    body = "\n".join(f"comment line {i}" for i in range(20))
+    store = PRStore()
+    for root_id in range(100, 106):
+        store.state.review_threads.append(
+            _make_review_thread(root_id=root_id, line=31, body=body)
+        )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(store=store, mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test(size=(120, 10)) as pilot:
+        diff_view = app.query_one(DiffView)
+        diff = parse_patch(patch, "test.py")
+
+        await diff_view.show_diff("test.py", diff)
+        await pilot.pause()
+        await pilot.pause()
+        diff_view.focus()
+        await pilot.pause()
+
+        diff_view.cursor_line = 30
+        await pilot.pause()
+        await pilot.pause()
+
+        row = diff_view._current_row()
+        assert row is not None
+        top, _ = diff_view._row_vertical_bounds(row) or (None, None)
+        assert top is not None
+        diff_view.scroll_y = max(0, top - 2)
+        await pilot.pause()
+        await pilot.pause()
+
+        for _ in range(7):
+            await pilot.press("j")
+            await pilot.pause()
+
+        assert diff_view.cursor_line == 31
+        assert diff_view._comment_cursor_index == 0
+
+        top, bottom = _block_row_content_bounds(diff_view, 31)
+        viewport_top = int(diff_view.scroll_y)
+        viewport_bottom = viewport_top + diff_view.scrollable_content_region.height
+        assert top >= viewport_top
+        assert bottom <= viewport_bottom

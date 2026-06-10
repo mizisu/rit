@@ -5,6 +5,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import pyperclip
 from textual.app import App
 from textual.binding import Binding
 from textual.notifications import SeverityLevel
@@ -72,6 +73,14 @@ class RitApp(App):
 
         self.settings_changed_signal.publish((key, value, old_value))
         self.post_message(SettingChanged(key=key, value=value, old_value=old_value))
+
+    def copy_to_clipboard(self, text: str) -> None:
+        """Copy text through Textual and the native system clipboard."""
+        super().copy_to_clipboard(text)
+        try:
+            pyperclip.copy(text)
+        except pyperclip.PyperclipException:
+            pass
 
     def on_mount(self) -> None:
         from rit.ui.screens.main import MainScreen

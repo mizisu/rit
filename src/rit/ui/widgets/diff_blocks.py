@@ -151,9 +151,9 @@ def _build_unified_modified_block_prefix_content(
 
 def _cursor_block_line_style(line_style: str) -> str:
     if "$success" in line_style:
-        return "on $success 30%"
+        return "on $success 18%"
     if "$error" in line_style:
-        return "on $error 30%"
+        return "on $error 18%"
     return "on $primary 25%"
 
 

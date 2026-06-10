@@ -5,6 +5,7 @@ import base64
 import pytest
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
+from textual.css.query import NoMatches
 
 from rit.ui.components.collapsible_markdown import (
     CopyableCodeBlock,
@@ -424,14 +425,19 @@ async def test_markdown_image_block_loads_image_from_in_memory_bytes() -> None:
 
     app = TestApp()
     async with app.run_test() as pilot:
+        image_widget = None
         for _ in range(10):
             await pilot.pause(0.1)
+            try:
+                image_widget = app.query_one(".markdown-terminal-image")
+            except NoMatches:
+                continue
             if fetched_urls:
                 break
 
         assert fetched_urls == ["https://example.com/tiny.png"]
         assert app.query_one(MarkdownImageBlock).image.alt == "Tiny"
-        image_widget = app.query_one(".markdown-terminal-image")
+        assert image_widget is not None
         assert image_widget.size.height > 0
 
         clicked = await pilot.click("MarkdownImageBlock .markdown-image-header")
@@ -439,6 +445,63 @@ async def test_markdown_image_block_loads_image_from_in_memory_bytes() -> None:
 
         assert clicked is True
         assert isinstance(app.screen, ImageViewerScreen)
+
+
+@pytest.mark.asyncio
+async def test_eager_details_with_code_block_waits_for_inner_container_mount() -> None:
+    body = """<details>
+<summary>Patch</summary>
+
+```diff
+- old
++ new
+```
+
+</details>"""
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield Vertical(id="root")
+
+        def on_mount(self) -> None:
+            root = self.query_one("#root", Vertical)
+            mount_markdown_with_details(root, body)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+
+        assert app.query_one(CopyableCodeBlock) is not None
+
+
+@pytest.mark.asyncio
+async def test_removed_eager_details_does_not_load_unmounted_content() -> None:
+    body = """<details>
+<summary>Patch</summary>
+
+```diff
+- old
++ new
+```
+
+</details>"""
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield Vertical(id="root")
+
+        def on_mount(self) -> None:
+            root = self.query_one("#root", Vertical)
+            mount_markdown_with_details(root, body)
+            root.remove_children()
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.pause()
+
+        assert len(app.query(CopyableCodeBlock)) == 0
 
 
 @pytest.mark.asyncio

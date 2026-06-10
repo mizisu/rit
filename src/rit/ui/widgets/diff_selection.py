@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
-import sys
 from typing import TYPE_CHECKING, Literal
 
 from textual.content import Content
@@ -164,42 +162,6 @@ def _exit_visual(view: DiffView) -> None:
     elif view._search_query:
         _search.clear_state(view)
         _search._refresh_search_display(view)
-
-
-def _copy_to_clipboard(text: str) -> None:
-    if sys.platform == "darwin":
-        process = subprocess.Popen(
-            ["pbcopy"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        process.communicate(text.encode("utf-8"))
-    elif sys.platform.startswith("linux"):
-        try:
-            process = subprocess.Popen(
-                ["xclip", "-selection", "clipboard"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            process.communicate(text.encode("utf-8"))
-        except FileNotFoundError:
-            process = subprocess.Popen(
-                ["xsel", "--clipboard", "--input"],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            )
-            process.communicate(text.encode("utf-8"))
-    elif sys.platform == "win32":
-        process = subprocess.Popen(
-            ["clip"],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        process.communicate(text.encode("utf-8"))
 
 
 # ---------------------------------------------------------------------------

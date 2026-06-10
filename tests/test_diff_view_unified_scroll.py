@@ -112,6 +112,173 @@ async def test_cursor_move_brings_widget_into_view_with_pending_drafts() -> None
 
 
 @pytest.mark.asyncio
+async def test_single_line_move_reveals_block_row_when_drafts_exist() -> None:
+    """Block-rendered rows should still follow the cursor when drafts add height drift."""
+
+    from rit.state.store import PRStore
+
+    line_count = 267
+    lines = [f" line{i}" for i in range(139, 139 + line_count)]
+    patch = f"@@ -139,{line_count} +65,{line_count} @@\n" + "\n".join(lines)
+
+    store = PRStore()
+    store.save_pending_inline_comment(
+        "draft body",
+        path="openapi.py",
+        line=200,
+        side="RIGHT",
+    )
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield DiffView(store=store, mode="split", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test(size=(120, 12)) as pilot:
+        diff_view = app.query_one(DiffView)
+        diff = parse_patch(patch, "openapi.py")
+
+        await diff_view.show_diff("openapi.py", diff)
+        await pilot.pause()
+        await pilot.pause()
+        diff_view.focus()
+        await pilot.pause()
+
+        diff_view.cursor_line = 17
+        await pilot.pause()
+        await pilot.pause()
+
+        row = diff_view._current_row()
+        assert row is not None
+        _, bottom = diff_view._row_vertical_bounds(row) or (None, None)
+        assert bottom is not None
+        diff_view.scroll_y = max(
+            0,
+            bottom - max(1, diff_view.scrollable_content_region.height),
+        )
+        await pilot.pause()
+        await pilot.pause()
+
+        before_scroll_y = int(diff_view.scroll_y)
+
+        await pilot.press("j")
+        await pilot.pause()
+        await pilot.pause()
+
+        row = diff_view._current_row()
+        assert row is not None
+        top, bottom = diff_view._row_vertical_bounds(row) or (None, None)
+        assert top is not None and bottom is not None
+        viewport_top = int(diff_view.scroll_y)
+        viewport_bottom = viewport_top + diff_view.scrollable_content_region.height
+
+        assert diff_view.cursor_line == 18
+        assert int(diff_view.scroll_y) > before_scroll_y
+        assert top >= viewport_top
+        assert bottom <= viewport_bottom
+
+
+@pytest.mark.asyncio
+async def test_cursor_reveal_keeps_vim_scrolloff_context() -> None:
+    """Cursor reveal should keep context below the cursor before the viewport edge."""
+
+    line_count = 80
+    lines = [f" line{i}" for i in range(1, line_count + 1)]
+    patch = f"@@ -1,{line_count} +1,{line_count} @@\n" + "\n".join(lines)
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test(size=(100, 12)) as pilot:
+        diff_view = app.query_one(DiffView)
+        diff = parse_patch(patch, "test.py")
+
+        await diff_view.show_diff("test.py", diff)
+        await pilot.pause()
+        diff_view.focus()
+        await pilot.pause()
+
+        diff_view.cursor_line = 10
+        await pilot.pause()
+        await pilot.pause()
+
+        row = diff_view._current_row()
+        assert row is not None
+        _, bottom = diff_view._row_vertical_bounds(row) or (None, None)
+        assert bottom is not None
+
+        viewport_bottom = (
+            int(diff_view.scroll_y) + diff_view.scrollable_content_region.height
+        )
+        assert bottom <= viewport_bottom - diff_view.LAYOUT.vertical_scrolloff
+
+
+@pytest.mark.asyncio
+async def test_single_line_cursor_move_repaints_immediately() -> None:
+    """One-line cursor moves should not leave the cursor repaint queued."""
+
+    patch = "@@ -1,3 +1,3 @@\n line1\n line2\n line3"
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test(size=(100, 8)) as pilot:
+        diff_view = app.query_one(DiffView)
+        diff = parse_patch(patch, "test.py")
+
+        await diff_view.show_diff("test.py", diff)
+        await pilot.pause()
+        diff_view.focus()
+        await pilot.pause()
+
+        diff_view.action_scroll_down()
+
+        assert diff_view.cursor_line == 1
+        assert diff_view._cursor_ui.flush_pending is False
+        line = diff_view.query_one("#line-1 .code-content")
+        assert line.has_class("-cursor")
+
+
+@pytest.mark.asyncio
+async def test_show_diff_new_file_resets_vertical_scroll_to_cursor() -> None:
+    """Opening a new file should not keep the previous file's vertical scroll."""
+
+    line_count = 80
+    lines = [f" line{i}" for i in range(1, line_count + 1)]
+    patch = f"@@ -1,{line_count} +1,{line_count} @@\n" + "\n".join(lines)
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test(size=(100, 12)) as pilot:
+        diff_view = app.query_one(DiffView)
+        diff = parse_patch(patch, "test.py")
+
+        await diff_view.show_diff("first.py", diff)
+        await pilot.pause()
+        diff_view.focus()
+        await pilot.pause()
+
+        await pilot.press("G")
+        await pilot.pause()
+        await pilot.pause()
+        assert diff_view.scroll_y > 0
+
+        await diff_view.show_diff("second.py", diff)
+        await pilot.pause()
+        await pilot.pause()
+
+        assert diff_view.cursor_line == 0
+        assert diff_view.scroll_y == 0
+
+
+@pytest.mark.asyncio
 async def test_unified_hunk_header_spans_block_scroll_width() -> None:
     """Unified hunk headers should cover the block renderer's horizontal width."""
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import TYPE_CHECKING, Literal
 
 from textual.containers import VerticalScroll
@@ -13,7 +12,7 @@ from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets import diff_geometry as _geometry
 from rit.ui.widgets import diff_search as _search
 from rit.ui.widgets import diff_virtual as _virtual
-from rit.ui.widgets.diff_types import RenderedRow
+from rit.ui.widgets.diff_types import RenderedRow, SplitDiffBlock, UnifiedDiffBlock
 
 if TYPE_CHECKING:
     from rit.ui.widgets.diff_view import DiffView
@@ -121,7 +120,10 @@ def _step_down_one(view: DiffView) -> bool:
         _activate_comment_cursor(view, cur_line)
         return True
 
-    return _move_cursor_rows(view, 1, scroll_in_visual=view.visual_mode)
+    moved = _move_cursor_rows(view, 1, scroll_in_visual=view.visual_mode)
+    if moved:
+        _flush_cursor_ui_now_if_safe(view)
+    return moved
 
 
 def _step_up_one(view: DiffView) -> bool:
@@ -145,6 +147,7 @@ def _step_up_one(view: DiffView) -> bool:
         return False
 
     if view.visual_mode:
+        _flush_cursor_ui_now_if_safe(view)
         return True
 
     new_line = view.cursor_line
@@ -153,6 +156,8 @@ def _step_up_one(view: DiffView) -> bool:
         if n_comments > 0:
             view._comment_cursor_index = n_comments
             _activate_comment_cursor(view, new_line)
+            return True
+    _flush_cursor_ui_now_if_safe(view)
     return True
 
 
@@ -183,41 +188,55 @@ def _scroll_end(view: DiffView) -> None:
 
 async def _half_page_down(view: DiffView) -> None:
     if view._all_lines:
-        await _animated_half_page_scroll(view, 1)
+        _jump_half_page(view, 1)
         return
     view.scroll_page_down(animate=False)
 
 
 async def _half_page_up(view: DiffView) -> None:
     if view._all_lines:
-        await _animated_half_page_scroll(view, -1)
+        _jump_half_page(view, -1)
         return
     view.scroll_page_up(animate=False)
 
 
-async def _animated_half_page_scroll(view: DiffView, direction: int) -> None:
+def _jump_half_page(view: DiffView, direction: int) -> None:
+    rows = view._rows_for_current_mode()
+    if not rows:
+        return
+
     step = _half_page_step(view)
     viewport_offset = _current_cursor_viewport_offset(view)
-    delay = 0.15 / step
+    current = view._current_row_index()
+    target = max(0, min(current + (direction * step), len(rows) - 1))
+    if target == current:
+        return
 
-    for _ in range(step):
-        view._cursor_ui.suppress_scroll = True
-        try:
-            moved = _move_cursor_rows(
-                view,
-                direction,
-                scroll_in_visual=view.visual_mode,
-            )
-        finally:
-            view._cursor_ui.suppress_scroll = False
-        if not moved:
-            break
-        if viewport_offset is not None:
-            row = view._current_row()
-            if row is not None:
-                _scroll_row_to_viewport_offset(view, row, viewport_offset)
-        _flush_cursor_ui_now_if_safe(view)
-        await asyncio.sleep(delay)
+    if view._cursor_ui.desired_column is None:
+        view._cursor_ui.desired_column = view.cursor_column
+
+    row = rows[target]
+    view._cursor_ui.suppress_scroll = True
+    try:
+        moved = _move_cursor_to_row(
+            view,
+            row,
+            column=view._cursor_ui.desired_column,
+            scroll_in_visual=view.visual_mode,
+            preserve_desired_column=True,
+        )
+    finally:
+        view._cursor_ui.suppress_scroll = False
+
+    if not moved:
+        return
+
+    if viewport_offset is not None:
+        _scroll_row_to_viewport_offset(view, row, viewport_offset)
+    else:
+        _scroll_to_cursor(view)
+    _scroll_to_cursor_horizontal(view)
+    _flush_cursor_ui_now_if_safe(view)
 
 
 # ---------------------------------------------------------------------------
@@ -297,9 +316,14 @@ def _cycle_active_pane(view: DiffView) -> None:
     if not view.split and not line.is_modified:
         return
     target_pane: Literal["old", "new"] = (
-        "old" if view._resolve_active_pane_for_line(line) == "new" else "new"
+        "old" if view.active_pane == "new" else "new"
     )
-    _move_cursor(view, pane=target_pane, scroll_in_visual=view.visual_mode)
+    _move_cursor(
+        view,
+        pane=target_pane,
+        scroll_in_visual=view.visual_mode,
+        update_active_pane=True,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -432,7 +456,7 @@ def _is_word_char(char: str) -> bool:
 
 def _pane_for_row(view: DiffView, row: RenderedRow) -> Literal["old", "new"]:
     if row.side == "auto":
-        return view.active_pane
+        return view.cursor_pane
     return row.side
 
 
@@ -631,12 +655,14 @@ def _scroll_to_vertical_span(
     *,
     animate: bool = False,
     top_align: bool = False,
+    scrolloff: int | None = None,
 ) -> None:
     target_scroll = _geometry.scroll_target_for_span(
         top=top,
         bottom=bottom,
         viewport=_viewport_geometry(view),
         top_align=top_align,
+        scrolloff=view.LAYOUT.vertical_scrolloff if scrolloff is None else scrolloff,
     )
     if target_scroll is not None:
         view.scroll_to(y=target_scroll, animate=animate)
@@ -650,11 +676,53 @@ def _target_widget_for_row(view: DiffView, row: RenderedRow):
     `scroll_to_widget` on this widget over geometry-based scrolling.
     """
     target = view._row_anchor_widgets.get(row.anchor_id)
-    if target is None:
+    if target is None or not target.is_mounted:
         target = view._line_widgets_by_index.get(row.line_index)
     if target is None or not target.is_mounted:
         return None
+    if isinstance(target, (SplitDiffBlock, UnifiedDiffBlock)):
+        return None
     return target
+
+
+def _mounted_block_row_vertical_bounds(
+    view: DiffView,
+    row: RenderedRow,
+) -> tuple[int, int] | None:
+    block = (
+        view._split_blocks_by_line.get(row.line_index)
+        if view.split
+        else view._unified_blocks_by_line.get(row.line_index)
+    )
+    if block is None or not block.is_mounted:
+        return None
+
+    line_indices = list(block.line_indices)
+    try:
+        row_offset = line_indices.index(row.line_index)
+    except ValueError:
+        return None
+
+    block_top = int(view.scroll_y) + (
+        block.region.y - view.scrollable_content_region.y
+    )
+    if view.split:
+        top = block_top + row_offset
+        return top, top + 1
+
+    offset = 0
+    for line_index in line_indices:
+        if not (0 <= line_index < len(view._all_lines)):
+            continue
+        line = view._all_lines[line_index]
+        if line_index == row.line_index:
+            if line.is_modified and row.side == "new":
+                offset += 1
+            top = block_top + offset
+            return top, top + 1
+        offset += _geometry.render_height_for_line(line, split=False)
+
+    return None
 
 
 def _has_height_estimate_drift(view: DiffView) -> bool:
@@ -682,6 +750,11 @@ def _scroll_to_cursor(view: DiffView) -> None:
             target_widget = _target_widget_for_row(view, row)
             if target_widget is not None:
                 view.scroll_to_widget(target_widget, animate=False)
+                return
+            bounds = _mounted_block_row_vertical_bounds(view, row)
+            if bounds is not None:
+                top, bottom = bounds
+                _scroll_to_vertical_span(view, top, bottom, animate=False)
                 return
 
         bounds = _row_vertical_bounds(view, row)
@@ -742,6 +815,7 @@ def _jump_to_row_with_anchor(
     bottom_align: bool = False,
     animate: bool = False,
     reveal_horizontal: bool = False,
+    update_active_pane: bool = False,
 ) -> None:
     target_pane = pane
     if target_pane is None and row.side != "auto":
@@ -755,6 +829,7 @@ def _jump_to_row_with_anchor(
             pane=target_pane,
             column=column,
             scroll_in_visual=view.visual_mode,
+            update_active_pane=update_active_pane,
         )
     finally:
         view._cursor_ui.suppress_scroll = False
@@ -939,6 +1014,7 @@ def _move_cursor(
     pane: Literal["old", "new"] | None = None,
     scroll_in_visual: bool = False,
     preserve_desired_column: bool = False,
+    update_active_pane: bool = False,
 ) -> bool:
     if not view._all_lines:
         return False
@@ -948,16 +1024,17 @@ def _move_cursor(
 
     old_line = view.cursor_line
     old_column = view.cursor_column
-    old_pane = view.active_pane
+    old_pane = view.cursor_pane
 
     target_line = (
         old_line if line is None else max(0, min(line, len(view._all_lines) - 1))
     )
     target_line_obj = view._all_lines[target_line]
     requested_pane = old_pane if pane is None else pane
-    target_pane = view._resolve_active_pane_for_line(target_line_obj, requested_pane)
+    target_pane = requested_pane
+    target_side = view._resolve_active_pane_for_line(target_line_obj, target_pane)
 
-    target_text = _get_cursor_text_for_target(view, target_line, target_pane)
+    target_text = _get_cursor_text_for_target(view, target_line, target_side)
     requested_column = old_column if column is None else column
     if target_text:
         target_column = max(0, min(requested_column, len(target_text) - 1))
@@ -968,6 +1045,7 @@ def _move_cursor(
         target_line == old_line
         and target_column == old_column
         and target_pane == old_pane
+        and (not update_active_pane or view.active_pane == target_pane)
     ):
         return False
 
@@ -975,7 +1053,9 @@ def _move_cursor(
     view._cursor_ui.suspend_line_watch = True
     view._cursor_ui.suspend_column_watch = True
     try:
-        view.active_pane = target_pane
+        if update_active_pane:
+            view.active_pane = target_pane
+        view.cursor_pane = target_pane
         view.cursor_line = target_line
         view.cursor_column = target_column
     finally:
@@ -1003,6 +1083,7 @@ def _move_cursor_to_row(
     column: int | None = None,
     scroll_in_visual: bool = False,
     preserve_desired_column: bool = False,
+    update_active_pane: bool = False,
 ) -> bool:
     target_pane: Literal["old", "new"] | None
     if row.side == "auto":
@@ -1016,6 +1097,7 @@ def _move_cursor_to_row(
         column=column,
         scroll_in_visual=scroll_in_visual,
         preserve_desired_column=preserve_desired_column,
+        update_active_pane=update_active_pane,
     )
 
 
