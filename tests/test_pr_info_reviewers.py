@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from rit.state.models import PR, PRReview, PRTeam, PRUser, ReviewRequest, ReviewState
 from rit.state.reviewer_status import derive_reviewer_states
@@ -80,6 +80,21 @@ def test_latest_review_state_is_chosen_by_timestamp() -> None:
     assert len(reviewers) == 1
     assert reviewers[0].kind == "approved"
     assert reviewers[0].latest_review_at == datetime(2026, 4, 3, 9)
+
+
+def test_pending_review_can_be_compared_with_timezone_aware_reviews() -> None:
+    pr = _pr()
+    submitted_at = datetime(2026, 4, 3, 9, tzinfo=timezone.utc)
+    reviews = [
+        _review("alice", ReviewState.APPROVED, submitted_at=submitted_at),
+        _review("alice", ReviewState.PENDING, submitted_at=None),
+    ]
+
+    reviewers = derive_reviewer_states(pr, reviews)
+
+    assert len(reviewers) == 1
+    assert reviewers[0].kind == "approved"
+    assert reviewers[0].latest_review_at == submitted_at
 
 
 def test_author_reviews_are_excluded() -> None:

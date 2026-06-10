@@ -35,6 +35,23 @@ async def test_submit_issue_comment_updates_store_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_submit_issue_comment_sorts_missing_and_aware_dates() -> None:
+    store = PRStore(pr_number=123)
+    service = FakeCommentService()
+    store._service = service  # type: ignore[assignment]
+    existing = PRIssueComment(
+        id=2,
+        body="missing date",
+        user=PRUser(login="bob"),
+    )
+    store.state.issue_comments = [existing]
+
+    comment = await store.submit_issue_comment("new comment")
+
+    assert store.state.issue_comments == [existing, comment]
+
+
+@pytest.mark.asyncio
 async def test_submit_issue_comment_rejects_empty_body() -> None:
     store = PRStore(pr_number=123)
 

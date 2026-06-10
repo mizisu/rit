@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from rit.state.models import PR, PRComment, PRReview, PRUser, ReviewState
@@ -22,7 +24,9 @@ class FakeInlineCommentService:
         line: int,
         side: str,
     ) -> PRComment:
-        self.inline_comment_calls.append((pr_number, body, commit_id, path, line, side))
+        self.inline_comment_calls.append(
+            (pr_number, body, commit_id, path, line, side)
+        )
         return PRComment(
             id=1,
             body=body,
@@ -59,6 +63,42 @@ class FakeInlineCommentService:
         self, pr_number: int, review_id: int
     ) -> list[PRComment]:
         return list(self.list_review_comments_result)
+
+
+class BlockingPendingReviewService(FakeInlineCommentService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.create_started = asyncio.Event()
+        self.allow_create = asyncio.Event()
+        self.delete_started = asyncio.Event()
+        self.allow_delete = asyncio.Event()
+        self.fail_create = False
+        self.block_delete = False
+
+    async def create_pending_review(
+        self,
+        pr_number: int,
+        *,
+        comments,
+        body=None,
+        commit_id=None,
+    ) -> PRReview:
+        self.create_started.set()
+        await self.allow_create.wait()
+        if self.fail_create:
+            raise RuntimeError("sync failed")
+        return await super().create_pending_review(
+            pr_number,
+            comments=comments,
+            body=body,
+            commit_id=commit_id,
+        )
+
+    async def delete_pending_review(self, pr_number: int, review_id: int) -> None:
+        self.delete_started.set()
+        if self.block_delete:
+            await self.allow_delete.wait()
+        await super().delete_pending_review(pr_number, review_id)
 
 
 @pytest.mark.asyncio
@@ -158,6 +198,70 @@ async def test_upsert_pending_inline_comment_syncs_pending_review() -> None:
 
 
 @pytest.mark.asyncio
+async def test_upsert_pending_inline_comment_updates_local_state_before_sync_finishes() -> (
+    None
+):
+    store = PRStore(pr_number=123)
+    store.state.pr = PR(number=123, head_sha="deadbeef")
+    service = BlockingPendingReviewService()
+    store._service = service  # type: ignore[assignment]
+
+    task = asyncio.create_task(
+        store.upsert_pending_inline_comment(
+            "hello",
+            path="src/app.py",
+            line=7,
+            side="RIGHT",
+        )
+    )
+
+    await asyncio.wait_for(service.create_started.wait(), timeout=1)
+
+    assert task.done() is False
+    assert store.state.pending_review_comments[0].body == "hello"
+
+    service.allow_create.set()
+    await task
+
+
+@pytest.mark.asyncio
+async def test_upsert_pending_inline_comment_rolls_back_local_state_on_sync_failure() -> (
+    None
+):
+    store = PRStore(pr_number=123)
+    store.state.pr = PR(number=123, head_sha="deadbeef")
+    store.state.pending_review_id = 91
+    old_draft = store.save_pending_inline_comment(
+        "old body",
+        path="src/app.py",
+        line=7,
+        side="RIGHT",
+    )
+    service = BlockingPendingReviewService()
+    service.fail_create = True
+    store._service = service  # type: ignore[assignment]
+
+    task = asyncio.create_task(
+        store.upsert_pending_inline_comment(
+            "new body",
+            path="src/app.py",
+            line=7,
+            side="RIGHT",
+        )
+    )
+    await asyncio.wait_for(service.create_started.wait(), timeout=1)
+
+    assert store.state.pending_review_comments[0].body == "new body"
+
+    service.allow_create.set()
+    with pytest.raises(RuntimeError, match="sync failed"):
+        await task
+
+    assert store.state.pending_review_id == 91
+    assert store.state.pending_review_comments == [old_draft]
+
+
+@pytest.mark.asyncio
 async def test_remove_pending_inline_comment_deletes_server_pending_review() -> None:
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
@@ -181,6 +285,40 @@ async def test_remove_pending_inline_comment_deletes_server_pending_review() -> 
     assert service.delete_pending_review_calls == [(123, 100)]
     assert store.state.pending_review_id is None
     assert store.state.pending_review_comments == []
+
+
+@pytest.mark.asyncio
+async def test_remove_pending_inline_comment_updates_local_state_before_sync_finishes() -> (
+    None
+):
+    store = PRStore(pr_number=123)
+    store.state.pr = PR(number=123, head_sha="deadbeef")
+    store.state.pending_review_id = 100
+    store.save_pending_inline_comment(
+        "hello",
+        path="src/app.py",
+        line=7,
+        side="RIGHT",
+    )
+    service = BlockingPendingReviewService()
+    service.block_delete = True
+    store._service = service  # type: ignore[assignment]
+
+    task = asyncio.create_task(
+        store.remove_pending_inline_comment(
+            path="src/app.py",
+            line=7,
+            side="RIGHT",
+        )
+    )
+
+    await asyncio.wait_for(service.delete_started.wait(), timeout=1)
+
+    assert task.done() is False
+    assert store.state.pending_review_comments == []
+
+    service.allow_delete.set()
+    assert await task is True
 
 
 @pytest.mark.asyncio

@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Literal, cast
 
 from textual.message import Message
 
-from rit.core.diff import parse_multi_file_patch, parse_patch
+from rit.core.diff import (
+    ParsedFilePatch,
+    ParsedFilePatchSummary,
+    parse_file_patch_summary,
+    parse_multi_file_patch,
+    parse_patch,
+)
+from rit.core.datetime_utils import datetime_sort_key
 from rit.core.types import FileDiff
 from rit.services.github import (
     PR_FILES_MAX_REST_PAGES,
+    PR_FILES_PAGE_CONCURRENCY,
     PR_FILES_PER_PAGE,
     GitHubService,
     PRDiscussion,
@@ -30,6 +39,17 @@ from rit.state.models import (
     ReviewRequest,
     ReviewThread,
 )
+
+
+def _parse_file_patch_summaries(
+    sections: Iterable[str],
+) -> list[ParsedFilePatchSummary]:
+    summaries: list[ParsedFilePatchSummary] = []
+    for section in sections:
+        summary = parse_file_patch_summary(section)
+        if summary is not None:
+            summaries.append(summary)
+    return summaries
 
 
 @dataclass
@@ -60,6 +80,16 @@ class PRStoreState:
     files_total_count: int = 0
 
     error: str | None = None
+
+
+@dataclass(frozen=True)
+class PendingReviewSnapshot:
+    """Snapshot used to roll back optimistic pending-review edits."""
+
+    pending_review_id: int | None
+    pending_review_body: str
+    pending_review_comments: tuple[PendingReviewComment, ...]
+    version: int
 
 
 class PRStore:
@@ -113,6 +143,10 @@ class PRStore:
         pr: PR
 
     @dataclass
+    class PRDiscussionMetadataLoaded(Message):
+        pr: PR
+
+    @dataclass
     class ErrorOccurred(Message):
         error: str
         source: str = "unknown"
@@ -127,6 +161,8 @@ class PRStore:
         self._service = GitHubService(owner=owner, repo=repo)
         self._state = PRStoreState()
         self._message_sink: Callable[[Message], None] | None = None
+        self._pending_review_sync_lock = asyncio.Lock()
+        self._pending_review_local_version = 0
 
     @property
     def state(self) -> PRStoreState:
@@ -140,12 +176,9 @@ class PRStore:
             self._message_sink(message)
 
     async def load_all(self) -> None:
-        """Load PR summary first, then discussion and files in parallel."""
-        await self.load_pr_summary()
-        if self._state.pr is None:
-            return
-
+        """Load PR metadata and files concurrently for early diff rendering."""
         await asyncio.gather(
+            self.load_pr_summary(),
             self.load_pr_discussion(),
             self.load_files(),
             return_exceptions=True,
@@ -168,24 +201,124 @@ class PRStore:
             )
 
     async def load_pr_discussion(self) -> None:
+        full_discussion_task = asyncio.create_task(
+            self._service.get_pr_discussion(self.pr_number)
+        )
         try:
-            discussion = await self._service.get_pr_discussion(self.pr_number)
+            fast_loaded = await self._load_fast_pr_discussion()
+            previous_signature = (
+                self._discussion_render_signature(self._state.pr)
+                if fast_loaded and self._state.pr is not None
+                else None
+            )
+            discussion = await full_discussion_task
             pr = self._merge_pr_discussion(discussion)
             self._apply_discussion_state(pr)
             await self._load_pending_review(pr)
-
-            self._post_message(self.PRDiscussionLoaded(pr=pr))
-            self._post_message(self.CommentsLoaded(comments=self._state.comments))
-            self._post_message(self.ReviewsLoaded(reviews=pr.reviews))
-            self._post_message(self.IssueCommentsLoaded(comments=pr.issue_comments))
-            self._post_message(
-                self.ThreadsLoaded(threads=self._state.thread_info_cache)
-            )
+            if (
+                previous_signature is not None
+                and previous_signature == self._discussion_render_signature(pr)
+            ):
+                self._post_discussion_metadata_messages(pr)
+            else:
+                self._post_discussion_messages(pr)
         except Exception as e:
+            if not full_discussion_task.done():
+                full_discussion_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await full_discussion_task
             self._state.error = str(e)
             self._post_message(
                 self.ErrorOccurred(error=str(e), source="load_pr_discussion")
             )
+
+    async def _load_fast_pr_discussion(self) -> bool:
+        get_fast_discussion = getattr(self._service, "get_pr_discussion_fast", None)
+        if get_fast_discussion is None:
+            return False
+
+        try:
+            discussion = await get_fast_discussion(self.pr_number)
+        except Exception:
+            return False
+
+        pr = self._merge_pr_discussion(discussion)
+        self._apply_discussion_state(pr)
+        self._post_discussion_messages(pr)
+        return True
+
+    def _post_discussion_messages(self, pr: PR) -> None:
+        self._post_message(self.PRDiscussionLoaded(pr=pr))
+        self._post_message(self.CommentsLoaded(comments=self._state.comments))
+        self._post_message(self.ReviewsLoaded(reviews=pr.reviews))
+        self._post_message(self.IssueCommentsLoaded(comments=pr.issue_comments))
+        self._post_message(self.ThreadsLoaded(threads=self._state.thread_info_cache))
+
+    def _post_discussion_metadata_messages(self, pr: PR) -> None:
+        self._post_message(self.PRDiscussionMetadataLoaded(pr=pr))
+        self._post_message(self.ThreadsLoaded(threads=self._state.thread_info_cache))
+
+    def _discussion_render_signature(self, pr: PR | None) -> tuple[object, ...]:
+        if pr is None:
+            return ()
+
+        return (
+            pr.body,
+            tuple(
+                (
+                    review.id,
+                    self._author_login(review.user),
+                    review.state.name,
+                    review.body,
+                    review.submitted_at,
+                )
+                for review in pr.reviews
+            ),
+            tuple(
+                (
+                    comment.id,
+                    self._author_login(comment.user),
+                    comment.body,
+                    comment.created_at,
+                    comment.updated_at,
+                )
+                for comment in pr.issue_comments
+            ),
+            tuple(
+                self._thread_render_signature(thread)
+                for thread in pr.review_threads
+            ),
+        )
+
+    def _thread_render_signature(self, thread: ReviewThread) -> tuple[object, ...]:
+        return (
+            thread.path,
+            thread.anchor_line,
+            tuple(
+                (
+                    comment.id,
+                    self._author_login(comment.user),
+                    comment.body,
+                    comment.path,
+                    comment.anchor_line,
+                    comment.created_at,
+                    comment.updated_at,
+                    comment.in_reply_to_id,
+                    comment.pull_request_review_id,
+                    comment.diff_hunk,
+                )
+                for comment in thread.comments
+            ),
+        )
+
+    @staticmethod
+    def _author_login(user: PRUser | None) -> str:
+        if user is None:
+            return ""
+        login = user.login
+        if login.endswith("[bot]"):
+            return login[: -len("[bot]")]
+        return login
 
     async def _load_pr_data(self) -> None:
         self._state.pr_loading = LoadingState.LOADING
@@ -211,7 +344,7 @@ class PRStore:
             self._post_message(self.ErrorOccurred(error=str(e), source="load_pr_data"))
 
     async def load_files(self) -> None:
-        """Load files from the full raw diff, with REST pagination fallback."""
+        """Load changed files quickly, falling back to raw diff streaming."""
         self._state.files_loading = LoadingState.LOADING
         self._state.files = []
         self._state.files_by_filename = {}
@@ -221,13 +354,57 @@ class PRStore:
             self._state.files_total_count = 0
 
         try:
+            if await self._load_files_from_rest_pages():
+                return
+            if await self._load_files_from_streamed_raw_diff():
+                return
             if await self._load_files_from_raw_diff():
                 return
-            await self._load_files_from_rest_pages()
         except Exception as e:
             self._state.files_loading = LoadingState.ERROR
             self._state.error = str(e)
             self._post_message(self.ErrorOccurred(error=str(e), source="load_files"))
+
+    async def _load_files_from_streamed_raw_diff(self) -> bool:
+        stream_sections = getattr(self._service, "iter_pr_diff_sections", None)
+        if stream_sections is None:
+            return False
+
+        loaded_any = False
+        sections: list[str] = []
+        batch_size = 1
+        posted_count = 0
+
+        try:
+            async for section in stream_sections(self.pr_number):
+                sections.append(section)
+                if len(sections) < batch_size:
+                    continue
+
+                parsed_count = await self._append_raw_diff_section_summaries(sections)
+                sections.clear()
+                if parsed_count:
+                    loaded_any = True
+                    posted_count = self._state.files_loaded_count
+                    self._post_files_loaded()
+                batch_size = 100
+
+            if sections:
+                parsed_count = await self._append_raw_diff_section_summaries(sections)
+                if parsed_count:
+                    loaded_any = True
+
+            if not loaded_any:
+                return False
+
+            self._state.files_loading = LoadingState.LOADED
+            if self._state.files_loaded_count != posted_count:
+                self._post_files_loaded()
+            return True
+        except Exception:
+            if loaded_any:
+                raise
+            return False
 
     async def _load_files_from_raw_diff(self) -> bool:
         try:
@@ -239,40 +416,127 @@ class PRStore:
         if not parsed_files:
             return False
 
-        for parsed_file in parsed_files:
-            diff = parsed_file.diff
-            file = self._file_from_diff(diff)
-            self._state.file_diffs[diff.filename] = diff
-            self._append_file(file)
+        self._append_parsed_files(parsed_files)
 
         self._state.files_loading = LoadingState.LOADED
         self._post_files_loaded()
         return True
 
-    async def _load_files_from_rest_pages(self) -> None:
-        first_page = await self._service.get_pr_files_page(
-            self.pr_number,
-            page=1,
-            per_page=PR_FILES_PER_PAGE,
-        )
+    async def _append_raw_diff_sections(self, sections: list[str]) -> int:
+        raw_diff = "\n".join(sections)
+        parsed_files = await asyncio.to_thread(parse_multi_file_patch, raw_diff)
+        return self._append_parsed_files(parsed_files)
+
+    async def _append_raw_diff_section_summaries(self, sections: list[str]) -> int:
+        summaries = await asyncio.to_thread(_parse_file_patch_summaries, sections)
+        return self._append_file_summaries(summaries)
+
+    def _append_parsed_files(self, parsed_files: Iterable[ParsedFilePatch]) -> int:
+        parsed_count = 0
+        for parsed_file in parsed_files:
+            diff = parsed_file.diff
+            if diff.filename in self._state.file_diffs:
+                continue
+            file = self._file_from_diff(diff)
+            file.patch = parsed_file.patch
+            self._state.file_diffs[diff.filename] = diff
+            existing = self._state.files_by_filename.get(diff.filename)
+            if existing is not None:
+                existing.status = file.status
+                existing.additions = file.additions
+                existing.deletions = file.deletions
+                existing.changes = file.changes
+                existing.patch = parsed_file.patch
+                existing.previous_filename = file.previous_filename
+                continue
+            self._append_file(file)
+            parsed_count += 1
+        return parsed_count
+
+    def _append_file_summaries(
+        self,
+        summaries: Iterable[ParsedFilePatchSummary],
+    ) -> int:
+        parsed_count = 0
+        for summary in summaries:
+            if summary.filename in self._state.files_by_filename:
+                continue
+            file = self._file_from_summary(summary)
+            self._append_file(file)
+            parsed_count += 1
+        return parsed_count
+
+    async def _load_files_from_rest_pages(self) -> bool:
+        get_page = getattr(self._service, "get_pr_files_page", None)
+        get_pages = getattr(self._service, "get_pr_file_pages", None)
+        if get_page is None or get_pages is None:
+            return False
+
+        try:
+            first_page = await get_page(
+                self.pr_number,
+                page=1,
+                per_page=PR_FILES_PER_PAGE,
+            )
+        except Exception:
+            return False
+
+        if not first_page:
+            return False
+
         self._append_file_batch(first_page)
         self._post_files_loaded()
 
-        remaining_pages = self._remaining_file_pages()
-        if remaining_pages:
-            page_batches = await self._service.get_pr_file_pages(
-                self.pr_number,
-                pages=remaining_pages,
-                per_page=PR_FILES_PER_PAGE,
-            )
-            for page in remaining_pages:
+        if self._known_file_total_exceeds_rest_limit():
+            return False
+
+        remaining_pages = self._remaining_rest_file_pages()
+        saw_last_page = len(first_page) < PR_FILES_PER_PAGE
+        while remaining_pages:
+            if self._known_file_total() is not None:
+                remaining_pages = [
+                    page
+                    for page in self._remaining_file_pages()
+                    if page >= remaining_pages[0]
+                ]
+                if not remaining_pages:
+                    break
+                page_chunk = remaining_pages
+                remaining_pages = []
+            else:
+                page_chunk = remaining_pages[:PR_FILES_PAGE_CONCURRENCY]
+                remaining_pages = remaining_pages[PR_FILES_PAGE_CONCURRENCY:]
+
+            try:
+                page_batches = await get_pages(
+                    self.pr_number,
+                    pages=page_chunk,
+                    per_page=PR_FILES_PER_PAGE,
+                )
+            except Exception:
+                return False
+
+            for page in page_chunk:
                 batch = page_batches.get(page, [])
                 if not batch:
+                    saw_last_page = True
                     break
                 self._append_file_batch(batch)
+                if len(batch) < PR_FILES_PER_PAGE:
+                    saw_last_page = True
+                    break
+
+            if saw_last_page:
+                break
+            if self._known_file_total_exceeds_rest_limit():
+                return False
+
+        if not self._rest_file_list_complete(saw_last_page):
+            return False
 
         self._state.files_loading = LoadingState.LOADED
         self._post_files_loaded()
+        return True
 
     def _file_from_diff(self, diff: FileDiff) -> PRFile:
         status = "modified"
@@ -294,6 +558,25 @@ class PRStore:
             previousFilename=diff.old_filename,
         )
 
+    def _file_from_summary(self, summary: ParsedFilePatchSummary) -> PRFile:
+        status = "modified"
+        if summary.is_new:
+            status = "added"
+        elif summary.is_deleted:
+            status = "removed"
+        elif summary.old_filename:
+            status = "renamed"
+
+        return PRFile(
+            filename=summary.filename,
+            status=status,
+            additions=summary.additions,
+            deletions=summary.deletions,
+            changes=summary.additions + summary.deletions,
+            patch=summary.patch,
+            previousFilename=summary.old_filename,
+        )
+
     def _append_file(self, file: PRFile) -> None:
         file.comments = self._state.comments_by_file.get(file.filename, [])
         self._state.files.append(file)
@@ -304,6 +587,8 @@ class PRStore:
 
     def _append_file_batch(self, batch: list[PRFile]) -> None:
         for file in batch:
+            if file.filename in self._state.files_by_filename:
+                continue
             self._append_file(file)
 
     def _post_files_loaded(self) -> None:
@@ -325,15 +610,43 @@ class PRStore:
         if self._state.files_loaded_count < PR_FILES_PER_PAGE:
             return []
 
-        if self._state.files_total_count <= PR_FILES_PER_PAGE:
+        total_count = self._known_file_total()
+        if total_count is None or total_count <= PR_FILES_PER_PAGE:
             return []
 
         page_count = min(
             PR_FILES_MAX_REST_PAGES,
-            (self._state.files_total_count + PR_FILES_PER_PAGE - 1)
-            // PR_FILES_PER_PAGE,
+            (total_count + PR_FILES_PER_PAGE - 1) // PR_FILES_PER_PAGE,
         )
         return list(range(2, page_count + 1))
+
+    def _remaining_rest_file_pages(self) -> list[int]:
+        known_pages = self._remaining_file_pages()
+        if known_pages:
+            return known_pages
+        if self._state.files_loaded_count < PR_FILES_PER_PAGE:
+            return []
+        return list(range(2, PR_FILES_MAX_REST_PAGES + 1))
+
+    def _rest_file_list_complete(self, saw_last_page: bool) -> bool:
+        total_count = self._known_file_total()
+        if total_count is not None and self._state.files_loaded_count >= total_count:
+            return True
+        return saw_last_page
+
+    def _known_file_total_exceeds_rest_limit(self) -> bool:
+        total_count = self._known_file_total()
+        if total_count is None:
+            return False
+        rest_limit = PR_FILES_MAX_REST_PAGES * PR_FILES_PER_PAGE
+        return total_count > rest_limit and self._state.files_loaded_count < total_count
+
+    def _known_file_total(self) -> int | None:
+        if self._state.pr is not None and self._state.pr.changed_files > 0:
+            return self._state.pr.changed_files
+        if self._state.files_total_count > self._state.files_loaded_count:
+            return self._state.files_total_count
+        return None
 
     def _parse_file_patch(self, file: PRFile) -> FileDiff:
         diff = parse_patch(file.patch, file.filename)
@@ -362,9 +675,12 @@ class PRStore:
 
     def _merge_pr_discussion(self, discussion: PRDiscussion) -> PR:
         pr = self._state.pr or PR(number=self.pr_number)
+        body = discussion.body
+        if not body:
+            body = pr.body
         merged_pr = pr.model_copy(
             update={
-                "body": discussion.body,
+                "body": body,
                 "reviews_connection": NodeList(nodes=discussion.reviews),
                 "issue_comments_connection": NodeList(nodes=discussion.issue_comments),
                 "review_threads_connection": NodeList(nodes=discussion.review_threads),
@@ -581,7 +897,9 @@ class PRStore:
 
         comment = await self._service.create_issue_comment(self.pr_number, normalized)
         self._state.issue_comments.append(comment)
-        self._state.issue_comments.sort(key=lambda item: item.created_at)
+        self._state.issue_comments.sort(
+            key=lambda item: datetime_sort_key(item.created_at)
+        )
         self._post_message(
             self.IssueCommentsLoaded(comments=self._state.issue_comments)
         )
@@ -632,7 +950,29 @@ class PRStore:
             side=side,
         )
         self._state.pending_review_comments = comments
+        self._pending_review_local_version += 1
         return draft
+
+    @property
+    def pending_review_version(self) -> int:
+        return self._pending_review_local_version
+
+    def snapshot_pending_review(self) -> PendingReviewSnapshot:
+        return PendingReviewSnapshot(
+            pending_review_id=self._state.pending_review_id,
+            pending_review_body=self._state.pending_review_body,
+            pending_review_comments=tuple(self._state.pending_review_comments),
+            version=self._pending_review_local_version,
+        )
+
+    def restore_pending_review_snapshot(
+        self,
+        snapshot: PendingReviewSnapshot,
+    ) -> None:
+        self._state.pending_review_id = snapshot.pending_review_id
+        self._state.pending_review_body = snapshot.pending_review_body
+        self._state.pending_review_comments = list(snapshot.pending_review_comments)
+        self._pending_review_local_version += 1
 
     def get_pending_inline_comment(
         self,
@@ -770,6 +1110,7 @@ class PRStore:
         )
         if deleted:
             self._state.pending_review_comments = comments
+            self._pending_review_local_version += 1
         return deleted
 
     async def upsert_pending_inline_comment(
@@ -784,20 +1125,45 @@ class PRStore:
         if not normalized:
             raise ValueError("Comment cannot be empty")
 
-        comments, draft = self._with_pending_comment_upserted(
-            body=normalized,
+        snapshot = self.snapshot_pending_review()
+        draft = self.save_pending_inline_comment(
+            normalized,
             path=path,
             line=line,
             side=side,
         )
-        review = await self._replace_pending_review(comments)
-        self._state.pending_review_comments = comments
-        self._state.pending_review_id = review.id if review is not None else None
-        if review is None:
-            self._state.pending_review_body = ""
-        elif review.body:
-            self._state.pending_review_body = review.body
+        await self.sync_pending_review(
+            rollback_to=snapshot,
+            rollback_if_version=self._pending_review_local_version,
+        )
         return draft
+
+    async def sync_pending_review(
+        self,
+        *,
+        rollback_to: PendingReviewSnapshot | None = None,
+        rollback_if_version: int | None = None,
+    ) -> PRReview | None:
+        try:
+            async with self._pending_review_sync_lock:
+                comments = list(self._state.pending_review_comments)
+                review = await self._replace_pending_review(comments)
+                self._state.pending_review_id = (
+                    review.id if review is not None else None
+                )
+                if review is None:
+                    self._state.pending_review_body = ""
+                elif review.body:
+                    self._state.pending_review_body = review.body
+                return review
+        except Exception:
+            if (
+                rollback_to is not None
+                and rollback_if_version is not None
+                and self._pending_review_local_version == rollback_if_version
+            ):
+                self.restore_pending_review_snapshot(rollback_to)
+            raise
 
     async def remove_pending_inline_comment(
         self,
@@ -806,7 +1172,8 @@ class PRStore:
         line: int,
         side: Literal["LEFT", "RIGHT"],
     ) -> bool:
-        comments, deleted = self._with_pending_comment_removed(
+        snapshot = self.snapshot_pending_review()
+        deleted = self.delete_pending_inline_comment(
             path=path,
             line=line,
             side=side,
@@ -814,13 +1181,10 @@ class PRStore:
         if not deleted:
             return False
 
-        review = await self._replace_pending_review(comments)
-        self._state.pending_review_comments = comments
-        self._state.pending_review_id = review.id if review is not None else None
-        if review is None:
-            self._state.pending_review_body = ""
-        elif review.body:
-            self._state.pending_review_body = review.body
+        await self.sync_pending_review(
+            rollback_to=snapshot,
+            rollback_if_version=self._pending_review_local_version,
+        )
         return True
 
     async def submit_review(
