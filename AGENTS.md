@@ -23,6 +23,7 @@
   - `src/rit/`
   - `tests/`
 - You can run test server: textual serve "rit https://github.com/mizisu/rit/pull/1"
+- `textual serve` defaults to a 16px web terminal font; for a local-terminal-like scale, open the served URL with `?fontsize=12` (roughly browser zoom 75%).
 
 ## Architecture quick map
 
