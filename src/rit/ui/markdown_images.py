@@ -25,8 +25,9 @@ from rich.markup import escape
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
+from textual.widget import Widget
 from textual.widgets import Static
 from textual_image._terminal import get_cell_size
 from textual_image.widget import TGPImage as TerminalImage
@@ -38,10 +39,14 @@ from rit.ui.terminal_graphics import (
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 IMAGE_FETCH_TIMEOUT_SECONDS = 10
-MAX_INLINE_IMAGE_WIDTH_CELLS = 88
-MAX_INLINE_IMAGE_HEIGHT_CELLS = 24
+MAX_INLINE_IMAGE_WIDTH_CELLS = 112
+MAX_INLINE_IMAGE_HEIGHT_CELLS = 36
+IMAGE_BLOCK_HORIZONTAL_PADDING_CELLS = 2
+IMAGE_TABLE_LABEL_WIDTH_CELLS = 10
+IMAGE_TABLE_CELL_HORIZONTAL_PADDING_CELLS = 2
 
 ImageFetcher = Callable[[str], Awaitable[bytes]]
+AvailableWidthProvider = Callable[[], int | None]
 
 
 @dataclass(frozen=True)
@@ -83,10 +88,44 @@ class MarkdownImagePart:
 
     content: str = ""
     image: MarkdownImageRef | None = None
+    table: MarkdownImageTableData | None = None
 
     @property
     def is_image(self) -> bool:
         return self.image is not None
+
+    @property
+    def is_table(self) -> bool:
+        return self.table is not None
+
+
+@dataclass(frozen=True)
+class MarkdownImageTableCell:
+    """A markdown table cell that may contain an image."""
+
+    content: str = ""
+    image: MarkdownImageRef | None = None
+
+
+@dataclass(frozen=True)
+class MarkdownImageTableRow:
+    """A markdown table row with image-aware cells."""
+
+    cells: tuple[MarkdownImageTableCell, ...]
+
+
+@dataclass(frozen=True)
+class MarkdownImageTableData:
+    """A markdown table that contains renderable image cells."""
+
+    headers: tuple[str, ...]
+    rows: tuple[MarkdownImageTableRow, ...]
+
+
+@dataclass(frozen=True)
+class _ParsedMarkdownImageTable:
+    table: MarkdownImageTableData
+    next_index: int
 
 
 class ImageViewerScreen(ModalScreen[None]):
@@ -132,6 +171,7 @@ class ImageViewerScreen(ModalScreen[None]):
 
     BINDINGS = [
         Binding("escape", "close", "Close", show=False),
+        Binding("enter", "close", "Close", show=False),
         Binding("q", "close", "Close", show=False),
     ]
 
@@ -192,7 +232,7 @@ class ImageViewerScreen(ModalScreen[None]):
         await body.remove_children()
         await body.mount(image_widget)
         self.query_one("#image-viewer-status", Static).update(
-            f"{self._image.width}×{self._image.height}px • Esc to close"
+            f"{self._image.width}×{self._image.height}px • Esc/Enter to close"
         )
 
     def _size_viewer_image_widget(
@@ -227,12 +267,7 @@ class ImageViewerScreen(ModalScreen[None]):
         image_widget.styles.height = target_height
 
     def _title_text(self) -> str:
-        label = (
-            self._image_ref.alt
-            or self._image_ref.title
-            or _filename_from_url(self._image_ref.src)
-        )
-        return f"🖼 {escape(label or 'image')}"
+        return "Image preview"
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -244,25 +279,25 @@ class MarkdownImageBlock(Vertical):
     DEFAULT_CSS = """
     MarkdownImageBlock {
         height: auto;
+        width: auto;
         margin: 1 0;
         border: solid #363a4f;
         background: #181926;
     }
 
-    MarkdownImageBlock .markdown-image-header {
-        height: auto;
-        padding: 0 1;
-        background: #24273a;
-        color: #cad3f5;
-    }
-
-    MarkdownImageBlock .markdown-image-header:hover {
-        background: #363a4f;
+    MarkdownImageBlock.markdown-image-compact {
+        margin: 0;
+        border: none;
+        background: transparent;
     }
 
     MarkdownImageBlock .markdown-image-body {
         height: auto;
-        padding: 0 1 1 1;
+        padding: 1;
+    }
+
+    MarkdownImageBlock.markdown-image-compact .markdown-image-body {
+        padding: 0;
     }
 
     MarkdownImageBlock .markdown-image-status {
@@ -280,12 +315,18 @@ class MarkdownImageBlock(Vertical):
         self,
         image: MarkdownImageRef,
         *,
+        compact: bool = False,
         fetcher: ImageFetcher | None = None,
+        on_preview_width: Callable[[int], None] | None = None,
+        available_width: AvailableWidthProvider | None = None,
     ) -> None:
-        super().__init__()
+        classes = "markdown-image-compact" if compact else None
+        super().__init__(classes=classes)
         self.image = image
+        self.compact = compact
         self._fetcher = fetcher
-        self._header = Static(self._header_text(), classes="markdown-image-header")
+        self._on_preview_width = on_preview_width
+        self._available_width = available_width
         self._body = Vertical(classes="markdown-image-body")
         self._status = Static(
             "Loading preview in background…",
@@ -296,7 +337,6 @@ class MarkdownImageBlock(Vertical):
         self._pil_image: PILImage.Image | None = None
 
     def compose(self) -> ComposeResult:
-        yield self._header
         with self._body:
             yield self._status
 
@@ -329,7 +369,6 @@ class MarkdownImageBlock(Vertical):
 
         self._loading = True
         self._show_status("Loading preview…")
-        self._header.update(self._header_text())
         self.run_worker(
             self._load_image(),
             name=f"markdown-image-{id(self)}",
@@ -349,25 +388,21 @@ class MarkdownImageBlock(Vertical):
             self._pil_image = pil_image
         except Exception as error:
             self._loading = False
-            self._header.update(self._header_text())
             self._show_status(_format_image_error(error))
             return
 
         image_widget = TerminalImage(pil_image, classes="markdown-terminal-image")
-        self._size_image_widget(image_widget, pil_image)
+        preview_width = self._size_image_widget(image_widget, pil_image)
+        self._size_block_to_preview(preview_width)
         await self._body.remove_children()
         await self._body.mount(image_widget)
         self._loaded = True
         self._loading = False
-        self._header.update(self._header_text())
 
     def _size_image_widget(
         self, image_widget: TerminalImage, image: PILImage.Image
-    ) -> None:
-        available_width = max(
-            1,
-            self._body.size.width or self.size.width - 2 or self.app.size.width - 4,
-        )
+    ) -> int:
+        available_width = self._available_image_width()
         cell_size = get_cell_size()
         natural_width = max(1, round(image.width / cell_size.width))
         target_width = min(
@@ -399,19 +434,188 @@ class MarkdownImageBlock(Vertical):
 
         image_widget.styles.width = target_width
         image_widget.styles.height = target_height
+        return target_width
 
-    def _header_text(self) -> str:
-        label = self.image.alt or self.image.title or _filename_from_url(self.image.src)
-        if getattr(self, "_loaded", False):
-            action = "open large"
-        elif getattr(self, "_loading", False):
-            action = "loading preview"
-        else:
-            action = "open large"
-        return f"🖼 [bold]{escape(label or 'image')}[/] [#8aadf4]{action}[/]"
+    def _available_image_width(self) -> int:
+        if self._available_width is not None:
+            provided_width = self._available_width()
+            if provided_width is not None and provided_width > 0:
+                return provided_width
+
+        return max(
+            1,
+            self._body.size.width or self.size.width - 2 or self.app.size.width - 4,
+        )
+
+    def _size_block_to_preview(self, preview_width: int) -> None:
+        frame_width = preview_width
+        if not self.compact:
+            frame_width += IMAGE_BLOCK_HORIZONTAL_PADDING_CELLS
+
+        self.styles.width = frame_width
+        self._body.styles.width = frame_width
+        if self._on_preview_width is not None:
+            self._on_preview_width(frame_width)
 
     def _show_status(self, message: str) -> None:
         self._status.update(f"[#6e738d]{escape(message)}[/]")
+
+
+class MarkdownImageTable(Vertical):
+    """Markdown table renderer for rows with image cells."""
+
+    DEFAULT_CSS = """
+    MarkdownImageTable {
+        height: auto;
+        width: auto;
+        margin: 1 0;
+        border: solid #363a4f;
+        background: #181926;
+    }
+
+    MarkdownImageTable .markdown-image-table-row {
+        layout: horizontal;
+        width: auto;
+        height: auto;
+    }
+
+    MarkdownImageTable .markdown-image-table-data-row {
+        border-top: solid #363a4f;
+    }
+
+    MarkdownImageTable .markdown-image-table-first-row {
+        border-top: none;
+    }
+
+    MarkdownImageTable .markdown-image-table-cell {
+        height: auto;
+        padding: 0 1;
+    }
+
+    MarkdownImageTable .markdown-image-table-label-cell {
+        width: 10;
+        content-align: center middle;
+        border-right: solid #363a4f;
+    }
+
+    MarkdownImageTable .markdown-image-table-image-cell {
+        width: auto;
+    }
+
+    MarkdownImageTable .markdown-image-table-text {
+        height: auto;
+        margin: 1 0;
+    }
+
+    MarkdownImageTable MarkdownImageBlock {
+        margin: 1 0;
+    }
+    """
+
+    def __init__(
+        self,
+        table: MarkdownImageTableData,
+        *,
+        fetcher: ImageFetcher | None = None,
+    ) -> None:
+        super().__init__(classes="markdown-image-table")
+        self.table = table
+        self._fetcher = fetcher
+        self._image_columns = self._collect_image_columns()
+        self._image_column_widths = dict.fromkeys(self._image_columns, 1)
+        self.styles.width = self._table_width()
+
+    def compose(self) -> ComposeResult:
+        for row_index, row in enumerate(self.table.rows):
+            row_classes = "markdown-image-table-row markdown-image-table-data-row"
+            if row_index == 0:
+                row_classes += " markdown-image-table-first-row"
+            with Horizontal(
+                classes=row_classes,
+            ):
+                for index, cell in enumerate(row.cells):
+                    with Vertical(classes=self._cell_classes(index)):
+                        if cell.image is not None:
+                            yield MarkdownImageBlock(
+                                cell.image,
+                                compact=True,
+                                fetcher=self._fetcher,
+                                on_preview_width=lambda width, index=index: (
+                                    self._set_image_column_width(index, width)
+                                ),
+                                available_width=lambda index=index: (
+                                    self._available_image_column_width(index)
+                                ),
+                            )
+                        else:
+                            yield Static(
+                                cell.content or " ",
+                                classes="markdown-image-table-text",
+                                markup=False,
+                            )
+
+    def _collect_image_columns(self) -> set[int]:
+        image_columns: set[int] = set()
+        for row in self.table.rows:
+            for index, cell in enumerate(row.cells):
+                if cell.image is not None:
+                    image_columns.add(index)
+        return image_columns
+
+    def _cell_classes(self, index: int) -> str:
+        classes = ["markdown-image-table-cell"]
+        if index in self._image_columns:
+            classes.append("markdown-image-table-image-cell")
+        else:
+            classes.append("markdown-image-table-label-cell")
+        return " ".join(classes)
+
+    def _set_image_column_width(self, index: int, width: int) -> None:
+        if index not in self._image_columns:
+            return
+        current_width = self._image_column_widths.get(index, 1)
+        if width <= current_width:
+            return
+        self._image_column_widths[index] = width
+        self.styles.width = self._table_width()
+
+    def _available_image_column_width(self, index: int) -> int | None:
+        table_width = self._available_table_width()
+        if table_width is None:
+            return None
+
+        reserved_width = IMAGE_TABLE_CELL_HORIZONTAL_PADDING_CELLS * len(
+            self.table.headers
+        )
+        for column_index in range(len(self.table.headers)):
+            if column_index == index:
+                continue
+            if column_index in self._image_columns:
+                reserved_width += self._image_column_widths.get(column_index, 1)
+            else:
+                reserved_width += IMAGE_TABLE_LABEL_WIDTH_CELLS
+
+        return max(1, table_width - reserved_width)
+
+    def _available_table_width(self) -> int | None:
+        parent = self.parent
+        if isinstance(parent, Widget) and parent.size.width > 0:
+            return parent.size.width
+        if self.size.width > 0:
+            return self.size.width
+        if self.app.size.width > 0:
+            return self.app.size.width - 4
+        return None
+
+    def _table_width(self) -> int:
+        width = 0
+        for index in range(len(self.table.headers)):
+            if index in self._image_columns:
+                width += self._image_column_widths.get(index, 1)
+            else:
+                width += IMAGE_TABLE_LABEL_WIDTH_CELLS
+            width += IMAGE_TABLE_CELL_HORIZONTAL_PADDING_CELLS
+        return max(1, width)
 
 
 class ImageFetchError(Exception):
@@ -438,6 +642,37 @@ def parse_markdown_image_parts(
         return []
 
     parts: list[MarkdownImagePart] = []
+    text_lines: list[str] = []
+    lines = body.splitlines(keepends=True)
+    index = 0
+
+    while index < len(lines):
+        table = _parse_image_table_at(lines, index, base_url=base_url)
+        if table is None:
+            text_lines.append(lines[index])
+            index += 1
+            continue
+
+        _append_markdown_image_parts(
+            parts,
+            "".join(text_lines),
+            base_url=base_url,
+        )
+        text_lines.clear()
+        parts.append(MarkdownImagePart(table=table.table))
+        index = table.next_index
+
+    _append_markdown_image_parts(parts, "".join(text_lines), base_url=base_url)
+
+    return parts
+
+
+def _append_markdown_image_parts(
+    parts: list[MarkdownImagePart],
+    body: str,
+    *,
+    base_url: str | None,
+) -> None:
     pos = 0
 
     for start, end, image in _iter_image_matches(body):
@@ -454,11 +689,6 @@ def parse_markdown_image_parts(
         if text:
             parts.append(MarkdownImagePart(content=text))
 
-    if not parts and body.strip():
-        parts.append(MarkdownImagePart(content=body.strip()))
-
-    return parts
-
 
 def mount_markdown_image_parts(
     container: Vertical,
@@ -471,7 +701,9 @@ def mount_markdown_image_parts(
     from textual.widgets import Markdown
 
     for part in parse_markdown_image_parts(body, base_url=base_url):
-        if part.image:
+        if part.table:
+            container.mount(MarkdownImageTable(part.table, fetcher=image_fetcher))
+        elif part.image:
             container.mount(MarkdownImageBlock(part.image, fetcher=image_fetcher))
         elif part.content:
             container.mount(Markdown(part.content))
@@ -533,25 +765,124 @@ def fetch_image_bytes(
     return data
 
 
-def _iter_image_matches(body: str) -> Iterator[tuple[int, int, MarkdownImageRef]]:
+def _parse_image_table_at(
+    lines: list[str],
+    index: int,
+    *,
+    base_url: str | None,
+) -> _ParsedMarkdownImageTable | None:
+    if index + 1 >= len(lines):
+        return None
+
+    if not _is_table_row(lines[index]):
+        return None
+
+    headers = tuple(_split_table_cells(lines[index]))
+    separator_cells = _split_table_cells(lines[index + 1])
+    if len(headers) < 2 or not _is_table_separator_row(separator_cells):
+        return None
+
+    rows: list[MarkdownImageTableRow] = []
+    has_image = False
+    row_index = index + 2
+
+    while row_index < len(lines) and _is_table_row(lines[row_index]):
+        cells = tuple(
+            _parse_image_table_cell(cell, base_url=base_url)
+            for cell in _split_table_cells(lines[row_index])
+        )
+        if any(cell.content or cell.image is not None for cell in cells):
+            rows.append(MarkdownImageTableRow(cells=cells))
+        if any(cell.image is not None for cell in cells):
+            has_image = True
+        row_index += 1
+
+    if not has_image or not rows:
+        return None
+
+    return _ParsedMarkdownImageTable(
+        table=MarkdownImageTableData(headers=headers, rows=tuple(rows)),
+        next_index=row_index,
+    )
+
+
+def _is_table_row(line: str) -> bool:
+    stripped = line.strip()
+    return (
+        stripped.startswith("|")
+        and stripped.endswith("|")
+        and stripped.count("|") >= 2
+    )
+
+
+def _split_table_cells(line: str) -> list[str]:
+    value = line.strip()
+    if value.startswith("|"):
+        value = value[1:]
+    if value.endswith("|"):
+        value = value[:-1]
+
+    cells: list[str] = []
+    current: list[str] = []
+    escaped = False
+    for char in value:
+        if escaped:
+            current.append(char)
+            escaped = False
+            continue
+        if char == "\\":
+            current.append(char)
+            escaped = True
+            continue
+        if char == "|":
+            cells.append("".join(current).replace(r"\|", "|").strip())
+            current.clear()
+            continue
+        current.append(char)
+
+    cells.append("".join(current).replace(r"\|", "|").strip())
+    return cells
+
+
+def _is_table_separator_row(cells: list[str]) -> bool:
+    return bool(cells) and all(
+        re.fullmatch(r":?-{3,}:?", cell.strip()) is not None for cell in cells
+    )
+
+
+def _parse_image_table_cell(
+    cell: str,
+    *,
+    base_url: str | None,
+) -> MarkdownImageTableCell:
+    image = _image_only_table_cell_ref(cell)
+    if image is not None:
+        return MarkdownImageTableCell(image=image.resolve(base_url))
+    return MarkdownImageTableCell(content=cell.strip())
+
+
+def _image_only_table_cell_ref(cell: str) -> MarkdownImageRef | None:
+    matches = list(_iter_raw_image_matches(cell))
+    if len(matches) != 1:
+        return None
+
+    start, end, image = matches[0]
+    if cell[:start].strip() or cell[end:].strip():
+        return None
+    return image
+
+
+def _iter_raw_image_matches(body: str) -> Iterator[tuple[int, int, MarkdownImageRef]]:
     matches: list[tuple[int, int, MarkdownImageRef]] = []
 
     for match in _MARKDOWN_IMAGE_RE.finditer(body):
         image = _parse_markdown_image_match(match)
-        if image is not None and _is_standalone_image_match(
-            body,
-            match.start(),
-            match.end(),
-        ):
+        if image is not None:
             matches.append((match.start(), match.end(), image))
 
     for match in _HTML_IMAGE_RE.finditer(body):
         image = _parse_html_image_match(match.group(0))
-        if image is not None and _is_standalone_image_match(
-            body,
-            match.start(),
-            match.end(),
-        ):
+        if image is not None:
             matches.append((match.start(), match.end(), image))
 
     matches.sort(key=lambda item: item[0])
@@ -563,6 +894,20 @@ def _iter_image_matches(body: str) -> Iterator[tuple[int, int, MarkdownImageRef]
         yield start, end, image
 
 
+def _iter_image_matches(body: str) -> Iterator[tuple[int, int, MarkdownImageRef]]:
+    for start, end, image in _iter_raw_image_matches(body):
+        if _is_renderable_image_match(body, start, end):
+            yield start, end, image
+
+
+def _is_renderable_image_match(body: str, start: int, end: int) -> bool:
+    return _is_standalone_image_match(body, start, end) or _is_table_cell_image_match(
+        body,
+        start,
+        end,
+    )
+
+
 def _is_standalone_image_match(body: str, start: int, end: int) -> bool:
     line_start = body.rfind("\n", 0, start) + 1
     line_end = body.find("\n", end)
@@ -570,6 +915,27 @@ def _is_standalone_image_match(body: str, start: int, end: int) -> bool:
         line_end = len(body)
 
     return body[line_start:start].strip() == "" and body[end:line_end].strip() == ""
+
+
+def _is_table_cell_image_match(body: str, start: int, end: int) -> bool:
+    line_start = body.rfind("\n", 0, start) + 1
+    line_end = body.find("\n", end)
+    if line_end == -1:
+        line_end = len(body)
+
+    line = body[line_start:line_end].strip()
+    if not line.startswith("|") or not line.endswith("|"):
+        return False
+
+    before = body[line_start:start]
+    after = body[end:line_end]
+    if "|" not in before or "|" not in after:
+        return False
+
+    return (
+        before.rsplit("|", maxsplit=1)[1].strip() == ""
+        and after.split("|", maxsplit=1)[0].strip() == ""
+    )
 
 
 def _parse_markdown_image_match(match: re.Match[str]) -> MarkdownImageRef | None:
@@ -777,13 +1143,6 @@ def _has_url_scheme(src: str) -> bool:
 
 def _is_fetchable_image_source(src: str) -> bool:
     return src.startswith("data:") or urlparse(src).scheme in {"http", "https"}
-
-
-def _filename_from_url(src: str) -> str:
-    path = urlparse(src).path.rstrip("/")
-    if not path:
-        return "image"
-    return path.rsplit("/", 1)[-1] or "image"
 
 
 _MARKDOWN_IMAGE_RE = re.compile(

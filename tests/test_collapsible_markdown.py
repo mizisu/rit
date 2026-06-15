@@ -1,8 +1,10 @@
 """Tests for collapsible markdown component."""
 
 import base64
+from io import BytesIO
 
 import pytest
+from PIL import Image as PILImage
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
 from textual.css.query import NoMatches
@@ -12,6 +14,7 @@ from rit.ui.components.collapsible_markdown import (
     DetailsBlock,
     ImageViewerScreen,
     MarkdownImageBlock,
+    MarkdownImageRef,
     MarkdownPart,
     mount_markdown_with_details,
     parse_details_blocks,
@@ -23,6 +26,13 @@ from rit.ui.components.collapsible_markdown import (
 def _details(part: MarkdownPart) -> DetailsBlock:
     assert part.details is not None
     return part.details
+
+
+def _png_bytes(width: int, height: int) -> bytes:
+    image = PILImage.new("RGB", (width, height), "white")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
 
 
 class TestParseDetailsBlocks:
@@ -368,6 +378,36 @@ class TestParseMarkdownImages:
         assert image.src == "https://github.com/user-attachments/assets/abc123"
         assert image.github_context == "owner/repo"
 
+    def test_table_cell_html_images_are_grouped_as_table_part(self) -> None:
+        body = """| 상태 | 이메일 내용 |
+| --- | --- |
+| 초대 전 | <img alt="Before invite" src="https://github.com/user-attachments/assets/before" /> |
+| 초대 완료 | <img alt="Invited" src="https://github.com/user-attachments/assets/invited" /> |
+"""
+
+        result = parse_markdown_image_parts(
+            body,
+            base_url="https://github.com/lemonbase-tech/lemonbase/pull/20928",
+        )
+
+        assert len(result) == 1
+        table = result[0].table
+        assert table is not None
+        assert table.headers == ("상태", "이메일 내용")
+
+        images = [
+            cell.image
+            for row in table.rows
+            for cell in row.cells
+            if cell.image is not None
+        ]
+        assert [image.alt for image in images] == ["Before invite", "Invited"]
+        assert [image.github_context for image in images] == [
+            "lemonbase-tech/lemonbase",
+            "lemonbase-tech/lemonbase",
+        ]
+        assert [row.cells[0].content for row in table.rows] == ["초대 전", "초대 완료"]
+
 
 class TestParseFencedCodeBlocks:
     def test_fenced_code_block_is_split_from_markdown_text(self) -> None:
@@ -405,10 +445,7 @@ print("hello")"""
 @pytest.mark.asyncio
 async def test_markdown_image_block_loads_image_from_in_memory_bytes() -> None:
     body = "![Tiny](https://example.com/tiny.png)"
-    png_bytes = base64.b64decode(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1Pe"
-        "AAAADUlEQVR42mP8z8BQDwAFgwJ/lOOFzgAAAABJRU5ErkJggg=="
-    )
+    png_bytes = _png_bytes(320, 180)
     fetched_urls: list[str] = []
 
     async def fetcher(url: str) -> bytes:
@@ -440,11 +477,149 @@ async def test_markdown_image_block_loads_image_from_in_memory_bytes() -> None:
         assert image_widget is not None
         assert image_widget.size.height > 0
 
-        clicked = await pilot.click("MarkdownImageBlock .markdown-image-header")
+        assert len(app.query(".markdown-image-header")) == 0
+        assert len(app.query(".markdown-image-caption")) == 0
+
+        clicked = await pilot.click("MarkdownImageBlock .markdown-terminal-image")
         await pilot.pause(0.1)
 
         assert clicked is True
         assert isinstance(app.screen, ImageViewerScreen)
+
+
+@pytest.mark.asyncio
+async def test_markdown_image_block_wraps_frame_to_preview_width() -> None:
+    body = "![Wide screenshot](https://example.com/wide.png)"
+    png_bytes = _png_bytes(2000, 1125)
+
+    async def fetcher(url: str) -> bytes:
+        return png_bytes
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield Vertical(id="root")
+
+        def on_mount(self) -> None:
+            root = self.query_one("#root", Vertical)
+            root.styles.width = 160
+            mount_markdown_with_details(root, body, image_fetcher=fetcher)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        for _ in range(10):
+            await pilot.pause(0.1)
+            if len(app.query(".markdown-terminal-image")):
+                break
+
+        block = app.query_one(MarkdownImageBlock)
+        image_widget = app.query_one(".markdown-terminal-image")
+        block_width = getattr(block.styles.width, "value", None)
+        image_width = getattr(image_widget.styles.width, "value", None)
+
+        assert block_width == image_width + 2
+        assert image_width >= 100
+        assert len(app.query(".markdown-image-caption")) == 0
+
+
+@pytest.mark.asyncio
+async def test_markdown_image_table_mounts_image_blocks_inside_table() -> None:
+    body = """| 상태 | 이메일 내용 |
+| --- | --- |
+| 초대 전 | <img alt="Before invite" src="https://example.com/before.png" /> |
+| 초대 완료 | <img alt="Invited" src="https://example.com/invited.png" /> |
+"""
+
+    async def fetcher(url: str) -> bytes:
+        return base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1Pe"
+            "AAAADUlEQVR42mP8z8BQDwAFgwJ/lOOFzgAAAABJRU5ErkJggg=="
+        )
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield Vertical(id="root")
+
+        def on_mount(self) -> None:
+            root = self.query_one("#root", Vertical)
+            mount_markdown_with_details(root, body, image_fetcher=fetcher)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        assert len(app.query(".markdown-image-table")) == 1
+        assert len(app.query(".markdown-image-table-header")) == 0
+        image_blocks = list(app.query(MarkdownImageBlock))
+        assert [block.image.alt for block in image_blocks] == [
+            "Before invite",
+            "Invited",
+        ]
+        assert all(block.has_class("markdown-image-compact") for block in image_blocks)
+        assert len(app.query(".markdown-image-caption")) == 0
+
+
+@pytest.mark.asyncio
+async def test_markdown_image_table_wraps_to_content_width() -> None:
+    body = """| 상태 | 이메일 내용 |
+| --- | --- |
+| 초대 전 | <img alt="Before invite" src="https://example.com/before.png" /> |
+"""
+
+    async def fetcher(url: str) -> bytes:
+        return _png_bytes(2000, 1125)
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield Vertical(id="root")
+
+        def on_mount(self) -> None:
+            root = self.query_one("#root", Vertical)
+            root.styles.width = 180
+            mount_markdown_with_details(root, body, image_fetcher=fetcher)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        for _ in range(10):
+            await pilot.pause(0.1)
+            if len(app.query(".markdown-terminal-image")):
+                break
+
+        table = app.query_one(".markdown-image-table")
+        image_block = app.query_one(MarkdownImageBlock)
+        image_widget = app.query_one(".markdown-terminal-image")
+        table_width = getattr(table.styles.width, "value", None)
+        image_block_width = getattr(image_block.styles.width, "value", None)
+        image_width = getattr(image_widget.styles.width, "value", None)
+
+        assert table_width == image_block_width + 14
+        assert image_width >= 100
+
+
+@pytest.mark.asyncio
+async def test_image_viewer_closes_with_enter() -> None:
+    image = PILImage.new("RGB", (1, 1))
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield Vertical(id="root")
+
+        def on_mount(self) -> None:
+            self.push_screen(
+                ImageViewerScreen(
+                    MarkdownImageRef("Tiny", "https://example.com/tiny.png"),
+                    image=image,
+                )
+            )
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert isinstance(app.screen, ImageViewerScreen)
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert not isinstance(app.screen, ImageViewerScreen)
 
 
 @pytest.mark.asyncio
