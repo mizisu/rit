@@ -163,6 +163,8 @@ class PRStore:
         self._message_sink: Callable[[Message], None] | None = None
         self._pending_review_sync_lock = asyncio.Lock()
         self._pending_review_local_version = 0
+        self._recent_submitted_reviews: dict[int, PRReview] = {}
+        self._recent_submitted_review_comments: dict[int, list[PRComment]] = {}
 
     @property
     def state(self) -> PRStoreState:
@@ -250,8 +252,10 @@ class PRStore:
     def _post_discussion_messages(self, pr: PR) -> None:
         self._post_message(self.PRDiscussionLoaded(pr=pr))
         self._post_message(self.CommentsLoaded(comments=self._state.comments))
-        self._post_message(self.ReviewsLoaded(reviews=pr.reviews))
-        self._post_message(self.IssueCommentsLoaded(comments=pr.issue_comments))
+        self._post_message(self.ReviewsLoaded(reviews=self._state.reviews))
+        self._post_message(
+            self.IssueCommentsLoaded(comments=self._state.issue_comments)
+        )
         self._post_message(self.ThreadsLoaded(threads=self._state.thread_info_cache))
 
     def _post_discussion_metadata_messages(self, pr: PR) -> None:
@@ -332,8 +336,10 @@ class PRStore:
 
             self._post_message(self.PRLoaded(pr=pr))
             self._post_message(self.CommentsLoaded(comments=self._state.comments))
-            self._post_message(self.ReviewsLoaded(reviews=pr.reviews))
-            self._post_message(self.IssueCommentsLoaded(comments=pr.issue_comments))
+            self._post_message(self.ReviewsLoaded(reviews=self._state.reviews))
+            self._post_message(
+                self.IssueCommentsLoaded(comments=self._state.issue_comments)
+            )
             self._post_message(
                 self.ThreadsLoaded(threads=self._state.thread_info_cache)
             )
@@ -690,12 +696,25 @@ class PRStore:
         return merged_pr
 
     def _apply_discussion_state(self, pr: PR) -> None:
-        self._state.reviews = pr.reviews
+        reviews = list(pr.reviews)
+        review_threads = list(pr.review_threads)
+        reviews, review_threads = self._merge_recent_submitted_discussion(
+            reviews,
+            review_threads,
+        )
+
+        self._state.pr = pr.model_copy(
+            update={
+                "reviews_connection": NodeList(nodes=reviews),
+                "review_threads_connection": NodeList(nodes=review_threads),
+            }
+        )
+        self._state.reviews = reviews
         self._state.issue_comments = pr.issue_comments
-        self._state.review_threads = pr.review_threads
+        self._state.review_threads = review_threads
 
         all_comments: list[PRComment] = []
-        for thread in pr.review_threads:
+        for thread in review_threads:
             all_comments.extend(thread.comments)
         self._state.comments = all_comments
 
@@ -716,13 +735,61 @@ class PRStore:
                 root_comment_id=thread.root_comment_id,
             )
             for thread in pr.review_threads
-            if thread.root_comment_id
+            if thread.id and thread.root_comment_id
         }
         self._state.thread_cache = {
             thread.root_comment_id: thread
-            for thread in pr.review_threads
+            for thread in review_threads
             if thread.root_comment_id
         }
+
+    def _merge_recent_submitted_discussion(
+        self,
+        reviews: list[PRReview],
+        review_threads: list[ReviewThread],
+    ) -> tuple[list[PRReview], list[ReviewThread]]:
+        if not self._recent_submitted_reviews:
+            return reviews, review_threads
+
+        review_ids = {review.id for review in reviews if review.id}
+        for review_id, review in self._recent_submitted_reviews.items():
+            if review_id not in review_ids:
+                reviews.append(review)
+                review_ids.add(review_id)
+
+        comment_ids = {
+            comment.id
+            for thread in review_threads
+            for comment in thread.comments
+            if comment.id
+        }
+        for comments in self._recent_submitted_review_comments.values():
+            for comment in comments:
+                if comment.id and comment.id in comment_ids:
+                    continue
+                review_threads.append(self._thread_from_submitted_comment(comment))
+                if comment.id:
+                    comment_ids.add(comment.id)
+
+        return reviews, review_threads
+
+    @staticmethod
+    def _thread_from_submitted_comment(comment: PRComment) -> ReviewThread:
+        anchor_side = comment.anchor_side
+        anchor_line = comment.anchor_line
+        line = anchor_line if anchor_side == "new" else None
+        original_line = anchor_line if anchor_side == "old" else None
+        return ReviewThread.model_validate(
+            {
+                "id": "",
+                "isResolved": False,
+                "path": comment.path,
+                "line": line,
+                "originalLine": original_line,
+                "diffSide": comment.side,
+                "comments": {"nodes": [comment]},
+            }
+        )
 
     def select_file(self, filename: str) -> None:
         if self._get_file(filename) is None and filename not in self._state.file_diffs:
@@ -1202,23 +1269,47 @@ class PRStore:
 
         pending_review_id = self._state.pending_review_id
         if pending_review_id is not None:
-            await self._service.submit_pending_review(
+            submitted_review = await self._service.submit_pending_review(
                 self.pr_number,
                 pending_review_id,
                 event=event,
                 body=normalized if normalized else None,
             )
         else:
-            await self._service.submit_review(
+            submitted_review = await self._service.submit_review(
                 self.pr_number,
                 event=event,
                 body=normalized if normalized else None,
                 comments=pending_comments,
             )
+        await self._remember_submitted_review(submitted_review)
 
         self._state.pending_review_id = None
         self._state.pending_review_body = ""
         self._state.pending_review_comments.clear()
+
+    async def _remember_submitted_review(self, review: PRReview | None) -> None:
+        if review is None or not review.id:
+            return
+
+        comments: list[PRComment] = []
+        with suppress(Exception):
+            comments = await self._service.list_review_comments(
+                self.pr_number,
+                review.id,
+            )
+        if comments:
+            comments = [
+                comment
+                if comment.pull_request_review_id
+                else comment.model_copy(update={"pull_request_review_id": review.id})
+                for comment in comments
+            ]
+
+        self._recent_submitted_reviews[review.id] = review
+        self._recent_submitted_review_comments[review.id] = comments
+        if self._state.pr is not None:
+            self._apply_discussion_state(self._state.pr)
 
     async def refresh_review_data(self) -> None:
         """Refresh comments, reviews, and review threads without reloading file diffs."""

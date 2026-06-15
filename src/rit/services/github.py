@@ -1021,12 +1021,12 @@ class GitHubService:
         *,
         event: str,
         body: str | None = None,
-    ) -> None:
+    ) -> PRReview:
         repo = await self.get_repo()
         payload: dict[str, object] = {"event": event}
         if body is not None and body != "":
             payload["body"] = body
-        await self._run_gh(
+        result = await self._run_gh(
             [
                 "api",
                 "--method",
@@ -1037,6 +1037,7 @@ class GitHubService:
             ],
             input_text=json.dumps(payload),
         )
+        return PRReview.model_validate(json.loads(result))
 
     async def submit_review(
         self,
@@ -1045,7 +1046,7 @@ class GitHubService:
         event: str,
         body: str | None = None,
         comments: list[PendingReviewComment] | None = None,
-    ) -> None:
+    ) -> PRReview:
         """Submit a top-level review via the REST API."""
         repo = await self.get_repo()
         payload: dict[str, object] = {"event": event}
@@ -1061,7 +1062,7 @@ class GitHubService:
                 }
                 for comment in comments
             ]
-        await self._run_gh(
+        result = await self._run_gh(
             [
                 "api",
                 "--method",
@@ -1072,6 +1073,7 @@ class GitHubService:
             ],
             input_text=json.dumps(payload),
         )
+        return PRReview.model_validate(json.loads(result))
 
     async def _set_thread_resolved(self, thread_id: str, resolve: bool) -> bool:
         mutation_name = "resolveReviewThread" if resolve else "unresolveReviewThread"
