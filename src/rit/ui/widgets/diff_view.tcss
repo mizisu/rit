@@ -192,7 +192,12 @@ DiffView.-split .split-pane .code-content {
 }
 
 DiffView .code-content.-placeholder {
-    background: $surface 35%;
+    background: $background;
+    color: $text-disabled 9%;
+}
+
+DiffView .line-prefix.-placeholder {
+    background: $background;
     color: $text-disabled;
 }
 

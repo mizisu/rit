@@ -16,6 +16,24 @@ from textual.widget import Widget
 from textual.widgets import Static
 from textual.containers import HorizontalScroll
 
+MISSING_SIDE_BACKGROUND_STYLE = "on $background"
+MISSING_SIDE_HATCH_STYLE = "$text-disabled 9% on $background"
+MISSING_SIDE_STYLE = MISSING_SIDE_BACKGROUND_STYLE
+MISSING_SIDE_HATCH = "╱"
+MISSING_SIDE_HATCH_STEP = 1
+
+
+def missing_side_hatch_text(width: int, *, row_index: int = 0) -> str:
+    """Build a quiet diagonal marker for split-diff sides with no code."""
+    if width <= 0:
+        return ""
+
+    chars = [" "] * width
+    start = row_index % MISSING_SIDE_HATCH_STEP
+    for index in range(start, width, MISSING_SIDE_HATCH_STEP):
+        chars[index] = MISSING_SIDE_HATCH
+    return "".join(chars)
+
 
 class LineContent(Visual):
     def __init__(
@@ -37,7 +55,15 @@ class LineContent(Visual):
 
         for y, (line, color) in enumerate(zip(self.code_lines, self.line_styles)):
             if line is None:
-                line = Content.empty()
+                meta = {"offset": (0, y)}
+                missing_style = (
+                    style.rich_style
+                    + options.get_style(MISSING_SIDE_HATCH_STYLE).rich_style
+                    + RichStyle.from_meta(meta)
+                )
+                text = missing_side_hatch_text(width, row_index=y)
+                strips.append(Strip([Segment(text, missing_style)], width))
+                continue
             else:
                 # Apply selection if present
                 if selection is not None:
@@ -93,11 +119,13 @@ class LineAnnotations(Widget):
     """
 
     numbers: reactive[list[Content]] = reactive[list[Content]](list)
+    line_styles: reactive[list[str]] = reactive[list[str]](list)
 
     def __init__(
         self,
         numbers: Iterable[Content],
         *,
+        line_styles: Iterable[str] | None = None,
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -105,6 +133,7 @@ class LineAnnotations(Widget):
     ):
         super().__init__(name=name, id=id, classes=classes, disabled=disabled)
         self.numbers = list(numbers)
+        self.line_styles = list(line_styles or [])
 
     @property
     def total_width(self) -> int:
@@ -123,6 +152,12 @@ class LineAnnotations(Widget):
     def render_line(self, y: int) -> Strip:
         width = self.total_width
         visual_style = self.visual_style
+        try:
+            line_style = self.line_styles[y]
+        except IndexError:
+            line_style = ""
+        if line_style:
+            visual_style += self._get_style(line_style)
         rich_style = visual_style.rich_style
 
         try:

@@ -136,19 +136,23 @@ class SplitDiffBlock(Horizontal):
         self,
         *,
         left_annotations: list[Content],
+        left_annotation_styles: list[str],
         left_code_lines: list[Content | None],
         left_styles: list[str],
         right_annotations: list[Content],
+        right_annotation_styles: list[str],
         right_code_lines: list[Content | None],
         right_styles: list[str],
         left_width: int | None = None,
         right_width: int | None = None,
     ) -> None:
         self._left_annotations.numbers = left_annotations
+        self._left_annotations.line_styles = left_annotation_styles
         self._left_code.update(
             LineContent(left_code_lines, left_styles, width=left_width)
         )
         self._right_annotations.numbers = right_annotations
+        self._right_annotations.line_styles = right_annotation_styles
         self._right_code.update(
             LineContent(right_code_lines, right_styles, width=right_width)
         )
@@ -164,8 +168,10 @@ class UnifiedBlockRowStaticData:
 @dataclass(frozen=True)
 class SplitBlockLineStaticData:
     left_annotation: Content
+    left_annotation_style: str
     left_style: str
     right_annotation: Content
+    right_annotation_style: str
     right_style: str
 
 

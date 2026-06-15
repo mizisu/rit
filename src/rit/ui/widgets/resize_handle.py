@@ -14,7 +14,7 @@ class ResizeHandle(Widget):
     ResizeHandle {
         width: 1;
         height: 100%;
-        background: $surface;
+        background: $panel;
     }
     ResizeHandle:hover {
         background: $primary 40%;

@@ -2,6 +2,8 @@
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.color import Color
+from textual.content import Content
 from textual.containers import HorizontalScroll
 from textual.style import Style
 from textual.visual import RenderOptions
@@ -9,7 +11,13 @@ from textual.widgets import Static
 
 from rit.core.diff import parse_patch
 from rit.ui.widgets.diff_view import DiffView
-from rit.ui.widgets.diff_visual import LineContent
+from rit.ui.widgets.diff_visual import (
+    LineContent,
+    MISSING_SIDE_HATCH,
+    MISSING_SIDE_HATCH_STYLE,
+    MISSING_SIDE_STYLE,
+    missing_side_hatch_text,
+)
 
 
 def _as_plain(widget: Static) -> str:
@@ -17,18 +25,50 @@ def _as_plain(widget: Static) -> str:
     return str(getattr(content, "plain", content))
 
 
-def test_block_missing_side_placeholder_renders_as_plain_space() -> None:
-    """Block-rendered missing sides should stay visually quiet."""
+def test_block_missing_side_placeholder_renders_light_hatch() -> None:
+    """Block-rendered missing sides should render a quiet diagonal marker."""
     content = LineContent([None], [""], width=5)
+    requested_styles: list[str | Style] = []
+
+    def get_style(style: str | Style) -> Style:
+        requested_styles.append(style)
+        if style == MISSING_SIDE_HATCH_STYLE:
+            return Style(
+                foreground=Color.parse("#6e738d"),
+                background=Color.parse("#181926"),
+            )
+        return Style.null()
 
     strips = content.render_strips(
         5,
         None,
         Style.null(),
-        RenderOptions(lambda _: Style.null(), {}, None, None, None),
+        RenderOptions(get_style, {}, None, None, None),
     )
 
-    assert strips[0].text == " " * 5
+    assert strips[0].text == MISSING_SIDE_HATCH * 5
+    assert strips[0].text == missing_side_hatch_text(5)
+    assert missing_side_hatch_text(5, row_index=1) == MISSING_SIDE_HATCH * 5
+    assert requested_styles == [MISSING_SIDE_HATCH_STYLE]
+    assert "#6e738d" in str(strips[0]._segments[0].style)
+
+
+def test_block_annotations_can_style_missing_side_rows() -> None:
+    """Block-rendered line prefixes should allow missing-side row backgrounds."""
+    from rit.ui.widgets.diff_visual import LineAnnotations
+
+    annotations = LineAnnotations([Content("  ")], line_styles=[MISSING_SIDE_STYLE])
+    annotations.styles.width = 2
+    annotations._get_style = lambda style: (  # type: ignore[method-assign]
+        Style(background=Color.parse("#363a4f"))
+        if style == MISSING_SIDE_STYLE
+        else Style.null()
+    )
+
+    strip = annotations.render_line(0)
+
+    assert strip.text == "  "
+    assert "on #363a4f" in str(strip._segments[0].style)
 
 
 @pytest.mark.asyncio
@@ -149,7 +189,17 @@ async def test_split_mode_uses_quiet_placeholders_for_missing_side() -> None:
         placeholder = diff_view.query_one(
             f"#line-{placeholder_line}-old .code-content", Static
         )
-        assert _as_plain(placeholder).strip() == ""
+        placeholder_prefix = diff_view.query_one(
+            f"#line-{placeholder_line}-old .line-prefix", Static
+        )
+        real_prefix = diff_view.query_one(
+            f"#line-{placeholder_line}-new .line-prefix", Static
+        )
+
+        assert MISSING_SIDE_HATCH in _as_plain(placeholder)
+        assert placeholder_prefix.has_class("-placeholder")
+        assert not real_prefix.has_class("-placeholder")
+        assert _as_plain(placeholder_prefix).strip() == ""
 
 
 @pytest.mark.asyncio
@@ -173,8 +223,8 @@ async def test_split_mode_distinguishes_blank_lines_from_missing_sides() -> None
         old_code = diff_view.query_one("#line-0-old .code-content", Static)
         new_code = diff_view.query_one("#line-0-new .code-content", Static)
 
-        assert "╲" not in _as_plain(old_code)
-        assert "╲" not in _as_plain(new_code)
+        assert MISSING_SIDE_HATCH not in _as_plain(old_code)
+        assert MISSING_SIDE_HATCH not in _as_plain(new_code)
 
         add_patch = "@@ -1,2 +1,3 @@\n line\n-shared\n+shared_v2\n+"
         await diff_view.show_diff("test.py", parse_patch(add_patch, "test.py"))
@@ -186,12 +236,20 @@ async def test_split_mode_distinguishes_blank_lines_from_missing_sides() -> None
         missing_old = diff_view.query_one(
             f"#line-{added_blank_index}-old .code-content", Static
         )
+        missing_old_prefix = diff_view.query_one(
+            f"#line-{added_blank_index}-old .line-prefix", Static
+        )
         blank_new = diff_view.query_one(
             f"#line-{added_blank_index}-new .code-content", Static
         )
+        blank_new_prefix = diff_view.query_one(
+            f"#line-{added_blank_index}-new .line-prefix", Static
+        )
 
-        assert _as_plain(missing_old).strip() == ""
-        assert "╲" not in _as_plain(blank_new)
+        assert MISSING_SIDE_HATCH in _as_plain(missing_old)
+        assert missing_old_prefix.has_class("-placeholder")
+        assert not blank_new_prefix.has_class("-placeholder")
+        assert MISSING_SIDE_HATCH not in _as_plain(blank_new)
 
 
 @pytest.mark.asyncio

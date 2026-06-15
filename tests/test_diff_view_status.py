@@ -13,6 +13,7 @@ from rit.core.types import DiffLine
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_render as _render
 from rit.ui.widgets.diff_view import DiffView
+from rit.ui.widgets.diff_visual import MISSING_SIDE_HATCH_STYLE, MISSING_SIDE_STYLE
 
 
 def _as_plain(widget: Static) -> str:
@@ -48,6 +49,8 @@ def test_change_background_styles_remain_subtle() -> None:
     assert _render._split_line_style(view, modified, side="new") == "on $success 6%"
     assert _blocks._cursor_block_line_style("on $success 6%") == "on $success 18%"
     assert _blocks._cursor_block_line_style("on $error 6%") == "on $error 18%"
+    assert MISSING_SIDE_STYLE == "on $background"
+    assert MISSING_SIDE_HATCH_STYLE == "$text-disabled 9% on $background"
 
     css = Path("src/rit/ui/widgets/diff_view.tcss").read_text()
     for expected in (
@@ -55,8 +58,45 @@ def test_change_background_styles_remain_subtle() -> None:
         "background: $error 6%;",
         "background: $success 18%;",
         "background: $error 18%;",
+        "background: $background;",
+        "color: $text-disabled 9%;",
     ):
         assert expected in css
+
+    resize_css = Path("src/rit/ui/widgets/resize_handle.py").read_text()
+    assert "background: $panel;" in resize_css
+
+
+@pytest.mark.asyncio
+async def test_split_modified_word_diff_avoids_whole_line_change_classes() -> None:
+    """Split modified rows should let inline word-diff carry small changes."""
+
+    patch = (
+        "@@ -64,1 +64,1 @@\n"
+        "-    def retrieve(self, request: UserAuthorizedRequest, "
+        "review_cycle_entity_id: str):\n"
+        "+    def retrieve(self, request: UserAuthorizedRequest, "
+        "review_cycle_entity_id: str) -> Response:"
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="split", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff = parse_patch(patch, "test.py")
+
+        await diff_view.show_diff("test.py", diff)
+        await pilot.pause()
+
+        old_code = diff_view.query_one("#line-0-old .code-content", Static)
+        new_code = diff_view.query_one("#line-0-new .code-content", Static)
+
+        assert diff.hunks[0].lines[0].has_word_diff
+        assert not old_code.has_class("-removed")
+        assert not new_code.has_class("-added")
 
 
 @pytest.mark.asyncio

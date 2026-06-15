@@ -1573,6 +1573,9 @@ class DiffView(VerticalScroll):
     def _build_split_prefix_content(self, line: DiffLine, **kwargs) -> Content:
         return _render._build_split_prefix_content(self, line, **kwargs)
 
+    def _split_annotation_style(self, line: DiffLine, **kwargs) -> str:
+        return _render._split_annotation_style(self, line, **kwargs)
+
     def _build_split_code_content(self, line: DiffLine, **kwargs) -> Content | None:
         return _render._build_split_code_content(self, line, **kwargs)
 

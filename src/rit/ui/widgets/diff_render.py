@@ -21,7 +21,12 @@ from rit.ui.widgets import diff_highlight as _hl
 from rit.ui.widgets import diff_plan as _plan
 from rit.ui.widgets import diff_search as _search
 from rit.ui.widgets import diff_virtual as _virtual
-from rit.ui.widgets.diff_visual import SyncedCodeScroll
+from rit.ui.widgets.diff_visual import (
+    MISSING_SIDE_BACKGROUND_STYLE,
+    MISSING_SIDE_HATCH_STYLE,
+    SyncedCodeScroll,
+    missing_side_hatch_text,
+)
 
 if TYPE_CHECKING:
     from contextvars import ContextVar
@@ -52,17 +57,30 @@ def _has_only_added_deleted_changes(lines: list[DiffLine]) -> bool:
     return has_change
 
 
+def _change_stats_are_single_sided(additions: int, deletions: int) -> bool:
+    return (additions > 0 and deletions == 0) or (deletions > 0 and additions == 0)
+
+
 def _should_force_unified_for_current_file(view: DiffView) -> bool:
     if view._showing_full_file:
         return True
-    if view._file is not None and view._file.status in {"added", "removed"}:
-        return True
+    if view._file is not None:
+        if view._file.status in {"added", "removed"}:
+            return True
+        if _change_stats_are_single_sided(view._file.additions, view._file.deletions):
+            return True
     diff = view._diff
     if diff is None:
         return False
     if diff.is_new or diff.is_deleted:
         return True
     return diff.is_fully_refined and _has_only_added_deleted_changes(view._all_lines)
+
+
+def _should_force_unified_for_hunk(hunk: DiffHunk) -> bool:
+    if hunk.file_status in {"added", "removed"}:
+        return True
+    return _change_stats_are_single_sided(hunk.file_additions, hunk.file_deletions)
 
 
 def _split_prefix_width_for_layout(
@@ -483,7 +501,9 @@ def _create_file_header_widget(
     *,
     hunk_index: int,
     hunk: DiffHunk,
+    split: bool | None = None,
 ) -> Widget:
+    use_split = view.split if split is None else split
     path = hunk.file_path or "unknown"
     old_path = hunk.file_old_path
     file = _file_for_header(view, path)
@@ -529,7 +549,7 @@ def _create_file_header_widget(
     header_widget.styles.height = _geometry.FILE_DIFF_HEADER_HEIGHT
     header_widget.styles.min_height = _geometry.FILE_DIFF_HEADER_HEIGHT
     header_widget.styles.width = max(1, width)
-    if not view.split:
+    if not use_split:
         return header_widget
     header_scroll = SyncedCodeScroll(
         header_widget,
@@ -546,7 +566,9 @@ def _create_hunk_header_widget(
     *,
     hunk_index: int,
     hunk_header: str,
+    split: bool | None = None,
 ) -> Widget:
+    use_split = view.split if split is None else split
     classes = "hunk-header"
     if view._showing_full_file:
         classes += " preview-hunk-boundary"
@@ -563,6 +585,13 @@ def _create_hunk_header_widget(
         )
         return header_widget
     header_widget.styles.width = max(1, len(hunk_header) + 2)
+    if not use_split:
+        header_widget.styles.width = max(
+            1,
+            len(hunk_header) + 2,
+            _unified_content_width_for_layout(view),
+        )
+        return header_widget
     return SyncedCodeScroll(
         header_widget,
         classes="split-hunk-header-scroll",
@@ -604,9 +633,16 @@ def _render_hunk(
     if not lines:
         return
 
+    render_split = view.split and not _should_force_unified_for_hunk(hunk)
+
     if show_header and hunk.starts_file:
         container.mount(
-            _create_file_header_widget(view, hunk_index=hunk_index, hunk=hunk)
+            _create_file_header_widget(
+                view,
+                hunk_index=hunk_index,
+                hunk=hunk,
+                split=render_split,
+            )
         )
 
     if show_header and (view._diff is None or view._diff.show_hunk_headers):
@@ -620,11 +656,12 @@ def _render_hunk(
             view,
             hunk_index=hunk_index,
             hunk_header=hunk_header,
+            split=render_split,
         )
         container.mount(hunk_header_widget)
         view._register_hunk_header_widget(hunk_index, hunk_header_widget)
 
-    if view.split:
+    if render_split:
         _render_hunk_split(view, container, lines)
     else:
         _render_hunk_unified(view, container, lines)
@@ -661,8 +698,19 @@ def _preview_prefix_width_for_layout(view: DiffView) -> int:
     return _new_line_number_width(view) + 4
 
 
-def _split_placeholder_content(view: DiffView) -> Content:
-    return Content(" ")
+def _split_placeholder_content(
+    view: DiffView,
+    *,
+    side: Literal["old", "new"],
+) -> Content:
+    side_width = (
+        view._split_old_code_width if side == "old" else view._split_new_code_width
+    )
+    width = max(1, side_width, view.size.width // 2)
+    return Content.styled(
+        missing_side_hatch_text(width),
+        MISSING_SIDE_HATCH_STYLE,
+    )
 
 
 def _build_unified_prefix_content(view: DiffView, line: DiffLine) -> Content:
@@ -741,6 +789,12 @@ def _split_line_style(
     *,
     side: Literal["old", "new"],
 ) -> str:
+    if (
+        line.is_modified
+        and line.has_word_diff
+        and getattr(view, "word_diff_enabled", True)
+    ):
+        return ""
     if side == "old" and (line.is_deleted or line.is_modified):
         return "on $error 6%"
     if side == "new" and (line.is_added or line.is_modified):
@@ -1185,20 +1239,52 @@ def _build_split_prefix_content(
     )
 
 
-def _split_code_classes(
+def _split_side_missing(
+    line: DiffLine,
+    *,
+    side: Literal["old", "new"],
+) -> bool:
+    return not (line.has_old_side if side == "old" else line.has_new_side)
+
+
+def _split_prefix_classes(
     line: DiffLine,
     *,
     side: Literal["old", "new"],
 ) -> str:
+    classes = "line-prefix"
+    if _split_side_missing(line, side=side):
+        classes += " -placeholder"
+    return classes
+
+
+def _split_annotation_style(
+    view: DiffView,
+    line: DiffLine,
+    *,
+    side: Literal["old", "new"],
+) -> str:
+    if _split_side_missing(line, side=side):
+        return MISSING_SIDE_BACKGROUND_STYLE
+    return ""
+
+
+def _split_code_classes(
+    line: DiffLine,
+    *,
+    side: Literal["old", "new"],
+    word_diff_enabled: bool,
+) -> str:
     classes = f"code-content -{side}-side"
+    inline_word_diff = line.is_modified and word_diff_enabled and line.has_word_diff
 
     if side == "old":
-        if line.is_deleted or line.is_modified:
+        if line.is_deleted or (line.is_modified and not inline_word_diff):
             classes += " -removed"
         if line.is_added:
             classes += " -placeholder"
     else:
-        if line.is_added or line.is_modified:
+        if line.is_added or (line.is_modified and not inline_word_diff):
             classes += " -added"
         if line.is_deleted:
             classes += " -placeholder"
@@ -1216,7 +1302,7 @@ def _build_split_code_content(
     has_side = line.has_old_side if side == "old" else line.has_new_side
     if not has_side:
         if placeholder_when_missing:
-            return _split_placeholder_content(view)
+            return _split_placeholder_content(view, side=side)
         return None
 
     text = line.old_content if side == "old" else line.new_content
@@ -1263,7 +1349,11 @@ def _render_line_split(
     )
     if left_content is None:
         left_content = Content.empty()
-    left_classes = _split_code_classes(line, side="old")
+    left_classes = _split_code_classes(
+        line,
+        side="old",
+        word_diff_enabled=view.word_diff_enabled,
+    )
 
     right_prefix = _build_split_prefix_content(view, line, side="new")
     right_content = _build_split_code_content(
@@ -1274,9 +1364,16 @@ def _render_line_split(
     )
     if right_content is None:
         right_content = Content.empty()
-    right_classes = _split_code_classes(line, side="new")
+    right_classes = _split_code_classes(
+        line,
+        side="new",
+        word_diff_enabled=view.word_diff_enabled,
+    )
 
-    left_prefix_widget = Static(left_prefix, classes="line-prefix")
+    left_prefix_widget = Static(
+        left_prefix,
+        classes=_split_prefix_classes(line, side="old"),
+    )
     left_prefix_widget.styles.width = _split_prefix_width_for_layout(view, "old")
     left_code_widget = Static(left_content, classes=left_classes)
     if old_code_width is not None:
@@ -1293,7 +1390,10 @@ def _render_line_split(
         id=f"line-{line.line_index}-old",
     )
 
-    right_prefix_widget = Static(right_prefix, classes="line-prefix")
+    right_prefix_widget = Static(
+        right_prefix,
+        classes=_split_prefix_classes(line, side="new"),
+    )
     right_prefix_widget.styles.width = _split_prefix_width_for_layout(view, "new")
     right_code_widget = Static(right_content, classes=right_classes)
     if new_code_width is not None:

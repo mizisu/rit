@@ -124,8 +124,10 @@ def _compute_split_block_static_row(
 ) -> SplitBlockLineStaticData:
     return SplitBlockLineStaticData(
         left_annotation=_build_split_block_prefix_content(view, line, side="old"),
+        left_annotation_style=view._split_annotation_style(line, side="old"),
         left_style=view._split_line_style(line, side="old"),
         right_annotation=_build_split_block_prefix_content(view, line, side="new"),
+        right_annotation_style=view._split_annotation_style(line, side="new"),
         right_style=view._split_line_style(line, side="new"),
     )
 
@@ -234,7 +236,7 @@ def _build_split_block_code_content(
 def _build_split_block_row_data(
     view,
     line: DiffLine,
-) -> tuple[Content, Content | None, str, Content, Content | None, str]:
+) -> tuple[Content, str, Content | None, str, Content, str, Content | None, str]:
     static_row = _split_block_static_row(view, line)
     cursor_side = (
         view._cursor_side_for_line(line)
@@ -253,9 +255,11 @@ def _build_split_block_row_data(
     )
     return (
         static_row.left_annotation,
+        static_row.left_annotation_style,
         _build_split_block_code_content(view, line, side="old"),
         left_style,
         static_row.right_annotation,
+        static_row.right_annotation_style,
         _build_split_block_code_content(view, line, side="new"),
         right_style,
     )
@@ -349,33 +353,41 @@ def _refresh_split_blocks_for_lines(view, line_indices: set[int]) -> bool:
     for block in blocks:
         block_lines = [view._all_lines[idx] for idx in block.line_indices]
         left_annotations: list[Content] = []
+        left_annotation_styles: list[str] = []
         left_code_lines: list[Content | None] = []
         left_styles: list[str] = []
         right_annotations: list[Content] = []
+        right_annotation_styles: list[str] = []
         right_code_lines: list[Content | None] = []
         right_styles: list[str] = []
 
         for line in block_lines:
             (
                 left_annotation,
+                left_annotation_style,
                 left_code,
                 left_style,
                 right_annotation,
+                right_annotation_style,
                 right_code,
                 right_style,
             ) = _build_split_block_row_data(view, line)
             left_annotations.append(left_annotation)
+            left_annotation_styles.append(left_annotation_style)
             left_code_lines.append(left_code)
             left_styles.append(left_style)
             right_annotations.append(right_annotation)
+            right_annotation_styles.append(right_annotation_style)
             right_code_lines.append(right_code)
             right_styles.append(right_style)
 
         block.update_block(
             left_annotations=left_annotations,
+            left_annotation_styles=left_annotation_styles,
             left_code_lines=left_code_lines,
             left_styles=left_styles,
             right_annotations=right_annotations,
+            right_annotation_styles=right_annotation_styles,
             right_code_lines=right_code_lines,
             right_styles=right_styles,
             left_width=view._split_old_code_width,
@@ -414,33 +426,41 @@ def _render_split_line_block(
         classes="diff-block split-block split-container",
     )
     left_annotations: list[Content] = []
+    left_annotation_styles: list[str] = []
     left_code_lines: list[Content | None] = []
     left_styles: list[str] = []
     right_annotations: list[Content] = []
+    right_annotation_styles: list[str] = []
     right_code_lines: list[Content | None] = []
     right_styles: list[str] = []
 
     for line in lines:
         (
             left_annotation,
+            left_annotation_style,
             left_code,
             left_style,
             right_annotation,
+            right_annotation_style,
             right_code,
             right_style,
         ) = _build_split_block_row_data(view, line)
         left_annotations.append(left_annotation)
+        left_annotation_styles.append(left_annotation_style)
         left_code_lines.append(left_code)
         left_styles.append(left_style)
         right_annotations.append(right_annotation)
+        right_annotation_styles.append(right_annotation_style)
         right_code_lines.append(right_code)
         right_styles.append(right_style)
 
     block.update_block(
         left_annotations=left_annotations,
+        left_annotation_styles=left_annotation_styles,
         left_code_lines=left_code_lines,
         left_styles=left_styles,
         right_annotations=right_annotations,
+        right_annotation_styles=right_annotation_styles,
         right_code_lines=right_code_lines,
         right_styles=right_styles,
         left_width=view._split_old_code_width,

@@ -5,12 +5,123 @@ from textual.app import App, ComposeResult
 from textual.widgets import Static
 
 from rit.core.diff import parse_patch
+from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.ui.widgets.diff_view import DiffView
 
 
 def _as_plain(widget: Static) -> str:
     content = getattr(widget, "content", "")
     return str(getattr(content, "plain", content))
+
+
+def _combined_diff_with_single_sided_file(
+    changed_line: DiffLine,
+    *,
+    additions: int,
+    deletions: int,
+) -> FileDiff:
+    return FileDiff(
+        filename="All files",
+        show_hunk_headers=False,
+        hunks=[
+            DiffHunk(
+                old_start=1,
+                old_count=deletions,
+                new_start=1,
+                new_count=additions,
+                starts_file=True,
+                file_path="single_sided.py",
+                file_status="modified",
+                file_additions=additions,
+                file_deletions=deletions,
+                lines=[changed_line],
+            ),
+            DiffHunk(
+                old_start=1,
+                old_count=1,
+                new_start=1,
+                new_count=1,
+                starts_file=True,
+                file_path="changed.py",
+                file_status="modified",
+                file_additions=1,
+                file_deletions=1,
+                lines=[
+                    DiffLine(
+                        old_line_no=1,
+                        new_line_no=1,
+                        old_content="old_value",
+                        new_content="new_value",
+                        is_modified=True,
+                    )
+                ],
+            ),
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    ("changed_line", "additions", "deletions", "expected_text"),
+    [
+        (
+            DiffLine(
+                old_line_no=None,
+                new_line_no=1,
+                new_content="added_value",
+                is_added=True,
+            ),
+            1,
+            0,
+            "added_value",
+        ),
+        (
+            DiffLine(
+                old_line_no=1,
+                new_line_no=None,
+                old_content="deleted_value",
+                is_deleted=True,
+            ),
+            0,
+            1,
+            "deleted_value",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_split_mode_renders_single_sided_combined_file_hunks_as_unified(
+    changed_line: DiffLine,
+    additions: int,
+    deletions: int,
+    expected_text: str,
+) -> None:
+    """Single-sided files in a combined diff should not waste a split pane."""
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="split", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+
+        await diff_view.show_diff(
+            "All files",
+            _combined_diff_with_single_sided_file(
+                changed_line,
+                additions=additions,
+                deletions=deletions,
+            ),
+        )
+        await pilot.pause()
+
+        assert diff_view.split is True
+        assert len(diff_view.query("#line-0-old")) == 0
+        assert len(diff_view.query("#line-0-new")) == 0
+        assert _as_plain(diff_view.query_one("#line-0 .code-content", Static)) == (
+            expected_text
+        )
+        assert len(diff_view.query("#line-1-old")) == 1
+        assert len(diff_view.query("#line-1-new")) == 1
 
 
 @pytest.mark.asyncio
