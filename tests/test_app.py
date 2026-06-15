@@ -320,6 +320,38 @@ class TestRitApp:
             assert tabbed.active == "pr-info"
             assert textarea.text.startswith("qjk")
 
+    async def test_pr_info_o_opens_pr_in_browser(
+        self, app: RitApp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pressing o on PR Info should use the global browser-open action."""
+
+        _stub_initial_loads(monkeypatch)
+        calls: list[tuple[list[str], dict[str, object]]] = []
+
+        def fake_run(args: list[str], **kwargs: object) -> None:
+            calls.append((args, kwargs))
+
+        monkeypatch.setattr("rit.app.subprocess.run", fake_run)
+
+        async with app.run_test() as pilot:
+            await pilot.press("o")
+            await pilot.pause()
+
+        assert calls == [
+            (
+                [
+                    "gh",
+                    "pr",
+                    "view",
+                    "123",
+                    "--web",
+                    "-R",
+                    "test/repo",
+                ],
+                {"check": True, "capture_output": True},
+            )
+        ]
+
     async def test_files_tab_defers_pr_info_discussion_render_until_pr_info_tab(
         self, app: RitApp, monkeypatch: pytest.MonkeyPatch
     ) -> None:

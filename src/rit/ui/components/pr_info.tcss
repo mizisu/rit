@@ -4,10 +4,18 @@ PRInfo {
     layout: horizontal;
     height: 100%;
     width: 100%;
+    align: center top;
+}
+
+PRInfo #pr-info-layout {
+    layout: horizontal;
+    height: 100%;
+    width: 100%;
+    max-width: 152;
 }
 
 /* Scroll container for main content */
-PRInfo > VerticalScroll {
+PRInfo #main-scroll {
     width: 1fr;
     height: 100%;
 }
@@ -19,9 +27,9 @@ PRInfo .main-content {
     padding: 1 2;
 }
 
-/* Wide screen: add horizontal padding to center content */
+/* Wide screen: center the GitHub-like main/sidebar layout as one unit. */
 PRInfo.-wide {
-    padding: 0 12;
+    padding: 0;
 }
 
 /* Sidebar (right side) - fixed width, no scroll */
@@ -85,7 +93,7 @@ PRInfo #comments-container {
 
 /* Review thread layout (visual style lives in ReviewThreadItem) */
 PRInfo ReviewThreadItem.--thread {
-    margin: 1 0;
+    margin: 1 0 1 4;
 }
 
 /* Placeholder text */

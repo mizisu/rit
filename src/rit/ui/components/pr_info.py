@@ -6,7 +6,7 @@ from typing import Literal
 
 from textual import events, on
 from textual.app import ComposeResult
-from textual.containers import Container, Vertical, VerticalScroll
+from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.reactive import var
 from textual.widgets import Rule, Static
@@ -35,27 +35,28 @@ class PRInfo(Container):
         self.store = store
 
     def compose(self) -> ComposeResult:
-        with VerticalScroll(id="main-scroll"):
-            with Vertical(classes="main-content", id="main-content"):
-                yield Static("Loading...", classes="pr-title", id="pr-title")
-                yield Static("", id="pr-status")
-                yield Static("", classes="branch-info", id="branch-info")
-                yield Static("", classes="stats-bar", id="pr-stats")
-                yield Rule()
-                yield PRTimeline(self.store, id="pr-timeline")
+        with Horizontal(id="pr-info-layout"):
+            with VerticalScroll(id="main-scroll"):
+                with Vertical(classes="main-content", id="main-content"):
+                    yield Static("Loading...", classes="pr-title", id="pr-title")
+                    yield Static("", id="pr-status")
+                    yield Static("", classes="branch-info", id="branch-info")
+                    yield Static("", classes="stats-bar", id="pr-stats")
+                    yield Rule()
+                    yield PRTimeline(self.store, id="pr-timeline")
 
-        with Vertical(classes="sidebar", id="sidebar"):
-            with Vertical(classes="sidebar-section"):
-                yield Static("Reviewers", classes="sidebar-section-title")
-                yield Static("Loading...", classes="placeholder", id="pr-reviewers")
+            with Vertical(classes="sidebar", id="sidebar"):
+                with Vertical(classes="sidebar-section"):
+                    yield Static("Reviewers", classes="sidebar-section-title")
+                    yield Static("Loading...", classes="placeholder", id="pr-reviewers")
 
-            with Vertical(classes="sidebar-section"):
-                yield Static("Assignees", classes="sidebar-section-title")
-                yield Static("Loading...", classes="placeholder", id="pr-assignees")
+                with Vertical(classes="sidebar-section"):
+                    yield Static("Assignees", classes="sidebar-section-title")
+                    yield Static("Loading...", classes="placeholder", id="pr-assignees")
 
-            with Vertical(classes="sidebar-section"):
-                yield Static("Labels", classes="sidebar-section-title")
-                yield Static("Loading...", classes="placeholder", id="pr-labels")
+                with Vertical(classes="sidebar-section"):
+                    yield Static("Labels", classes="sidebar-section-title")
+                    yield Static("Loading...", classes="placeholder", id="pr-labels")
 
     def on_mount(self) -> None:
         self._update_wide_state()

@@ -106,6 +106,20 @@ def test_timeline_thread_contents_keep_padding_without_affecting_inline_threads(
     assert "padding: 0;" in inline_contents_block
 
 
+def test_pr_info_review_threads_are_inset_without_affecting_inline_threads() -> None:
+    """Timeline review threads should sit inside the parent review rhythm."""
+    pr_info_css = (ROOT / "src/rit/ui/components/pr_info.tcss").read_text()
+    pr_info_thread_block = pr_info_css.split("PRInfo ReviewThreadItem.--thread {", 1)[
+        1
+    ].split("}", 1)[0]
+    inline_block = ReviewThreadItem.DEFAULT_CSS.split(
+        "ReviewThreadItem.--inline {", 1
+    )[1].split("}", 1)[0]
+
+    assert "margin: 1 0 1 4;" in pr_info_thread_block
+    assert "margin: 0;" in inline_block
+
+
 def test_comment_card_markdown_headings_create_section_breaks() -> None:
     """Markdown headings should separate sections without loosening every line."""
     css = CommentCard.DEFAULT_CSS

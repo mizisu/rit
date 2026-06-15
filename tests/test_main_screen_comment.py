@@ -247,7 +247,7 @@ async def test_save_inline_comment_draft_renders_pending_card_before_sync_finish
 
 
 @pytest.mark.asyncio
-async def test_main_screen_opens_selected_pr_thread_in_combined_diff(
+async def test_pr_info_shift_o_opens_selected_pr_thread_in_combined_diff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def noop_load(self: MainScreen) -> None:
@@ -310,7 +310,7 @@ async def test_main_screen_opens_selected_pr_thread_in_combined_diff(
         await pilot.pause()
 
         screen.pr_info.next_comment()
-        screen.action_open_thread_in_diff()
+        await pilot.press("O")
         await pilot.pause()
         await pilot.pause()
 

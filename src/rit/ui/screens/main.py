@@ -64,7 +64,13 @@ _PR_INFO_BINDINGS = [
     ),
     Binding("K", "prev_comment", "", group=_COMMENT_GROUP, show=False),
     Binding("c", "comment", "Comment", group=_COMMENT_GROUP),
-    Binding("o", "open_thread_in_diff", "Open Diff", group=_NAVIGATION_GROUP),
+    Binding(
+        "O",
+        "open_thread_in_diff",
+        "Open Diff",
+        key_display="shift+o",
+        group=_NAVIGATION_GROUP,
+    ),
     Binding("S", "review", "Review", group=_REVIEW_GROUP),
     Binding(
         "R",
