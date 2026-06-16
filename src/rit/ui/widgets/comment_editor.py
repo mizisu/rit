@@ -43,9 +43,9 @@ class InlineCommentEditor(Vertical):
     """
 
     BINDINGS = [
-        Binding("ctrl+s", "submit('queue')", "Save draft", show=False),
+        Binding("ctrl+s,ctrl+enter", "submit('queue')", "Save draft", show=False),
         Binding(
-            "ctrl+enter,ctrl+shift+s",
+            "ctrl+shift+s,ctrl+shift+enter",
             "submit('post')",
             "Post now",
             show=False,
@@ -89,7 +89,7 @@ class InlineCommentEditor(Vertical):
             placeholder=self._placeholder,
         )
         if self._kind == "inline":
-            hint = "Ctrl+S queue draft • Ctrl+Enter post now • Esc cancel"
+            hint = "Ctrl+S pending • Ctrl+Shift+S post now • Esc cancel"
         else:
             hint = "Ctrl+S submit • Esc cancel"
         yield Static(hint)

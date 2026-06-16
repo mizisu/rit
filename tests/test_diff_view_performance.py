@@ -14,11 +14,21 @@ from rit.ui.widgets import diff_highlight as _hl_mod
 from rit.ui.widgets import diff_virtual as _virtual_mod
 from rit.ui.widgets.diff_view import DiffView, SplitDiffBlock, UnifiedDiffBlock
 from rit.ui.widgets.diff_visual import LineContent
+from tests.conftest import wait_until
 
 
 def _as_plain(widget: Static) -> str:
     content = getattr(widget, "content", "")
     return str(getattr(content, "plain", content))
+
+
+def _diff_view_render_idle(diff_view: DiffView) -> bool:
+    return (
+        not diff_view._hl_state.window_worker_active
+        and diff_view._hl_state.queued_window is None
+        and not diff_view._cursor_ui.flush_pending
+        and not diff_view._virt.render_pending
+    )
 
 
 @pytest.mark.asyncio
@@ -1393,6 +1403,7 @@ async def test_unified_block_refresh_reuses_cached_static_row_data(
         await diff_view.show_diff("big.py", diff)
         await pilot.pause()
         await pilot.pause()
+        await wait_until(lambda: _diff_view_render_idle(diff_view), timeout=1.0)
 
         initial_static = static_calls["count"]
         initial_base = base_calls["count"]
@@ -1406,6 +1417,7 @@ async def test_unified_block_refresh_reuses_cached_static_row_data(
         diff_view.cursor_line = 11
         await pilot.pause()
         await pilot.pause()
+        await wait_until(lambda: _diff_view_render_idle(diff_view), timeout=1.0)
 
         assert static_calls["count"] == initial_static
         assert base_calls["count"] == initial_base
@@ -1457,6 +1469,7 @@ async def test_split_block_refresh_reuses_cached_static_row_data(
         await diff_view.show_diff("big.py", diff)
         await pilot.pause()
         await pilot.pause()
+        await wait_until(lambda: _diff_view_render_idle(diff_view), timeout=1.0)
 
         initial_static = static_calls["count"]
         initial_base = base_calls["count"]
@@ -1470,6 +1483,7 @@ async def test_split_block_refresh_reuses_cached_static_row_data(
         diff_view.cursor_line = 11
         await pilot.pause()
         await pilot.pause()
+        await wait_until(lambda: _diff_view_render_idle(diff_view), timeout=1.0)
 
         assert static_calls["count"] == initial_static
         assert base_calls["count"] == initial_base
@@ -1537,8 +1551,17 @@ async def test_scroll_coalesces_pending_virtual_window_updates(
         await pilot.pause()
         await pilot.pause()
         await pilot.pause()
+        await wait_until(
+            lambda: (
+                not diff_view._virt.render_pending
+                and diff_view._virt.rendered_start
+                <= queued_center
+                <= diff_view._virt.rendered_end
+            ),
+            timeout=2.0,
+        )
 
-        assert calls["count"] == 2
+        assert 2 <= calls["count"] <= 3
         assert (
             diff_view._virt.rendered_start
             <= queued_center

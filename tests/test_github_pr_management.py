@@ -167,6 +167,66 @@ async def test_remove_assignees_uses_issue_assignee_endpoint() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_review_comment_posts_submitted_review_payload() -> None:
+    service = CaptureGitHubService(
+        outputs=[
+            json.dumps({"id": 80, "state": "COMMENTED", "body": ""}),
+            json.dumps(
+                [
+                    {
+                        "id": 300,
+                        "pull_request_review_id": 80,
+                        "body": "ship it",
+                        "path": "app.py",
+                        "line": 42,
+                        "side": "RIGHT",
+                        "user": {"login": "alice"},
+                    }
+                ]
+            ),
+        ]
+    )
+
+    comment = await service.create_review_comment(
+        123,
+        body="ship it",
+        commit_id="deadbeef",
+        path="app.py",
+        line=42,
+        side="RIGHT",
+    )
+
+    assert comment.id == 300
+    args, input_text = service.calls[0]
+    assert args == [
+        "api",
+        "--method",
+        "POST",
+        "/repos/owner/repo/pulls/123/reviews",
+        "--input",
+        "-",
+    ]
+    assert input_text is not None
+    assert json.loads(input_text) == {
+        "event": "COMMENT",
+        "commit_id": "deadbeef",
+        "comments": [
+            {
+                "path": "app.py",
+                "line": 42,
+                "side": "RIGHT",
+                "body": "ship it",
+            }
+        ],
+    }
+    assert service.calls[1][0] == [
+        "api",
+        "/repos/owner/repo/pulls/123/reviews/80/comments",
+        "--paginate",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_team_reviewer_candidates_treat_repo_teams_404_as_empty() -> None:
     service = CaptureGitHubService(outputs=[GitHubError("gh: Not Found (HTTP 404)")])
 

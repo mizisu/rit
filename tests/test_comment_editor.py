@@ -46,8 +46,8 @@ async def test_inline_comment_editor_submits_trimmed_body_with_ctrl_s() -> None:
 
 
 @pytest.mark.asyncio
-async def test_inline_comment_editor_posts_with_ctrl_enter() -> None:
-    """Ctrl+Enter should submit the editor in post mode for send-now."""
+async def test_inline_comment_editor_queues_with_ctrl_s() -> None:
+    """Ctrl+S should save inline comments as pending review drafts."""
 
     app = _make_app(kind="inline")
     async with app.run_test() as pilot:
@@ -56,15 +56,15 @@ async def test_inline_comment_editor_posts_with_ctrl_enter() -> None:
         textarea = app.query_one("#comment-editor-body", TextArea)
         textarea.text = "ship it"
 
-        await pilot.press("ctrl+enter")
+        await pilot.press("ctrl+s")
         await pilot.pause()
 
-        assert app.result == ("inline", "ship it", "post")
+        assert app.result == ("inline", "ship it", "queue")
 
 
 @pytest.mark.asyncio
 async def test_inline_comment_editor_posts_with_ctrl_shift_s() -> None:
-    """Ctrl+Shift+S is a fallback post binding for terminals lacking ctrl+enter."""
+    """Ctrl+Shift+S should submit inline comments immediately."""
 
     app = _make_app(kind="inline")
     async with app.run_test() as pilot:
@@ -77,3 +77,16 @@ async def test_inline_comment_editor_posts_with_ctrl_shift_s() -> None:
         await pilot.pause()
 
         assert app.result == ("inline", "ship it", "post")
+
+
+@pytest.mark.asyncio
+async def test_inline_comment_editor_hint_uses_terminal_safe_shortcuts() -> None:
+    app = _make_app(kind="inline")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        hint = app.query("InlineCommentEditor Static").last().content
+
+        assert "Ctrl+S pending" in str(hint)
+        assert "Ctrl+Shift+S post now" in str(hint)
+        assert "Ctrl+Enter" not in str(hint)

@@ -13,7 +13,7 @@ from rit.core.highlighting import (
     highlight_lines_for_diff,
     highlight_lines_for_diff_range,
 )
-from rit.core.types import SegmentType
+from rit.core.types import FileDiff, SegmentType
 
 
 class TestParsePatch:
@@ -570,6 +570,124 @@ class TestDiffHighlighting:
     def _style_signature(self, content):
         assert content is not None
         return [(span.start, span.end, str(span.style)) for span in content.spans]
+
+    def _style_for_fragment(self, content, fragment):
+        assert content is not None
+        start = content.plain.index(fragment)
+        end = start + len(fragment)
+        for span in content.spans:
+            if span.start == start and span.end == end:
+                return str(span.style)
+        return None
+
+    def _combined_diff_with_python_class_hunk(self):
+        patch = '''@@ -30,3 +30,17 @@
+     patch: str
+ 
++@dataclass(frozen=True)
++class ParsedFilePatchSummary:
++    """Lightweight metadata for a file section from a multi-file unified diff."""
++
++    filename: str
++    patch: str
++    old_filename: str | None = None
++    is_new: bool = False
++    is_deleted: bool = False
++    is_binary: bool = False
++    additions: int = 0
++    deletions: int = 0
++
+ def parse_multi_file_patch(
+     patch: str,
+'''
+        file_diff = parse_patch(patch, "src/rit/core/diff.py")
+        self._assign_line_indexes(file_diff)
+        for hunk in file_diff.hunks:
+            for line in hunk.lines:
+                line.file_path = file_diff.filename
+        return FileDiff(filename="All files", hunks=file_diff.hunks)
+
+    def _highlighted_new_line_containing(self, diff, fragment):
+        return next(
+            line
+            for hunk in diff.hunks
+            for line in hunk.lines
+            if line.highlighted_new_content
+            and fragment in line.highlighted_new_content.plain
+        )
+
+    def _assert_combined_python_class_highlighted(self, diff):
+        dataclass_line = self._highlighted_new_line_containing(diff, "@dataclass")
+        class_line = self._highlighted_new_line_containing(
+            diff,
+            "ParsedFilePatchSummary",
+        )
+        docstring_line = self._highlighted_new_line_containing(
+            diff,
+            "Lightweight metadata",
+        )
+
+        assert (
+            self._style_for_fragment(
+                dataclass_line.highlighted_new_content,
+                "@dataclass",
+            )
+            == "#f4dbd6"
+        )
+        assert (
+            self._style_for_fragment(
+                class_line.highlighted_new_content,
+                "ParsedFilePatchSummary",
+            )
+            == "#eed49f"
+        )
+        assert any(
+            str(span.style) == "#a6da95 italic"
+            for span in docstring_line.highlighted_new_content.spans
+        )
+
+    def test_generic_python_identifiers_use_body_text_style(self):
+        """Generic identifiers should stay at the body text color."""
+        diff = parse_patch(
+            "@@ -0,0 +1,1 @@\n"
+            "+reviewer_entity_ids = "
+            "ReviewerService.get_all_reviewer_entity_ids_by_review_cycle(review_cycle)",
+            "reviewer_app_service.py",
+        )
+        self._assign_line_indexes(diff)
+
+        highlight_lines_for_diff(diff, include_word_diff=False)
+
+        content = diff.hunks[0].lines[0].highlighted_new_content
+        assert self._style_for_fragment(content, "ReviewerService") == "#cad3f5"
+        assert (
+            self._style_for_fragment(
+                content,
+                "get_all_reviewer_entity_ids_by_review_cycle",
+            )
+            == "#cad3f5"
+        )
+
+    def test_combined_diff_uses_line_file_path_for_python_highlighting(self):
+        """Combined diffs should highlight hunks using each line's real file path."""
+        combined = self._combined_diff_with_python_class_hunk()
+
+        highlight_lines_for_diff(combined, include_word_diff=False)
+
+        self._assert_combined_python_class_highlighted(combined)
+
+    def test_combined_diff_range_uses_line_file_path_for_python_highlighting(self):
+        """Windowed combined highlighting should use each line's real file path."""
+        combined = self._combined_diff_with_python_class_hunk()
+
+        highlight_lines_for_diff_range(
+            combined,
+            2,
+            12,
+            include_word_diff=False,
+        )
+
+        self._assert_combined_python_class_highlighted(combined)
 
     def test_word_diff_highlights_use_subtle_backgrounds(self):
         """Inline word-diff marks should not overpower syntax colors."""

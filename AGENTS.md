@@ -53,21 +53,21 @@
 
 ## Testing instructions
 
-- Preferred full run (project tests only):
+- Standard test command (project tests only):
   - `uv run pytest -q tests`
+- This full-suite command is configured to parallelize with `pytest-xdist` from `pyproject.toml`; keep it reasonably fast and investigate meaningful runtime regressions.
 - Do **not** rely on bare `uv run pytest` in this workspace; it can pick up unrelated local folders.
-- Focused runs:
-  - Diff core: `uv run pytest -q tests/test_diff.py`
-  - Diff visual/navigation: `uv run pytest -q tests/test_diff_view_visual_mode.py`
-  - Models/timeline parsing: `uv run pytest -q tests/test_models.py tests/test_collapsible_markdown.py`
-- Current baseline note (important):
-  - `tests/test_diff_view_duplicate_id.py` currently fails on this branch (tests are out of sync with async `show_diff` / removed `_content_id`).
-  - Treat additional failures beyond that as regressions.
+- Do not add marker-selected test groups, fast-suite scripts, or alternate default test commands. Keep the normal path as the full suite.
+- Keep Textual UI tests high-value and non-duplicative:
+  - Prefer lower-level store/widget tests when they cover the same behavior as a full app-driver smoke test.
+  - Avoid adding multiple `App.run_test()` variants for small edge cases unless the integration behavior itself is the risk.
+  - Replace fixed sleep stacks with event/state based waits, such as the shared `wait_until` helper in `tests/conftest.py`.
+- If a test flakes under xdist, fix the synchronization or isolation issue instead of disabling parallelism or carving out a separate group.
+- Before finishing, report the exact full-suite result and elapsed time from `uv run pytest -q tests` when you run it.
 
 ## Type checking
 
 - Run: `uv run ty check src`
-- Current baseline has one known type diagnostic in `src/rit/ui/widgets/diff_visual.py`.
 - Do not introduce new type errors.
 
 ## PR instructions

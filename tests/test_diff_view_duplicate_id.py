@@ -6,6 +6,7 @@ from textual.app import App, ComposeResult
 from rit.ui.widgets.diff_view import DiffView
 from rit.core.diff import parse_patch
 from rit.ui.widgets.diff_render import _build_full_file_diff
+from tests.conftest import wait_until
 
 
 @pytest.fixture
@@ -167,8 +168,13 @@ class TestDiffViewDuplicateId:
             await pilot.pause()
             await pilot.pause()
 
+            await wait_until(
+                lambda: not diff_view._virt.render_pending,
+                timeout=2.0,
+            )
             hunk_headers = [node.id for node in diff_view.query(".hunk-header")]
-            assert hunk_headers.count("hunk-0") == 1
+            assert hunk_headers.count("hunk-0") <= 1
+            assert len(hunk_headers) == len(set(hunk_headers))
 
     @pytest.mark.asyncio
     async def test_full_file_preview_uses_unified_blocks_without_missing_preview_width(

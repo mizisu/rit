@@ -6,7 +6,7 @@ import threading
 import urllib.request
 from collections.abc import AsyncIterator, Iterator, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from pydantic import TypeAdapter
 
@@ -917,26 +917,47 @@ class GitHubService:
         side: str,
     ) -> PRComment:
         """Create an inline review comment via the REST API."""
-        repo = await self.get_repo()
-        result = await self._run_gh(
-            [
-                "api",
-                "--method",
-                "POST",
-                f"/repos/{repo.full_name}/pulls/{pr_number}/comments",
-                "-f",
-                f"body={body}",
-                "-f",
-                f"commit_id={commit_id}",
-                "-f",
-                f"path={path}",
-                "-F",
-                f"line={line}",
-                "-f",
-                f"side={side}",
-            ]
+        target_side: Literal["LEFT", "RIGHT"]
+        if side == "LEFT":
+            target_side = "LEFT"
+        elif side == "RIGHT":
+            target_side = "RIGHT"
+        else:
+            raise ValueError("Inline comment side must be LEFT or RIGHT")
+
+        review = await self.submit_review(
+            pr_number,
+            event="COMMENT",
+            commit_id=commit_id,
+            comments=[
+                PendingReviewComment(
+                    body=body,
+                    path=path,
+                    line=line,
+                    side=target_side,
+                )
+            ],
         )
-        return PRComment.model_validate(json.loads(result))
+        if review.id:
+            comments = await self.list_review_comments(pr_number, review.id)
+            for comment in comments:
+                if (
+                    comment.path == path
+                    and comment.line == line
+                    and comment.side == target_side
+                    and comment.body == body
+                ):
+                    return comment
+            if comments:
+                return comments[-1]
+
+        return PRComment(
+            body=body,
+            path=path,
+            line=line,
+            side=target_side,
+            pullRequestReview=review.id or None,
+        )
 
     async def create_pending_review(
         self,
@@ -1046,12 +1067,15 @@ class GitHubService:
         event: str,
         body: str | None = None,
         comments: list[PendingReviewComment] | None = None,
+        commit_id: str | None = None,
     ) -> PRReview:
         """Submit a top-level review via the REST API."""
         repo = await self.get_repo()
         payload: dict[str, object] = {"event": event}
         if body is not None and body != "":
             payload["body"] = body
+        if commit_id is not None and commit_id != "":
+            payload["commit_id"] = commit_id
         if comments:
             payload["comments"] = [
                 {

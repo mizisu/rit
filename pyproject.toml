@@ -30,11 +30,13 @@ packages = ["src/rit"]
 dev = [
   "pytest>=9.0.3",
   "pytest-asyncio>=1.4.0",
+  "pytest-xdist>=3.8.0",
   "textual-dev>=1.8.0",
   "ty>=0.0.40",
 ]
 
 [tool.pytest.ini_options]
+addopts = ["-n", "auto", "--dist", "worksteal"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 python_files = ["test_*.py"]

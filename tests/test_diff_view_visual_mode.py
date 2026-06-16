@@ -7,6 +7,7 @@ from textual.widgets import Static
 from rit.core.diff import parse_patch
 from rit.ui.widgets import diff_cursor as _cursor
 from rit.ui.widgets.diff_view import DiffView
+from tests.conftest import wait_until
 
 
 @pytest.fixture
@@ -379,8 +380,17 @@ class TestDiffViewVisualMode:
             await pilot.pause()
 
             await pilot.press("G")
-            for _ in range(8):
-                await pilot.pause()
+            await wait_until(
+                lambda: (
+                    diff_view.cursor_line == len(diff_view._all_lines) - 1
+                    and diff_view._is_line_rendered(diff_view.cursor_line)
+                    and (current_row := diff_view._current_row()) is not None
+                    and diff_view._row_is_visible(current_row)
+                    and not diff_view._cursor_ui.flush_pending
+                    and not diff_view._virt.render_pending
+                ),
+                timeout=2.0,
+            )
 
             current_row = diff_view._current_row()
             assert current_row is not None

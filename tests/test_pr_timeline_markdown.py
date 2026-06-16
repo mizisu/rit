@@ -9,14 +9,17 @@ from textual.widget import Widget
 from rit.services.github import ReviewThreadInfo
 from rit.state.models import PR, PRComment, PRIssueComment, PRReview, PRUser, ReviewThread
 from rit.state.store import PRStore
+from rit.ui.components import pr_timeline as pr_timeline_module
 from rit.ui.components.pr_timeline import (
     INITIAL_TIMELINE_BODY_COUNT,
     PRTimeline,
     TIMELINE_BODY_MOUNT_DELAY,
 )
+from rit.ui.widgets import comment_card as comment_card_module
 from rit.ui.widgets.comment_card import BODY_PREVIEW_RETIRE_DELAY
 from rit.ui.components.collapsible_markdown import CopyableCodeBlock
 from rit.ui.widgets.review_thread_card import ReviewThreadItem
+from tests.conftest import wait_until
 
 
 def test_initial_timeline_selection_does_not_scroll_viewport() -> None:
@@ -257,7 +260,12 @@ def test_timeline_comment_markdown_waits_for_description_first_paint() -> None:
 
 
 @pytest.mark.asyncio
-async def test_issue_comment_left_aligns_markdown_h1() -> None:
+async def test_issue_comment_left_aligns_markdown_h1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pr_timeline_module, "TIMELINE_BODY_MOUNT_DELAY", 0.01)
+    monkeypatch.setattr(comment_card_module, "BODY_PREVIEW_RETIRE_DELAY", 0.01)
+
     store = PRStore()
     store.state.issue_comments = [
         PRIssueComment(
@@ -278,7 +286,7 @@ async def test_issue_comment_left_aligns_markdown_h1() -> None:
         timeline = app.query_one(PRTimeline)
         timeline.refresh_timeline()
         await pilot.pause()
-        await pilot.pause(TIMELINE_BODY_MOUNT_DELAY + BODY_PREVIEW_RETIRE_DELAY + 0.1)
+        await wait_until(lambda: len(app.query("MarkdownH1")) == 1)
 
         h1 = app.query_one("MarkdownH1")
         assert h1.styles.content_align == ("left", "middle")

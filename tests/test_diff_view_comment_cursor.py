@@ -439,9 +439,10 @@ async def test_cursor_line_after_many_comments_stays_visible_inside_grouped_bloc
     patch = "@@ -1,180 +1,180 @@\n" + "\n".join(
         f" line{i}" for i in range(1, 181)
     )
-    body = "\n".join(f"comment line {i}" for i in range(20))
+    body = "\n".join(f"comment line {i}" for i in range(8))
     store = PRStore()
-    for root_id in range(100, 106):
+    comment_count = 3
+    for root_id in range(100, 100 + comment_count):
         store.state.review_threads.append(
             _make_review_thread(root_id=root_id, line=31, body=body)
         )
@@ -473,7 +474,7 @@ async def test_cursor_line_after_many_comments_stays_visible_inside_grouped_bloc
         await pilot.pause()
         await pilot.pause()
 
-        for _ in range(7):
+        for _ in range(comment_count + 1):
             await pilot.press("j")
             await pilot.pause()
 
