@@ -216,6 +216,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
           }
           state
           body
+          createdAt
           submittedAt
         }
       }
@@ -287,6 +288,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
           }
           state
           body
+          createdAt
           submittedAt
         }
       }
@@ -375,6 +377,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
           }
           state
           body
+          createdAt
           submittedAt
         }
       }
@@ -468,7 +471,6 @@ mutation($pullRequestId: ID!, $path: String!) {
   }
 }
 """
-
 
 class GitHubService:
     """Interacts with GitHub API via gh CLI."""
@@ -887,6 +889,68 @@ class GitHubService:
             input_text=json.dumps({"assignees": assignees}),
         )
 
+    def _validate_comment_side(self, side: str) -> Literal["LEFT", "RIGHT"]:
+        if side == "LEFT":
+            return "LEFT"
+        if side == "RIGHT":
+            return "RIGHT"
+        raise ValueError("Inline comment side must be LEFT or RIGHT")
+
+    async def _create_rest_pending_review(
+        self,
+        pr_number: int,
+        *,
+        comments: list[PendingReviewComment],
+        body: str | None = None,
+        commit_id: str | None = None,
+    ) -> PRReview:
+        repo = await self.get_repo()
+        payload: dict[str, object] = {
+            "comments": [
+                {
+                    "path": comment.path,
+                    "line": comment.line,
+                    "side": comment.side,
+                    "body": comment.body,
+                }
+                for comment in comments
+            ]
+        }
+        if body is not None and body != "":
+            payload["body"] = body
+        if commit_id is not None and commit_id != "":
+            payload["commit_id"] = commit_id
+        result = await self._run_gh(
+            [
+                "api",
+                "--method",
+                "POST",
+                f"/repos/{repo.full_name}/pulls/{pr_number}/reviews",
+                "--input",
+                "-",
+            ],
+            input_text=json.dumps(payload),
+        )
+        return PRReview.model_validate(json.loads(result))
+
+    async def _get_pull_request_node_id(self, pr_number: int) -> str:
+        pr_data = await self._get_pull_request_data(
+            pr_number,
+            query="""
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      id
+    }
+  }
+}
+""",
+        )
+        node_id = pr_data.get("id")
+        if isinstance(node_id, str) and node_id:
+            return node_id
+        raise GitHubError(f"PR #{pr_number} node ID not found")
+
     async def create_issue_comment(
         self,
         pr_number: int,
@@ -917,13 +981,7 @@ class GitHubService:
         side: str,
     ) -> PRComment:
         """Create an inline review comment via the REST API."""
-        target_side: Literal["LEFT", "RIGHT"]
-        if side == "LEFT":
-            target_side = "LEFT"
-        elif side == "RIGHT":
-            target_side = "RIGHT"
-        else:
-            raise ValueError("Inline comment side must be LEFT or RIGHT")
+        target_side = self._validate_comment_side(side)
 
         review = await self.submit_review(
             pr_number,
@@ -967,34 +1025,15 @@ class GitHubService:
         body: str | None = None,
         commit_id: str | None = None,
     ) -> PRReview:
-        repo = await self.get_repo()
-        payload: dict[str, object] = {
-            "comments": [
-                {
-                    "path": comment.path,
-                    "line": comment.line,
-                    "side": comment.side,
-                    "body": comment.body,
-                }
-                for comment in comments
-            ]
-        }
-        if body is not None and body != "":
-            payload["body"] = body
-        if commit_id is not None and commit_id != "":
-            payload["commit_id"] = commit_id
-        result = await self._run_gh(
-            [
-                "api",
-                "--method",
-                "POST",
-                f"/repos/{repo.full_name}/pulls/{pr_number}/reviews",
-                "--input",
-                "-",
-            ],
-            input_text=json.dumps(payload),
+        review = await self._create_rest_pending_review(
+            pr_number,
+            comments=comments,
+            body=body,
+            commit_id=commit_id,
         )
-        return PRReview.model_validate(json.loads(result))
+        if body and not review.body:
+            review = review.model_copy(update={"body": body})
+        return review
 
     async def list_review_comments(
         self,

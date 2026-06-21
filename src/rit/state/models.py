@@ -4,7 +4,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from rit.core.datetime_utils import datetime_min_utc, datetime_sort_key
 
@@ -82,7 +82,7 @@ class PRIssueComment(BaseModel):
 
 
 class PRComment(BaseModel):
-    """Review comment on a specific line of code."""
+    """Review comment on a code line or file."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -102,6 +102,9 @@ class PRComment(BaseModel):
     in_reply_to_id: int | None = Field(default=None, alias="replyTo")
     diff_hunk: str = Field(default="", alias="diffHunk")
     node_id: str = Field(default="", alias="nodeId")
+    subject_type: str = Field(
+        default="line", validation_alias=AliasChoices("subjectType", "subject_type")
+    )
     pull_request_review_id: int | None = Field(default=None, alias="pullRequestReview")
 
     @property
@@ -146,6 +149,7 @@ class PendingReviewComment(BaseModel):
     path: str = ""
     line: int = 0
     side: Literal["LEFT", "RIGHT"] = "RIGHT"
+    is_diff_line: bool = True
 
     @property
     def anchor_side(self) -> Literal["old", "new"]:
@@ -250,9 +254,15 @@ class PRReview(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     id: int = Field(default=0, alias="databaseId")
+    node_id: str = Field(
+        default="", validation_alias=AliasChoices("nodeId", "node_id")
+    )
     user: PRUser | None = Field(default=None, alias="author")
     body: str = ""
     state: ReviewState = ReviewState.PENDING
+    created_at: datetime = Field(
+        default_factory=datetime_min_utc, alias="createdAt"
+    )
     submitted_at: datetime | None = Field(default=None, alias="submittedAt")
 
     @field_validator("state", mode="before")

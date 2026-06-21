@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from rit.state.models import (
     PRComment,
+    PRReview,
     PRUser,
     CommentThread,
     NodeList,
@@ -101,6 +102,44 @@ class TestPRComment:
 
         assert comment.anchor_side == "new"
         assert comment.anchor_line == 20
+
+    def test_rest_subject_type_is_preserved(self) -> None:
+        comment = PRComment.model_validate(
+            {
+                "id": 1,
+                "body": "file note",
+                "path": "test.py",
+                "subject_type": "file",
+            }
+        )
+
+        assert comment.subject_type == "file"
+
+
+class TestPRReview:
+    """Tests for PR review API compatibility helpers."""
+
+    def test_rest_node_id_is_preserved(self) -> None:
+        review = PRReview.model_validate(
+            {"id": 10, "node_id": "PRR_node", "state": "PENDING"}
+        )
+
+        assert review.id == 10
+        assert review.node_id == "PRR_node"
+
+    def test_graphql_created_at_is_preserved(self) -> None:
+        review = PRReview.model_validate(
+            {
+                "databaseId": 10,
+                "state": "PENDING",
+                "createdAt": "2026-06-18T06:25:36Z",
+                "submittedAt": None,
+            }
+        )
+
+        assert review.created_at == datetime(
+            2026, 6, 18, 6, 25, 36, tzinfo=timezone.utc
+        )
 
 
 class TestReviewThread:
