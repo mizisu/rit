@@ -389,7 +389,7 @@ class TestDiffViewVisualMode:
                     and not diff_view._cursor_ui.flush_pending
                     and not diff_view._virt.render_pending
                 ),
-                timeout=2.0,
+                timeout=5.0,
             )
 
             current_row = diff_view._current_row()

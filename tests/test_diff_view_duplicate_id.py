@@ -194,7 +194,11 @@ class TestDiffViewDuplicateId:
 
             diff_view.current_file = "preview.py"
             diff_view._showing_full_file = True
-            await diff_view.show_diff("preview.py", diff)
+            await diff_view.show_diff(
+                "preview.py",
+                diff,
+                preserve_full_file_state=True,
+            )
             await pilot.pause()
 
             assert diff_view._showing_full_file is True

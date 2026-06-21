@@ -59,7 +59,11 @@ async def test_full_file_preview_renders_source_change_markers_only() -> None:
 
         diff_view.current_file = "preview.py"
         diff_view._showing_full_file = True
-        await diff_view.show_diff("preview.py", full_diff)
+        await diff_view.show_diff(
+            "preview.py",
+            full_diff,
+            preserve_full_file_state=True,
+        )
         await pilot.pause()
 
         prefix_texts = [
@@ -99,7 +103,11 @@ async def test_full_file_preview_sticky_header_tracks_line_and_section() -> None
 
         diff_view.current_file = "preview.py"
         diff_view._showing_full_file = True
-        await diff_view.show_diff("preview.py", full_diff)
+        await diff_view.show_diff(
+            "preview.py",
+            full_diff,
+            preserve_full_file_state=True,
+        )
         await pilot.pause()
 
         diff_view.cursor_line = 7
@@ -146,6 +154,40 @@ async def test_full_file_preview_opens_at_current_new_line() -> None:
         assert current is not None
         assert current.new_line_no == 7
         assert diff_view.cursor_line == diff_view._line_index_by_new_number[7]
+
+
+@pytest.mark.asyncio
+async def test_full_file_preview_exposes_comment_target_outside_diff_hunk() -> None:
+    patch = """@@ -2,2 +2,3 @@
+ line 2
++line 3 added
+ line 4"""
+    source_diff = parse_patch(patch, "preview.py")
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+
+        await diff_view.show_diff("preview.py", source_diff)
+        await pilot.pause()
+
+        await diff_view.show_full_file_preview(
+            "preview.py",
+            _content(6),
+            source_diff=source_diff,
+        )
+        await pilot.pause()
+        diff_view.cursor_line = diff_view._line_index_by_new_number[6]
+        await pilot.pause()
+
+        assert await diff_view.open_inline_comment_editor() is True
+        await pilot.pause()
+        await pilot.pause()
+        assert diff_view.inline_comment_target() == ("preview.py", 6, "RIGHT")
 
 
 @pytest.mark.asyncio
@@ -232,3 +274,32 @@ async def test_full_file_preview_opens_deleted_line_at_nearest_current_line() ->
         assert current is not None
         assert current.new_line_no == 7
         assert diff_view.cursor_line == diff_view._line_index_by_new_number[7]
+
+
+@pytest.mark.asyncio
+async def test_show_diff_same_file_exits_full_file_preview_state() -> None:
+    patch = """@@ -2,2 +2,3 @@
+ line 2
++line 3 added
+ line 4"""
+    source_diff = parse_patch(patch, "preview.py")
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+
+        await diff_view.show_full_file_preview(
+            "preview.py",
+            _content(6),
+            source_diff=source_diff,
+        )
+        await pilot.pause()
+
+        await diff_view.show_diff("preview.py", source_diff)
+        await pilot.pause()
+
+        assert diff_view._showing_full_file is False

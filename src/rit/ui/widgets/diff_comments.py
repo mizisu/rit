@@ -240,11 +240,31 @@ def _resolve_pending_line_index(
         idx = file_old_map.get((comment.path, comment.line))
         if idx is not None:
             return idx
-        return view._line_index_by_old_number.get(comment.line)
+        idx = view._line_index_by_old_number.get(comment.line)
+        if idx is not None:
+            return idx
+        return _resolve_pending_line_index_from_rows(view, comment)
     idx = file_new_map.get((comment.path, comment.line))
     if idx is not None:
         return idx
-    return view._line_index_by_new_number.get(comment.line)
+    idx = view._line_index_by_new_number.get(comment.line)
+    if idx is not None:
+        return idx
+    return _resolve_pending_line_index_from_rows(view, comment)
+
+
+def _resolve_pending_line_index_from_rows(
+    view: DiffView,
+    comment: PendingReviewComment,
+) -> int | None:
+    for line in view._all_lines:
+        if line.file_path and line.file_path != comment.path:
+            continue
+        if comment.side == "LEFT" and line.old_line_no == comment.line:
+            return line.line_index
+        if comment.side == "RIGHT" and line.new_line_no == comment.line:
+            return line.line_index
+    return None
 
 
 def _resolve_line_index_from_diff_hunk(

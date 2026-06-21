@@ -1904,8 +1904,13 @@ async def test_grouped_virtual_large_jump_mounts_without_scanning_all_hunk_lines
             hunk.lines = CountingLines(hunk.lines)
 
         diff_view.cursor_line = 4000
-        await pilot.pause()
-        await pilot.pause()
+        await wait_until(
+            lambda: (
+                not diff_view._virt.render_pending
+                and diff_view._virt.window_start <= 4000 <= diff_view._virt.window_end
+            ),
+            timeout=5.0,
+        )
 
         assert diff_view._virt.window_start <= 4000 <= diff_view._virt.window_end
         window_size = diff_view._virt.window_end - diff_view._virt.window_start + 1

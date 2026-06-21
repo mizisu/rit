@@ -1019,16 +1019,17 @@ class DiffView(VerticalScroll):
         self._suspend_scroll_virtual_window_watch = True
         try:
             is_new_file = filename != self.current_file
+            if not preserve_full_file_state:
+                self._showing_full_file = False
+                self._saved_diff = None
+                self._saved_filename = None
+                self._saved_restore_position = None
             if is_new_file:
                 self._inline_comment_editor_line_index = None
                 self._inline_comment_editor_target = None
                 self._inline_comment_editor_widget = None
                 self._inline_comment_editor_layout_widget = None
                 self._inline_comment_editor_initial_body = ""
-                if not preserve_full_file_state:
-                    self._showing_full_file = False
-                    self._saved_diff = None
-                    self._saved_filename = None
 
             self.current_file = filename
             self._diff = diff
@@ -1109,8 +1110,7 @@ class DiffView(VerticalScroll):
             self._row_lookup_unified = plan.rendered_rows.row_lookup_unified
             self._row_lookup_split = plan.rendered_rows.row_lookup_split
 
-            if not self._showing_full_file:
-                _comments.build_comment_map(self)
+            _comments.build_comment_map(self)
             (
                 self._unified_code_width,
                 self._split_old_code_width,

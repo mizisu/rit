@@ -13,7 +13,7 @@ from textual.worker import Worker, WorkerState
 
 from rit.app import RitApp
 from rit.state.models import FileViewedState, PRTeam, PRUser
-from rit.state.store import PRStore
+from rit.state.store import PRStore, UnsupportedInlineCommentTarget
 from rit.ui.components.file_changes import FileChanges
 from rit.ui.components.pr_info import PRInfo
 from rit.ui.messages import Flash
@@ -704,6 +704,8 @@ class MainScreen(Screen[None]):
             return
 
         diff = self.store.get_file_diff(current_file)
+        if diff is None and diff_view.current_file == current_file:
+            diff = diff_view._diff
         if diff is None:
             return
 
@@ -730,10 +732,25 @@ class MainScreen(Screen[None]):
 
         diff_view = self.file_changes.diff_view
         diff = self.store.get_file_diff(current_file)
+        if diff is None and diff_view.current_file == current_file:
+            diff = diff_view._diff
         if diff is None:
             return
 
-        await diff_view.show_diff(current_file, diff)
+        if diff_view._showing_full_file:
+            content = await self.store.get_file_content(current_file)
+            if content is not None:
+                await diff_view.show_full_file_preview(
+                    current_file,
+                    content,
+                    source_diff=diff,
+                    restore_filename=diff_view._saved_filename or current_file,
+                    restore_diff=diff_view._saved_diff or diff,
+                )
+            else:
+                await diff_view.show_diff(current_file, diff)
+        else:
+            await diff_view.show_diff(current_file, diff)
         if 0 <= current_line < len(diff_view._all_lines):
             diff_view._move_cursor(
                 line=current_line,
@@ -765,15 +782,11 @@ class MainScreen(Screen[None]):
         self.file_changes.file_tree.refresh_files()
 
         if current_file is not None:
-            diff = self.store.get_file_diff(current_file)
-            if diff is not None:
-                await diff_view.show_diff(current_file, diff)
-                if 0 <= current_line < len(diff_view._all_lines):
-                    diff_view._move_cursor(
-                        line=current_line,
-                        pane=current_pane,
-                        update_active_pane=True,
-                    )
+            await self._refresh_diff_preserving_cursor(
+                current_file,
+                current_line,
+                current_pane,
+            )
         return True
 
     async def _set_requested_reviewers(
@@ -804,13 +817,13 @@ class MainScreen(Screen[None]):
         current_line = diff_view.cursor_line
         current_pane = diff_view.active_pane
 
-        await diff_view.close_inline_comment_editor()
         await self.store.submit_inline_comment(
             body,
             path=path,
             line=line,
             side=side,
         )
+        await diff_view.close_inline_comment_editor()
         await self.store.remove_pending_inline_comment(
             path=path,
             line=line,
@@ -823,18 +836,12 @@ class MainScreen(Screen[None]):
         if current_file is None:
             return True
 
-        diff = self.store.get_file_diff(current_file)
-        if diff is None:
-            return True
-
-        await diff_view.show_diff(current_file, diff)
-        if 0 <= current_line < len(diff_view._all_lines):
-            diff_view._move_cursor(
-                line=current_line,
-                pane=current_pane,
-                update_active_pane=True,
-            )
-        diff_view.focus()
+        await self._refresh_diff_preserving_cursor(
+            current_file,
+            current_line,
+            current_pane,
+            focus_diff=True,
+        )
         return True
 
     async def _save_inline_comment_draft(
@@ -1003,14 +1010,23 @@ class MainScreen(Screen[None]):
                     Flash("Review submitted", style="success", duration=2.0)
                 )
             elif event.state == WorkerState.ERROR:
-                self.notify("Failed to submit review", severity="error")
+                self.notify(
+                    self._worker_error_message(
+                        event.worker,
+                        "Failed to submit review",
+                    ),
+                    severity="error",
+                )
             return
 
         if event.worker.name == "_save_inline_comment_draft":
             if event.state == WorkerState.SUCCESS:
                 self.post_message(Flash("Draft saved", style="success", duration=2.0))
             elif event.state == WorkerState.ERROR:
-                self.notify("Failed to save draft", severity="error")
+                self.notify(
+                    self._worker_error_message(event.worker, "Failed to save draft"),
+                    severity="error",
+                )
             return
 
         if event.worker.name == "_post_inline_comment":
@@ -1019,7 +1035,10 @@ class MainScreen(Screen[None]):
                     Flash("Comment posted", style="success", duration=2.0)
                 )
             elif event.state == WorkerState.ERROR:
-                self.notify("Failed to post comment", severity="error")
+                self.notify(
+                    self._worker_error_message(event.worker, "Failed to post comment"),
+                    severity="error",
+                )
             return
 
         if event.worker.name == "_delete_pending_inline_comment":
@@ -1042,6 +1061,13 @@ class MainScreen(Screen[None]):
                     Flash("No diff line selected", style="warning", duration=2.0)
                 )
             return
+
+    @staticmethod
+    def _worker_error_message(worker: Worker, fallback: str) -> str:
+        error = worker.error
+        if isinstance(error, UnsupportedInlineCommentTarget):
+            return str(error)
+        return fallback
 
     def on_key(self, event: events.Key) -> None:
         if self._text_entry_has_focus():

@@ -1,7 +1,6 @@
 """Tests for the main rit application."""
 
 import asyncio
-import threading
 from typing import cast
 
 import pytest
@@ -10,7 +9,7 @@ from textual.widgets import Static, Tree
 from rit.app import RitApp
 from rit.cli import parse_pr_reference
 from rit.core.diff import parse_patch
-from rit.state.models import PR, FileViewedState, LoadingState, PRFile
+from rit.state.models import PR, FileViewedState, LoadingState, PRFile, PRReview
 from rit.ui.screens.file_picker import FilePickerScreen
 
 
@@ -307,7 +306,7 @@ class TestRitApp:
     async def test_staged_load_paints_first_file_then_combined_diff(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        release = threading.Event()
+        release = asyncio.Event()
         patch = "@@ -1,1 +1,1 @@\n-old\n+new"
 
         async def fake_load_all(store) -> None:
@@ -332,7 +331,7 @@ class TestRitApp:
                 )
             )
 
-            await asyncio.to_thread(release.wait, 1.0)
+            await release.wait()
 
             store.state.pr = store.state.pr.model_copy(update={"body": "Loaded body"})
             store._post_message(store.PRDiscussionLoaded(pr=store.state.pr))
@@ -379,6 +378,230 @@ class TestRitApp:
             assert screen.file_changes.diff_view.current_file == "All files"
             assert screen.store.state.selected_file == "one.py"
             assert _static_text(file_count) == "Files (2)"
+
+    async def test_refresh_preserving_cursor_keeps_full_file_preview(
+        self, app: RitApp
+    ) -> None:
+        from rit.ui.screens.main import MainScreen
+
+        patch = """@@ -2,2 +2,3 @@
+ line 2
++line 3 added
+ line 4"""
+        source_diff = parse_patch(patch, "preview.py")
+        full_content = "\n".join(f"line {line}" for line in range(1, 7))
+
+        async with app.run_test() as pilot:
+            screen = cast(MainScreen, app.screen)
+            screen.store.state.file_diffs = {"preview.py": source_diff}
+            screen.store.state.file_contents["preview.py"] = full_content
+            diff_view = screen.file_changes.diff_view
+
+            await diff_view.show_full_file_preview(
+                "preview.py",
+                full_content,
+                source_diff=source_diff,
+            )
+            await pilot.pause()
+            current_line = diff_view._line_index_by_new_number[6]
+            diff_view.cursor_line = current_line
+
+            await screen._refresh_diff_preserving_cursor(
+                "preview.py",
+                current_line,
+                "new",
+                focus_diff=True,
+            )
+            await pilot.pause()
+
+            assert diff_view._showing_full_file is True
+            assert len(diff_view._all_lines) == 6
+            assert diff_view.cursor_line == current_line
+
+    async def test_post_inline_comment_keeps_editor_open_when_submit_fails(
+        self,
+        app: RitApp,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from rit.ui.screens.main import MainScreen
+
+        patch = """@@ -2,2 +2,3 @@
+ line 2
++line 3 added
+ line 4"""
+        source_diff = parse_patch(patch, "preview.py")
+
+        async with app.run_test() as pilot:
+            screen = cast(MainScreen, app.screen)
+            diff_view = screen.file_changes.diff_view
+            await diff_view.show_diff("preview.py", source_diff)
+            await pilot.pause()
+            diff_view.cursor_line = diff_view._line_index_by_new_number[3]
+            assert await diff_view.open_inline_comment_editor() is True
+            await pilot.pause()
+
+            async def fail_submit(*args, **kwargs) -> None:
+                raise RuntimeError("submit failed")
+
+            monkeypatch.setattr(
+                screen.store,
+                "submit_inline_comment",
+                fail_submit,
+            )
+
+            with pytest.raises(RuntimeError, match="submit failed"):
+                await screen._post_inline_comment(
+                    "hello",
+                    path="preview.py",
+                    line=3,
+                    side="RIGHT",
+                )
+
+            assert diff_view.inline_comment_target() == ("preview.py", 3, "RIGHT")
+
+    async def test_save_inline_comment_draft_renders_immediately(
+        self,
+        app: RitApp,
+    ) -> None:
+        from rit.ui.screens.main import MainScreen
+        from rit.ui.widgets.comment_card import CommentCard
+
+        patch = """@@ -2,2 +2,3 @@
+ line 2
++line 3 added
+ line 4"""
+        source_diff = parse_patch(patch, "preview.py")
+
+        class DraftService:
+            async def create_pending_review(self, *args, **kwargs) -> PRReview:
+                return PRReview(id=88)
+
+        async with app.run_test() as pilot:
+            screen = cast(MainScreen, app.screen)
+            screen.current_tab = 1
+            screen.store.state.pr = PR(number=123, head_sha="deadbeef")
+            screen.store.state.file_diffs = {"preview.py": source_diff}
+            screen.store._service = DraftService()  # type: ignore[assignment]
+            diff_view = screen.file_changes.diff_view
+            await diff_view.show_diff("preview.py", source_diff)
+            await pilot.pause()
+            current_line = diff_view._line_index_by_new_number[3]
+            diff_view.cursor_line = current_line
+
+            await screen._save_inline_comment_draft(
+                "hello draft",
+                path="preview.py",
+                line=3,
+                side="RIGHT",
+            )
+            await pilot.pause()
+            await pilot.pause()
+
+            draft = diff_view.query_one("#pending-draft-1-right-0", CommentCard)
+            assert draft._body == "hello draft"
+
+    async def test_save_full_file_preview_draft_outside_diff_renders_locally(
+        self,
+        app: RitApp,
+    ) -> None:
+        from rit.ui.screens.main import MainScreen
+        from rit.ui.widgets.comment_card import CommentCard
+
+        patch = """@@ -2,2 +2,3 @@
+ line 2
++line 3 added
+ line 4"""
+        source_diff = parse_patch(patch, "preview.py")
+        full_content = "\n".join(f"line {line}" for line in range(1, 7))
+
+        class DraftService:
+            def __init__(self) -> None:
+                self.create_calls = 0
+
+            async def create_pending_review(self, *args, **kwargs) -> PRReview:
+                self.create_calls += 1
+                return PRReview(id=88)
+
+        service = DraftService()
+
+        async with app.run_test() as pilot:
+            screen = cast(MainScreen, app.screen)
+            screen.current_tab = 1
+            screen.store.state.pr = PR(number=123, head_sha="deadbeef")
+            screen.store.state.file_diffs = {"preview.py": source_diff}
+            screen.store.state.file_contents["preview.py"] = full_content
+            screen.store._service = service  # type: ignore[assignment]
+            diff_view = screen.file_changes.diff_view
+            await diff_view.show_full_file_preview(
+                "preview.py",
+                full_content,
+                source_diff=source_diff,
+            )
+            await pilot.pause()
+            current_line = diff_view._line_index_by_new_number[6]
+            diff_view.cursor_line = current_line
+
+            await screen._save_inline_comment_draft(
+                "local only draft",
+                path="preview.py",
+                line=6,
+                side="RIGHT",
+            )
+            await pilot.pause()
+            await pilot.pause()
+
+            draft = diff_view.query_one("#pending-draft-5-right-0", CommentCard)
+            assert draft._body == "local only draft"
+            assert screen.store.state.pending_review_id is None
+            assert service.create_calls == 0
+
+    async def test_save_combined_diff_draft_renders_immediately(
+        self,
+        app: RitApp,
+    ) -> None:
+        from rit.ui.components.file_changes import COMBINED_DIFF_FILENAME
+        from rit.ui.screens.main import MainScreen
+        from rit.ui.widgets.comment_card import CommentCard
+
+        patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+
+        class DraftService:
+            async def create_pending_review(self, *args, **kwargs) -> PRReview:
+                return PRReview(id=88)
+
+        async with app.run_test() as pilot:
+            screen = cast(MainScreen, app.screen)
+            screen.switch_tab(1)
+            screen.store.state.pr = PR(number=123, head_sha="deadbeef")
+            screen.store.state.files = [
+                PRFile(filename="one.py", status="modified", patch=patch),
+                PRFile(filename="two.py", status="modified", patch=patch),
+            ]
+            screen.store.state.file_diffs = {
+                "one.py": parse_patch(patch, "one.py"),
+                "two.py": parse_patch(patch, "two.py"),
+            }
+            screen.store._service = DraftService()  # type: ignore[assignment]
+            screen.file_changes.refresh_files()
+            await pilot.pause()
+            await pilot.pause()
+
+            diff_view = screen.file_changes.diff_view
+            assert diff_view.current_file == COMBINED_DIFF_FILENAME
+            line_index = diff_view._line_index_by_file_new_number[("two.py", 1)]
+            diff_view.cursor_line = line_index
+
+            await screen._save_inline_comment_draft(
+                "combined draft",
+                path="two.py",
+                line=1,
+                side="RIGHT",
+            )
+            await pilot.pause()
+            await pilot.pause()
+
+            draft = diff_view.query_one("#pending-draft-3-right-0", CommentCard)
+            assert draft._body == "combined draft"
 
     async def test_quit_action(self, app: RitApp) -> None:
         """Test that q quits the app."""
