@@ -16,7 +16,7 @@ from rit.ui.components.pr_timeline import (
     TIMELINE_BODY_MOUNT_DELAY,
 )
 from rit.ui.widgets import comment_card as comment_card_module
-from rit.ui.widgets.comment_card import BODY_PREVIEW_RETIRE_DELAY
+from rit.ui.widgets.comment_card import BODY_PREVIEW_RETIRE_DELAY, CommentCard
 from rit.ui.components.collapsible_markdown import CopyableCodeBlock
 from rit.ui.widgets.review_thread_card import ReviewThreadItem
 from tests.conftest import wait_until
@@ -572,6 +572,206 @@ async def test_timeline_sorts_review_threads_with_missing_and_aware_dates() -> N
         await pilot.pause()
 
         assert len(app.query("ReviewThreadItem")) == 2
+
+
+@pytest.mark.asyncio
+async def test_timeline_sorts_pending_review_threads_by_review_created_at() -> None:
+    store = PRStore()
+    store.state.issue_comments = [
+        PRIssueComment(
+            id=1,
+            body="Earlier issue comment",
+            user=PRUser(login="sonarqubecloud"),
+            created_at=datetime(2026, 6, 18, 5, 25, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 6, 18, 5, 25, tzinfo=timezone.utc),
+        )
+    ]
+    store.state.reviews = [
+        PRReview.model_validate(
+            {
+                "databaseId": 10,
+                "state": "PENDING",
+                "body": "",
+                "author": {"login": "mizisu"},
+                "createdAt": "2026-06-18T06:25:36Z",
+                "submittedAt": None,
+            }
+        )
+    ]
+    store.state.comments = [
+        PRComment(
+            id=100,
+            body="Pending thread",
+            user=PRUser(login="mizisu"),
+            path="app.py",
+            line=12,
+            side="RIGHT",
+            created_at=datetime(2026, 6, 18, 6, 25, 37, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 6, 18, 6, 25, 37, tzinfo=timezone.utc),
+            pull_request_review_id=10,
+        )
+    ]
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield PRTimeline(store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        timeline = app.query_one(PRTimeline)
+
+        await timeline._build_timeline_async()
+        await pilot.pause()
+
+        rendered = list(app.query_one("#comments-container").children)
+        assert isinstance(rendered[0], CommentCard)
+        assert isinstance(rendered[1], CommentCard)
+        assert rendered[1].has_class("pending-review-summary")
+        assert isinstance(rendered[2], ReviewThreadItem)
+        assert len(app.query("Collapsible.pending-review-group")) == 0
+
+
+@pytest.mark.asyncio
+async def test_timeline_shows_pending_review_summary_before_threads() -> None:
+    store = PRStore()
+    store.state.reviews = [
+        PRReview.model_validate(
+            {
+                "databaseId": 10,
+                "state": "PENDING",
+                "body": "",
+                "author": {"login": "mizisu"},
+                "createdAt": "2026-06-18T06:25:36Z",
+                "submittedAt": None,
+            }
+        )
+    ]
+    store.state.comments = [
+        PRComment(
+            id=100,
+            body="First pending thread",
+            user=PRUser(login="mizisu"),
+            path="app.py",
+            line=72,
+            side="RIGHT",
+            created_at=datetime(2026, 6, 18, 6, 25, 37, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 6, 18, 6, 25, 37, tzinfo=timezone.utc),
+            pull_request_review_id=10,
+        ),
+        PRComment(
+            id=101,
+            body="Second pending thread",
+            user=PRUser(login="mizisu"),
+            path="app.py",
+            line=89,
+            side="RIGHT",
+            created_at=datetime(2026, 6, 18, 6, 26, 39, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 6, 18, 6, 26, 39, tzinfo=timezone.utc),
+            pull_request_review_id=10,
+        ),
+    ]
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield PRTimeline(store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        timeline = app.query_one(PRTimeline)
+
+        await timeline._build_timeline_async()
+        await pilot.pause()
+
+        rendered = list(app.query_one("#comments-container").children)
+        summary = rendered[0]
+        assert isinstance(summary, CommentCard)
+        assert summary.has_class("pending-review-summary")
+
+        header = summary.query_one(".comment-header")
+        header_text = getattr(header.content, "plain", str(header.content))
+        assert "mizisu" in header_text
+        assert "pending" in header_text
+        assert "2 threads" in header_text
+        assert isinstance(rendered[1], ReviewThreadItem)
+        assert isinstance(rendered[2], ReviewThreadItem)
+        assert len(app.query("Collapsible.pending-review-group")) == 0
+
+
+@pytest.mark.asyncio
+async def test_timeline_keeps_submitted_review_threads_ungrouped() -> None:
+    store = PRStore()
+    store.state.reviews = [
+        PRReview.model_validate(
+            {
+                "databaseId": 10,
+                "state": "COMMENTED",
+                "body": "",
+                "author": {"login": "alice"},
+                "createdAt": "2026-06-18T06:25:36Z",
+                "submittedAt": "2026-06-18T06:30:00Z",
+            }
+        )
+    ]
+    store.state.comments = [
+        PRComment(
+            id=100,
+            body="Submitted thread",
+            user=PRUser(login="alice"),
+            path="app.py",
+            line=12,
+            side="RIGHT",
+            created_at=datetime(2026, 6, 18, 6, 25, 37, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 6, 18, 6, 25, 37, tzinfo=timezone.utc),
+            pull_request_review_id=10,
+        )
+    ]
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield PRTimeline(store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        timeline = app.query_one(PRTimeline)
+
+        await timeline._build_timeline_async()
+        await pilot.pause()
+
+        rendered = list(app.query_one("#comments-container").children)
+        assert isinstance(rendered[0], ReviewThreadItem)
+        assert len(app.query("Collapsible.pending-review-group")) == 0
+
+
+@pytest.mark.asyncio
+async def test_pr_timeline_thread_title_identifies_root_author() -> None:
+    store = PRStore()
+    store.state.comments = [
+        PRComment(
+            id=100,
+            body="Inline thread",
+            user=PRUser(login="mizisu"),
+            path="app.py",
+            line=12,
+            side="RIGHT",
+            created_at=datetime(2026, 5, 19, 2, 27, tzinfo=timezone.utc),
+            updated_at=datetime(2026, 5, 19, 2, 27, tzinfo=timezone.utc),
+        )
+    ]
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield PRTimeline(store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        timeline = app.query_one(PRTimeline)
+
+        await timeline._build_timeline_async()
+        await pilot.pause()
+
+        thread_item = app.query_one(ReviewThreadItem)
+        assert "@mizisu" in thread_item.title
+        assert thread_item.title.endswith("app.py:12")
 
 
 @pytest.mark.asyncio

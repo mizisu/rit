@@ -20,6 +20,7 @@ from rit.core.datetime_utils import (
 )
 from rit.state.models import (
     PR,
+    PRComment,
     PRReview,
     PRIssueComment,
     ReviewState,
@@ -213,8 +214,14 @@ class PRTimeline(Vertical):
         for review in state.reviews:
             review_threads = threads_by_review.get(review.id, [])
             if (review.body and review.body.strip()) or review_threads:
-                submitted_at = review.submitted_at or datetime_min_utc()
-                timeline_items.append((submitted_at, "review", review, review_threads))
+                timeline_items.append(
+                    (
+                        self._review_timeline_time(review, review_threads),
+                        "review",
+                        review,
+                        review_threads,
+                    )
+                )
 
         for thread in orphan_threads:
             timeline_items.append((thread.created_at, "thread", thread, None))
@@ -258,6 +265,25 @@ class PRTimeline(Vertical):
             index - INITIAL_TIMELINE_BODY_COUNT + 1
         ) * TIMELINE_BODY_MOUNT_STAGGER_DELAY
 
+    @staticmethod
+    def _review_timeline_time(
+        review: PRReview,
+        threads: list[CommentThread],
+    ) -> datetime:
+        if review.submitted_at is not None:
+            return review.submitted_at
+        if not is_min_datetime(review.created_at):
+            return review.created_at
+
+        thread_times = [
+            datetime_sort_key(thread.created_at)
+            for thread in threads
+            if not is_min_datetime(thread.created_at)
+        ]
+        if thread_times:
+            return min(thread_times)
+        return datetime_min_utc()
+
     def _mount_issue_comment(
         self,
         container: Vertical,
@@ -292,7 +318,7 @@ class PRTimeline(Vertical):
         if not review.body or not review.body.strip():
             return
 
-        time_str = self._format_time(review.submitted_at or datetime_min_utc())
+        time_str = self._format_time(self._review_timeline_time(review, []))
         state_display = {
             ReviewState.APPROVED: "[#a6da95]approved[/]",
             ReviewState.CHANGES_REQUESTED: "[#ed8796]requested changes[/]",
@@ -322,6 +348,23 @@ class PRTimeline(Vertical):
         *,
         body_mount_delay: float = TIMELINE_BODY_MOUNT_DELAY,
     ) -> None:
+        if review.state == ReviewState.PENDING and threads:
+            self._mount_pending_review_summary(
+                container,
+                review,
+                threads,
+                body_mount_delay=body_mount_delay,
+            )
+            for thread in sorted(
+                threads, key=lambda t: datetime_sort_key(t.created_at)
+            ):
+                self._mount_comment_thread(
+                    container,
+                    thread,
+                    body_mount_delay=body_mount_delay,
+                )
+            return
+
         if review.body and review.body.strip():
             self._mount_review(
                 container,
@@ -336,6 +379,47 @@ class PRTimeline(Vertical):
                 body_mount_delay=body_mount_delay,
             )
 
+    def _mount_pending_review_summary(
+        self,
+        container: Vertical,
+        review: PRReview,
+        threads: list[CommentThread],
+        *,
+        body_mount_delay: float = TIMELINE_BODY_MOUNT_DELAY,
+    ) -> None:
+        container.mount(
+            CommentCard(
+                self._pending_review_summary_header(review, threads),
+                review.body,
+                classes="comment-box pending-review-summary",
+                markdown_base_url=self._markdown_base_url(),
+                body_mount_delay=body_mount_delay,
+            )
+        )
+
+    def _pending_review_summary_header(
+        self,
+        review: PRReview,
+        threads: list[CommentThread],
+    ) -> str:
+        author = self._review_author(review)
+        thread_count = len(threads)
+        label = "thread" if thread_count == 1 else "threads"
+        time_str = self._format_time(self._review_timeline_time(review, threads))
+        title = f"[bold]{author}[/] [#eed49f]pending[/] [#6e738d]{thread_count} {label}[/]"
+        if time_str:
+            title = f"{title} {time_str}"
+        return title
+
+    @staticmethod
+    def _review_author(review: PRReview) -> str:
+        if review.user is None or not review.user.login:
+            return "unknown"
+        login = review.user.login
+        if login.endswith("[bot]"):
+            return login[: -len("[bot]")]
+        return login
+
     def _mount_comment_thread(
         self,
         container: Vertical,
@@ -343,21 +427,33 @@ class PRTimeline(Vertical):
         *,
         body_mount_delay: float = TIMELINE_BODY_MOUNT_DELAY,
     ) -> None:
+        container.mount(
+            self._build_comment_thread_item(
+                thread,
+                body_mount_delay=body_mount_delay,
+            )
+        )
+
+    def _build_comment_thread_item(
+        self,
+        thread: CommentThread,
+        *,
+        body_mount_delay: float = TIMELINE_BODY_MOUNT_DELAY,
+    ) -> ReviewThreadItem:
         root = thread.root_comment
 
         thread_info = self.store.get_thread_info(root.id)
         is_resolved = thread_info.is_resolved if thread_info else False
         thread_id = thread_info.thread_id if thread_info else ""
 
-        line_info = f":{root.anchor_line}" if root.anchor_line else ""
-        file_icon = get_file_icon(root.path)
-
+        collapsible_title = self._thread_title_from_comment(
+            root,
+            is_resolved=is_resolved,
+        )
         if is_resolved:
-            collapsible_title = f"✓ Resolved: {file_icon} {root.path}{line_info}"
             collapsible_classes = "--thread --resolved"
             collapsed = True
         else:
-            collapsible_title = f"{file_icon} {root.path}{line_info}"
             collapsible_classes = "--thread"
             collapsed = False
 
@@ -377,9 +473,58 @@ class PRTimeline(Vertical):
             markdown_base_url=self._markdown_base_url(),
             body_mount_delay=body_mount_delay,
         )
-        container.mount(collapsible)
 
         self._thread_widget_info[collapsible] = (thread_id, root.id, is_resolved)
+        return collapsible
+
+    def _thread_title_from_comment(
+        self,
+        comment: PRComment,
+        *,
+        is_resolved: bool,
+    ) -> str:
+        return self._format_thread_title(
+            path=comment.path,
+            line=comment.anchor_line,
+            author=self._thread_author(comment),
+            is_resolved=is_resolved,
+        )
+
+    @staticmethod
+    def _format_thread_title(
+        *,
+        path: str,
+        line: int | None,
+        author: str,
+        is_resolved: bool,
+    ) -> str:
+        line_info = f":{line}" if line else ""
+        file_icon = get_file_icon(path)
+        title = f"@{author} on {file_icon} {path}{line_info}"
+        if is_resolved:
+            return f"✓ Resolved: {title}"
+        return title
+
+    @staticmethod
+    def _thread_author(comment: PRComment | None) -> str:
+        if comment is None or comment.user is None or not comment.user.login:
+            return "unknown"
+        login = comment.user.login
+        if login.endswith("[bot]"):
+            return login[: -len("[bot]")]
+        return login
+
+    def _root_comment_for_thread(self, root_comment_id: int) -> PRComment | None:
+        thread = self.store.get_review_thread(root_comment_id)
+        if thread is not None:
+            root = thread.root_comment
+            if root is not None:
+                return root
+
+        for comment in self.store.state.comments:
+            if comment.id == root_comment_id:
+                return comment
+        return None
 
     def _markdown_base_url(self) -> str | None:
         pr = self.store.state.pr
@@ -728,28 +873,21 @@ class PRTimeline(Vertical):
         is_resolved: bool,
     ) -> None:
         new_title: str | None = None
+        root_comment = self._root_comment_for_thread(root_comment_id)
+        author = self._thread_author(root_comment)
         thread_info = self.store.get_thread_info(root_comment_id)
         if thread_info is not None:
-            line_info = f":{thread_info.line}" if thread_info.line else ""
-            file_icon = get_file_icon(thread_info.path)
-            if is_resolved:
-                new_title = f"✓ Resolved: {file_icon} {thread_info.path}{line_info}"
-            else:
-                new_title = f"{file_icon} {thread_info.path}{line_info}"
-        else:
-            for comment in self.store.state.comments:
-                if comment.id == root_comment_id:
-                    line_info = (
-                        f":{comment.anchor_line}" if comment.anchor_line else ""
-                    )
-                    file_icon = get_file_icon(comment.path)
-                    if is_resolved:
-                        new_title = (
-                            f"✓ Resolved: {file_icon} {comment.path}{line_info}"
-                        )
-                    else:
-                        new_title = f"{file_icon} {comment.path}{line_info}"
-                    break
+            new_title = self._format_thread_title(
+                path=thread_info.path,
+                line=thread_info.line,
+                author=author,
+                is_resolved=is_resolved,
+            )
+        elif root_comment is not None:
+            new_title = self._thread_title_from_comment(
+                root_comment,
+                is_resolved=is_resolved,
+            )
 
         if isinstance(collapsible, ReviewThreadItem):
             collapsible.set_resolved(is_resolved, title=new_title)

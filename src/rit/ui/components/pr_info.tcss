@@ -96,6 +96,10 @@ PRInfo ReviewThreadItem.--thread {
     margin: 1 0 1 4;
 }
 
+PRInfo CommentCard.pending-review-summary .comment-header {
+    color: #eed49f;
+}
+
 /* Placeholder text */
 PRInfo .placeholder {
     color: #6e738d;
