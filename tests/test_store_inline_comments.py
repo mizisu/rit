@@ -2,17 +2,27 @@ import asyncio
 
 import pytest
 
-from rit.state.models import PR, PRComment, PRReview, PRUser, ReviewState
-from rit.state.store import PRStore
+from rit.core.diff import parse_patch
+from rit.state.models import (
+    PR,
+    PRComment,
+    PRIssueComment,
+    PRReview,
+    PRUser,
+    ReviewState,
+)
+from rit.state.store import PRStore, UnsupportedInlineCommentTarget
 
 
 class FakeInlineCommentService:
     def __init__(self) -> None:
         self.inline_comment_calls: list[tuple[int, str, str, str, int, str]] = []
+        self.issue_comment_calls: list[tuple[int, str]] = []
         self.create_pending_review_calls: list[list[tuple[str, int, str, str]]] = []
         self.delete_pending_review_calls: list[tuple[int, int]] = []
         self.list_review_comments_result: list[PRComment] = []
         self.next_review_id = 100
+        self.pr_all_result = PR(number=123)
 
     async def create_review_comment(
         self,
@@ -34,7 +44,12 @@ class FakeInlineCommentService:
             path=path,
             line=line,
             side=side,
+            pullRequestReview=90,
         )
+
+    async def create_issue_comment(self, pr_number: int, body: str) -> PRIssueComment:
+        self.issue_comment_calls.append((pr_number, body))
+        return PRIssueComment(id=2, body=body, user=PRUser(login="alice"))
 
     async def create_pending_review(
         self,
@@ -63,6 +78,9 @@ class FakeInlineCommentService:
         self, pr_number: int, review_id: int
     ) -> list[PRComment]:
         return list(self.list_review_comments_result)
+
+    async def get_pr_all(self, pr_number: int) -> PR:
+        return self.pr_all_result
 
 
 class BlockingPendingReviewService(FakeInlineCommentService):
@@ -136,6 +154,31 @@ async def test_submit_inline_comment_requires_head_sha() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_submit_inline_comment_on_unchanged_line_is_rejected() -> None:
+    store = PRStore(pr_number=123)
+    store.state.pr = PR(number=123, head_sha="deadbeef")
+    store.state.file_diffs = {
+        "src/app.py": parse_patch(
+            "@@ -2,2 +2,3 @@\n line 2\n+line 3\n line 4",
+            "src/app.py",
+        )
+    }
+    service = FakeInlineCommentService()
+    store._service = service  # type: ignore[assignment]
+
+    with pytest.raises(UnsupportedInlineCommentTarget, match="outside the PR diff"):
+        await store.submit_inline_comment(
+            "hello outside hunk",
+            path="src/app.py",
+            line=6,
+            side="RIGHT",
+        )
+
+    assert service.inline_comment_calls == []
+    assert service.issue_comment_calls == []
+
+
 def test_save_pending_inline_comment_replaces_existing_target() -> None:
     store = PRStore(pr_number=123)
 
@@ -195,6 +238,67 @@ async def test_upsert_pending_inline_comment_syncs_pending_review() -> None:
         [("src/app.py", 7, "RIGHT", "hello")]
     ]
     assert store.state.pending_review_id == 100
+
+
+@pytest.mark.asyncio
+async def test_upsert_pending_inline_comment_keeps_unchanged_line_local() -> None:
+    store = PRStore(pr_number=123)
+    store.state.pr = PR(number=123, head_sha="deadbeef")
+    store.state.file_diffs = {
+        "src/app.py": parse_patch(
+            "@@ -2,2 +2,3 @@\n line 2\n+line 3\n line 4",
+            "src/app.py",
+        )
+    }
+    service = FakeInlineCommentService()
+    store._service = service  # type: ignore[assignment]
+
+    draft = await store.upsert_pending_inline_comment(
+        "hello outside hunk",
+        path="src/app.py",
+        line=6,
+        side="RIGHT",
+    )
+
+    assert draft.is_diff_line is False
+    assert service.create_pending_review_calls == []
+    assert store.state.pending_review_id is None
+    assert store.state.pending_review_comments == [draft]
+
+
+@pytest.mark.asyncio
+async def test_upsert_pending_inline_comment_syncs_mixed_pending_comments() -> None:
+    store = PRStore(pr_number=123)
+    store.state.pr = PR(number=123, head_sha="deadbeef")
+    store.state.file_diffs = {
+        "src/app.py": parse_patch(
+            "@@ -2,2 +2,3 @@\n line 2\n+line 3\n line 4",
+            "src/app.py",
+        )
+    }
+    service = FakeInlineCommentService()
+    store._service = service  # type: ignore[assignment]
+
+    diff_draft = await store.upsert_pending_inline_comment(
+        "hello diff",
+        path="src/app.py",
+        line=3,
+        side="RIGHT",
+    )
+    full_file_draft = await store.upsert_pending_inline_comment(
+        "hello outside hunk",
+        path="src/app.py",
+        line=6,
+        side="RIGHT",
+    )
+
+    assert diff_draft.is_diff_line is True
+    assert full_file_draft.is_diff_line is False
+    assert service.create_pending_review_calls == [
+        [("src/app.py", 3, "RIGHT", "hello diff")],
+        [("src/app.py", 3, "RIGHT", "hello diff")],
+    ]
+    assert store.state.pending_review_comments == [diff_draft, full_file_draft]
 
 
 @pytest.mark.asyncio

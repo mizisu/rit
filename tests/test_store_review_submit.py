@@ -1,15 +1,20 @@
 import pytest
 
-from rit.state.models import PR, PRComment, PRReview, ReviewState
-from rit.state.store import PRStore
+from rit.core.diff import parse_patch
+from rit.state.models import PR, PRComment, PendingReviewComment, PRReview, ReviewState
+from rit.state.store import PRStore, UnsupportedInlineCommentTarget
 
 
 class FakeReviewService:
     def __init__(self) -> None:
         self.submit_review_calls: list[tuple[int, str, str | None, int]] = []
         self.submit_pending_review_calls: list[tuple[int, int, str, str | None]] = []
+        self.create_pending_review_calls: list[
+            tuple[int, list[tuple[str, int, str, str]], str | None]
+        ] = []
         self.list_review_comments_calls: list[tuple[int, int]] = []
         self.submitted_review = PRReview(id=91, state=ReviewState.COMMENTED)
+        self.pending_review = PRReview(id=88, state=ReviewState.PENDING)
         self.review_comments_result: list[PRComment] = []
         self.pr_all_result = PR(number=123)
 
@@ -23,6 +28,26 @@ class FakeReviewService:
     ) -> PRReview:
         self.submit_review_calls.append((pr_number, event, body, len(comments or [])))
         return self.submitted_review
+
+    async def create_pending_review(
+        self,
+        pr_number: int,
+        *,
+        comments=None,
+        body: str | None = None,
+        commit_id: str | None = None,
+    ) -> PRReview:
+        self.create_pending_review_calls.append(
+            (
+                pr_number,
+                [
+                    (comment.path, comment.line, comment.side, comment.body)
+                    for comment in comments or []
+                ],
+                body,
+            )
+        )
+        return self.pending_review
 
     async def submit_pending_review(
         self,
@@ -91,6 +116,35 @@ async def test_submit_review_includes_pending_comments_and_clears_them() -> None
 
     assert service.submit_review_calls == [(123, "COMMENT", None, 1)]
     assert store.state.pending_review_comments == []
+
+
+@pytest.mark.asyncio
+async def test_submit_review_rejects_unsupported_inline_targets() -> None:
+    store = PRStore(pr_number=123)
+    store.state.file_diffs = {
+        "src/app.py": parse_patch(
+            "@@ -2,2 +2,3 @@\n line 2\n+line 3\n line 4",
+            "src/app.py",
+        )
+    }
+    store.state.pending_review_comments = [
+        PendingReviewComment(
+            body="hello outside hunk",
+            path="src/app.py",
+            line=6,
+            side="RIGHT",
+            is_diff_line=False,
+        )
+    ]
+    service = FakeReviewService()
+    store._service = service  # type: ignore[assignment]
+
+    with pytest.raises(UnsupportedInlineCommentTarget, match="outside the PR diff"):
+        await store.submit_review("COMMENT", "")
+
+    assert service.create_pending_review_calls == []
+    assert service.submit_pending_review_calls == []
+    assert service.submit_review_calls == []
 
 
 @pytest.mark.asyncio

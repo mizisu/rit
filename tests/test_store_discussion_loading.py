@@ -4,7 +4,15 @@ from datetime import datetime, timezone
 import pytest
 
 from rit.services.github import PRDiscussion
-from rit.state.models import PRComment, PRIssueComment, PRReview, PRUser, ReviewThread
+from rit.state.models import (
+    NodeList,
+    PR,
+    PRComment,
+    PRIssueComment,
+    PRReview,
+    PRUser,
+    ReviewThread,
+)
 from rit.state.store import PRStore
 
 
@@ -178,3 +186,82 @@ async def test_load_pr_discussion_posts_metadata_only_when_full_content_matches(
     message_names = [type(message).__name__ for message in messages]
     assert message_names.count("PRDiscussionLoaded") == 1
     assert message_names.count("PRDiscussionMetadataLoaded") == 1
+
+
+def test_file_level_line_notes_keep_file_level_anchor() -> None:
+    store = PRStore(pr_number=123)
+    body = "Line comment on `src/app.py:6` (RIGHT):\n\nhello outside hunk"
+    comment = PRComment(
+        id=501,
+        body=body,
+        path="src/app.py",
+        line=1,
+        side="RIGHT",
+        subjectType="file",
+    )
+    thread = ReviewThread.model_validate(
+        {
+            "id": "thread-501",
+            "isResolved": False,
+            "path": "src/app.py",
+            "line": 1,
+            "diffSide": "RIGHT",
+            "subjectType": "FILE",
+            "comments": {"nodes": [comment]},
+        }
+    )
+    pr = PR(
+        number=123,
+        review_threads_connection=NodeList(nodes=[thread]),
+    )
+
+    store._apply_discussion_state(pr)
+
+    normalized_thread = store.state.review_threads[0]
+    normalized_comment = normalized_thread.root_comment
+    assert normalized_thread.line == 1
+    assert normalized_thread.original_line is None
+    assert normalized_thread.anchor_line == 1
+    assert normalized_thread.diff_side == "RIGHT"
+    assert normalized_comment is not None
+    assert normalized_comment.body == body
+    assert normalized_comment.line == 1
+    assert normalized_comment.original_line is None
+    assert normalized_comment.side == "RIGHT"
+    assert store.state.comments_by_file["src/app.py"] == [normalized_comment]
+    assert store.state.thread_info_cache[501].line == 1
+
+
+def test_line_thread_with_line_note_shaped_body_keeps_original_anchor() -> None:
+    store = PRStore(pr_number=123)
+    comment = PRComment(
+        id=501,
+        body="Line comment on `src/app.py:6` (RIGHT):\n\nnot a fallback",
+        path="src/app.py",
+        line=12,
+        side="RIGHT",
+    )
+    thread = ReviewThread.model_validate(
+        {
+            "id": "thread-501",
+            "isResolved": False,
+            "path": "src/app.py",
+            "line": 12,
+            "diffSide": "RIGHT",
+            "subjectType": "LINE",
+            "comments": {"nodes": [comment]},
+        }
+    )
+    pr = PR(
+        number=123,
+        review_threads_connection=NodeList(nodes=[thread]),
+    )
+
+    store._apply_discussion_state(pr)
+
+    normalized_thread = store.state.review_threads[0]
+    normalized_comment = normalized_thread.root_comment
+    assert normalized_thread.anchor_line == 12
+    assert normalized_comment is not None
+    assert normalized_comment.body == comment.body
+    assert store.state.thread_info_cache[501].line == 12

@@ -92,6 +92,23 @@ class PendingReviewSnapshot:
     version: int
 
 
+class UnsupportedInlineCommentTarget(ValueError):
+    """Raised when GitHub cannot create a true line comment for a target."""
+
+    def __init__(self, *, path: str, line: int, side: Literal["LEFT", "RIGHT"]):
+        super().__init__(
+            f"GitHub cannot create a line comment on {path}:{line} "
+            f"({side}) because it is outside the PR diff."
+        )
+
+    @classmethod
+    def from_comment(
+        cls,
+        comment: PendingReviewComment,
+    ) -> UnsupportedInlineCommentTarget:
+        return cls(path=comment.path, line=comment.line, side=comment.side)
+
+
 class PRStore:
     """Central store for PR data with reactive updates via Textual Messages."""
 
@@ -274,6 +291,7 @@ class PRStore:
                     self._author_login(review.user),
                     review.state.name,
                     review.body,
+                    review.created_at,
                     review.submitted_at,
                 )
                 for review in pr.reviews
@@ -702,7 +720,6 @@ class PRStore:
             reviews,
             review_threads,
         )
-
         self._state.pr = pr.model_copy(
             update={
                 "reviews_connection": NodeList(nodes=reviews),
@@ -734,7 +751,7 @@ class PRStore:
                 line=thread.anchor_line,
                 root_comment_id=thread.root_comment_id,
             )
-            for thread in pr.review_threads
+            for thread in review_threads
             if thread.id and thread.root_comment_id
         }
         self._state.thread_cache = {
@@ -748,7 +765,10 @@ class PRStore:
         reviews: list[PRReview],
         review_threads: list[ReviewThread],
     ) -> tuple[list[PRReview], list[ReviewThread]]:
-        if not self._recent_submitted_reviews:
+        if (
+            not self._recent_submitted_reviews
+            and not self._recent_submitted_review_comments
+        ):
             return reviews, review_threads
 
         review_ids = {review.id for review in reviews if review.id}
@@ -989,7 +1009,14 @@ class PRStore:
         if pr is None or not pr.head_sha:
             raise ValueError("PR head SHA is unavailable")
 
-        return await self._service.create_review_comment(
+        target_side = cast(Literal["LEFT", "RIGHT"], side)
+        self._require_inline_comment_diff_line(
+            path=path,
+            line=line,
+            side=target_side,
+        )
+
+        comment = await self._service.create_review_comment(
             self.pr_number,
             body=normalized,
             commit_id=pr.head_sha,
@@ -997,6 +1024,8 @@ class PRStore:
             line=line,
             side=side,
         )
+        self._remember_submitted_comment(comment)
+        return comment
 
     def save_pending_inline_comment(
         self,
@@ -1068,7 +1097,17 @@ class PRStore:
         line: int,
         side: Literal["LEFT", "RIGHT"],
     ) -> tuple[list[PendingReviewComment], PendingReviewComment]:
-        draft = PendingReviewComment(body=body, path=path, line=line, side=side)
+        draft = PendingReviewComment(
+            body=body,
+            path=path,
+            line=line,
+            side=side,
+            is_diff_line=self.is_inline_comment_diff_line(
+                path=path,
+                line=line,
+                side=side,
+            ),
+        )
         comments = list(self._state.pending_review_comments)
         for index, existing in enumerate(comments):
             if (
@@ -1082,6 +1121,36 @@ class PRStore:
             comments.append(draft)
         comments.sort(key=lambda item: (item.path, item.line, item.side))
         return comments, draft
+
+    def is_inline_comment_diff_line(
+        self,
+        *,
+        path: str,
+        line: int,
+        side: Literal["LEFT", "RIGHT"],
+    ) -> bool:
+        diff = self._state.file_diffs.get(path)
+        if diff is None:
+            return True
+
+        for hunk in diff.hunks:
+            for diff_line in hunk.lines:
+                if side == "RIGHT" and diff_line.new_line_no == line:
+                    return True
+                if side == "LEFT" and diff_line.old_line_no == line:
+                    return True
+        return False
+
+    def _require_inline_comment_diff_line(
+        self,
+        *,
+        path: str,
+        line: int,
+        side: Literal["LEFT", "RIGHT"],
+    ) -> None:
+        if self.is_inline_comment_diff_line(path=path, line=line, side=side):
+            return
+        raise UnsupportedInlineCommentTarget(path=path, line=line, side=side)
 
     def _with_pending_comment_removed(
         self,
@@ -1105,14 +1174,15 @@ class PRStore:
         if pending_review_id is not None:
             await self._service.delete_pending_review(self.pr_number, pending_review_id)
 
-        if not comments:
+        syncable_comments = [comment for comment in comments if comment.is_diff_line]
+        if not syncable_comments:
             return None
 
         pr = self._state.pr
         commit_id = pr.head_sha if pr is not None and pr.head_sha else None
         return await self._service.create_pending_review(
             self.pr_number,
-            comments=comments,
+            comments=syncable_comments,
             body=self._state.pending_review_body or None,
             commit_id=commit_id,
         )
@@ -1262,9 +1332,17 @@ class PRStore:
         """Submit a top-level review and refresh local review state."""
         normalized = body.strip()
         pending_comments = list(self._state.pending_review_comments)
-        if event == "REQUEST_CHANGES" and not normalized:
+        unsupported_comment = next(
+            (comment for comment in pending_comments if not comment.is_diff_line),
+            None,
+        )
+        if unsupported_comment is not None:
+            raise UnsupportedInlineCommentTarget.from_comment(unsupported_comment)
+        review_body = normalized
+
+        if event == "REQUEST_CHANGES" and not review_body:
             raise ValueError("Review body cannot be empty")
-        if event == "COMMENT" and not normalized and not pending_comments:
+        if event == "COMMENT" and not review_body and not pending_comments:
             raise ValueError("Review body cannot be empty")
 
         pending_review_id = self._state.pending_review_id
@@ -1273,13 +1351,13 @@ class PRStore:
                 self.pr_number,
                 pending_review_id,
                 event=event,
-                body=normalized if normalized else None,
+                body=review_body if review_body else None,
             )
         else:
             submitted_review = await self._service.submit_review(
                 self.pr_number,
                 event=event,
-                body=normalized if normalized else None,
+                body=review_body if review_body else None,
                 comments=pending_comments,
             )
         await self._remember_submitted_review(submitted_review)
@@ -1308,6 +1386,18 @@ class PRStore:
 
         self._recent_submitted_reviews[review.id] = review
         self._recent_submitted_review_comments[review.id] = comments
+        if self._state.pr is not None:
+            self._apply_discussion_state(self._state.pr)
+
+    def _remember_submitted_comment(self, comment: PRComment) -> None:
+        review_id = comment.pull_request_review_id
+        if not review_id:
+            return
+
+        comments = self._recent_submitted_review_comments.setdefault(review_id, [])
+        if not comment.id or all(existing.id != comment.id for existing in comments):
+            comments.append(comment)
+
         if self._state.pr is not None:
             self._apply_discussion_state(self._state.pr)
 
