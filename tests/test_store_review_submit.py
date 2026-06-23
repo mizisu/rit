@@ -109,6 +109,7 @@ async def test_submit_review_includes_pending_comments_and_clears_them() -> None
         line=7,
         side="RIGHT",
     )
+    previous_version = store.pending_review_version
     service = FakeReviewService()
     store._service = service  # type: ignore[assignment]
 
@@ -116,6 +117,9 @@ async def test_submit_review_includes_pending_comments_and_clears_them() -> None
 
     assert service.submit_review_calls == [(123, "COMMENT", None, 1)]
     assert store.state.pending_review_comments == []
+    assert store.state.pending_review_id is None
+    assert store.state.pending_review_body == ""
+    assert store.pending_review_version == previous_version + 1
 
 
 @pytest.mark.asyncio

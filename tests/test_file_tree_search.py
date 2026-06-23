@@ -2,9 +2,11 @@
 
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import Input, Tree
+from textual.css.query import NoMatches
+from textual.widgets import Input, Static, Tree
 
 from rit.state.models import PRFile
+from rit.ui.widgets import file_tree as file_tree_module
 from rit.ui.widgets.file_tree import FileTree
 
 
@@ -17,6 +19,77 @@ def sample_files() -> list[PRFile]:
         PRFile(filename="tests/test_app.py", additions=3, deletions=0),
         PRFile(filename="docs/usage.md", additions=7, deletions=4),
     ]
+
+
+def test_focused_cursor_state_ignores_missing_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    file_tree = FileTree()
+
+    def missing_tree(*_args: object, **_kwargs: object) -> object:
+        raise NoMatches("missing")
+
+    monkeypatch.setattr(file_tree, "query_one", missing_tree)
+
+    assert file_tree._focused_cursor_state() == (False, None, None)
+
+
+def test_focused_cursor_state_reraises_unexpected_tree_lookup_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    file_tree = FileTree()
+
+    def fail_tree(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("tree lookup failed")
+
+    monkeypatch.setattr(file_tree, "query_one", fail_tree)
+
+    with pytest.raises(RuntimeError, match="tree lookup failed"):
+        file_tree._focused_cursor_state()
+
+
+def test_update_file_count_display_ignores_missing_count_widget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    file_tree = FileTree()
+
+    def missing_count(*_args: object, **_kwargs: object) -> object:
+        raise NoMatches("missing")
+
+    monkeypatch.setattr(file_tree, "query_one", missing_count)
+
+    file_tree._update_file_count_display()
+
+
+def test_update_file_count_display_reraises_unexpected_update_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    file_tree = FileTree()
+
+    class BrokenCount(Static):
+        def update(self, *args: object, **kwargs: object) -> None:
+            raise RuntimeError("count update failed")
+
+    monkeypatch.setattr(file_tree, "query_one", lambda *_args, **_kwargs: BrokenCount())
+
+    with pytest.raises(RuntimeError, match="count update failed"):
+        file_tree._update_file_count_display()
+
+
+def test_review_tree_binding_cleanup_removes_space_and_enter_keys() -> None:
+    class Bindings:
+        keys = {"space": object(), "enter": object(), "j": object()}
+
+    bindings = Bindings()
+
+    file_tree_module._remove_review_tree_default_bindings(bindings)
+
+    assert sorted(bindings.keys) == ["j"]
+
+
+def test_review_tree_binding_cleanup_ignores_unknown_private_shape() -> None:
+    file_tree_module._remove_review_tree_default_bindings(object())
+    file_tree_module._remove_review_tree_default_bindings(type("Bindings", (), {"keys": []})())
 
 
 @pytest.mark.asyncio

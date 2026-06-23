@@ -5,7 +5,7 @@ from textual.app import App, ComposeResult
 
 from rit.ui.widgets.diff_view import DiffView
 from rit.core.diff import parse_patch
-from rit.ui.widgets.diff_render import _build_full_file_diff
+from rit.ui.widgets.diff_full_file_preview import build_full_file_diff
 from tests.conftest import wait_until
 
 
@@ -190,7 +190,7 @@ class TestDiffViewDuplicateId:
         async with app.run_test() as pilot:
             diff_view = app.query_one(DiffView)
             content = "\n".join(f"line {i}" for i in range(1, 151))
-            diff = _build_full_file_diff("preview.py", content)
+            diff = build_full_file_diff("preview.py", content)
 
             diff_view.current_file = "preview.py"
             diff_view._showing_full_file = True

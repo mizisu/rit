@@ -11,6 +11,7 @@ from rit.cli import parse_pr_reference
 from rit.core.diff import parse_patch
 from rit.state.models import PR, FileViewedState, LoadingState, PRFile, PRReview
 from rit.ui.screens.file_picker import FilePickerScreen
+from rit.ui.screens.settings import SettingsScreen
 
 
 def _stub_initial_loads(
@@ -173,6 +174,28 @@ class TestRitApp:
             from rit.ui.screens.main import MainScreen
 
             assert isinstance(app.screen, MainScreen)
+
+    async def test_settings_action_opens_current_settings_screen(
+        self,
+        app: RitApp,
+    ) -> None:
+        async with app.run_test() as pilot:
+            await pilot.press("f2")
+            await pilot.pause()
+
+            assert isinstance(app.screen, SettingsScreen)
+            assert _static_text(
+                app.screen.query_one("#setting-ui-theme", Static)
+            ) == "Theme: Catppuccin Macchiato"
+            assert _static_text(
+                app.screen.query_one("#setting-ui-diff-mode", Static)
+            ) == "Diff View Mode: Auto (based on width)"
+            assert _static_text(
+                app.screen.query_one("#setting-keybindings-vim-mode", Static)
+            ) == "Enable Vim keybindings?: On"
+            assert _static_text(
+                app.screen.query_one("#setting-github-auto-resolve", Static)
+            ) == "Auto-resolve threads?: Off"
 
     def test_flash_uses_plain_text_for_markup_like_errors(
         self, monkeypatch: pytest.MonkeyPatch

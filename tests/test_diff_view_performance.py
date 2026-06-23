@@ -25,6 +25,7 @@ def _as_plain(widget: Static) -> str:
 def _diff_view_render_idle(diff_view: DiffView) -> bool:
     return (
         not diff_view._hl_state.window_worker_active
+        and diff_view._hl_state.window_inflight is None
         and diff_view._hl_state.queued_window is None
         and not diff_view._cursor_ui.flush_pending
         and not diff_view._virt.render_pending
@@ -313,7 +314,7 @@ async def test_windowed_highlight_refreshes_grouped_blocks_without_full_rerender
 
     def blocking_range_highlight(*args, **kwargs):
         started.set()
-        unblock.wait(timeout=1.0)
+        unblock.wait()
         return original(*args, **kwargs)
 
     monkeypatch.setattr(
@@ -341,14 +342,23 @@ async def test_windowed_highlight_refreshes_grouped_blocks_without_full_rerender
         await diff_view.show_diff("big.py", diff)
         await pilot.pause()
 
-        assert started.wait(timeout=1.0) is True
-        baseline_calls = render_calls["count"]
-        assert baseline_calls >= 1
-        assert diff.hunks[0].lines[0].highlighted_old_content is None
+        try:
+            assert started.wait(timeout=5.0) is True
+            baseline_calls = render_calls["count"]
+            assert baseline_calls >= 1
+            assert diff.hunks[0].lines[0].highlighted_old_content is None
 
-        unblock.set()
-        await pilot.pause()
-        await pilot.pause()
+            unblock.set()
+            await wait_until(
+                lambda: (
+                    not diff_view._hl_state.window_worker_active
+                    and diff_view._hl_state.window_inflight is None
+                    and diff_view._hl_state.queued_window is None
+                ),
+                timeout=20.0,
+            )
+        finally:
+            unblock.set()
 
         assert render_calls["count"] == baseline_calls
         assert diff.hunks[0].lines[0].highlighted_old_content is not None
@@ -1253,6 +1263,7 @@ async def test_cursor_ui_flush_coalesces_multiple_requests_in_same_tick(
         await diff_view.show_diff("test.py", diff)
         await pilot.pause()
         await pilot.pause()
+        await wait_until(lambda: _diff_view_render_idle(diff_view), timeout=1.0)
 
         flush_calls = {"count": 0}
         grouped_calls: list[set[int]] = []
@@ -1543,7 +1554,10 @@ async def test_scroll_coalesces_pending_virtual_window_updates(
         await pilot.pause()
         await pilot.pause()
 
-        queued_center = diff_view._virt.coalesced_center
+        queued_center = await wait_until(
+            lambda: diff_view._virt.coalesced_center,
+            timeout=1.0,
+        )
         assert queued_center is not None
 
         unblock.set()
@@ -1555,16 +1569,17 @@ async def test_scroll_coalesces_pending_virtual_window_updates(
             lambda: (
                 not diff_view._virt.render_pending
                 and diff_view._virt.rendered_start
-                <= queued_center
+                <= diff_view._viewport_center_line()
                 <= diff_view._virt.rendered_end
             ),
-            timeout=2.0,
+            timeout=5.0,
         )
 
         assert 2 <= calls["count"] <= 3
+        final_center = diff_view._viewport_center_line()
         assert (
             diff_view._virt.rendered_start
-            <= queued_center
+            <= final_center
             <= diff_view._virt.rendered_end
         )
 

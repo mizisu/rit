@@ -267,6 +267,44 @@ def test_build_header_text_dismissed_has_changed_badge() -> None:
     assert "Changed" in text
 
 
+def test_build_header_text_uses_current_file_metadata_over_stale_view_file() -> None:
+    from types import SimpleNamespace
+
+    from rit.ui.widgets.diff_render import _build_header_text
+
+    stale_file = PRFile(
+        filename="old.py",
+        additions=99,
+        deletions=99,
+        viewer_viewed_state=FileViewedState.VIEWED,
+    )
+    current_file = PRFile(
+        filename="current.py",
+        additions=2,
+        deletions=1,
+        viewer_viewed_state=FileViewedState.UNVIEWED,
+    )
+    view = SimpleNamespace(
+        current_file="current.py",
+        _showing_full_file=False,
+        _file=stale_file,
+        store=SimpleNamespace(
+            state=SimpleNamespace(
+                files=[],
+                files_by_filename={"current.py": current_file},
+            )
+        ),
+    )
+
+    text = _build_header_text(view)
+
+    assert "Unviewed" in text
+    assert "-1" in text
+    assert "+2" in text
+    assert "Viewed" not in text
+    assert "99" not in text
+
+
 def test_build_header_text_no_file_shows_placeholder() -> None:
     from unittest.mock import MagicMock
 

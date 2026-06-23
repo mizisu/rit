@@ -5,7 +5,7 @@ from textual.app import App, ComposeResult
 
 from rit.core.diff import parse_patch
 from rit.state.store import PRStore
-from rit.ui.widgets.diff_render import _build_full_file_diff
+from rit.ui.widgets.diff_full_file_preview import build_full_file_diff
 from rit.ui.widgets.diff_view import DiffView
 
 
@@ -24,7 +24,7 @@ async def test_full_file_preview_renders_source_change_markers_only() -> None:
 -line 4
  line 5"""
     source_diff = parse_patch(patch, "preview.py")
-    full_diff = _build_full_file_diff(
+    full_diff = build_full_file_diff(
         "preview.py",
         "\n".join(
             [
@@ -87,7 +87,7 @@ async def test_full_file_preview_sticky_header_tracks_line_and_section() -> None
 -line old
 +line 9"""
     source_diff = parse_patch(patch, "preview.py")
-    full_diff = _build_full_file_diff(
+    full_diff = build_full_file_diff(
         "preview.py",
         _content(12),
         source_diff=source_diff,

@@ -4,6 +4,7 @@ import pytest
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.widgets import Input, OptionList
+from textual.widgets.option_list import OptionDoesNotExist
 
 from rit.state.models import PRFile
 from rit.ui.screens.file_picker import FilePickerScreen, rank_file_matches
@@ -53,6 +54,45 @@ def test_picker_option_prompt_includes_highlight_index_and_stats(
     assert "+12" in prompt.plain
     assert "-3" in prompt.plain
     assert any("bold cyan" in str(span.style) for span in prompt.spans)
+
+
+def test_file_picker_restore_highlight_falls_back_when_previous_option_is_missing(
+    picker_files: list[PRFile],
+) -> None:
+    screen = FilePickerScreen(files=picker_files, selected_file=None)
+
+    class MissingOptionList:
+        highlighted: int | None = None
+        first_selected = False
+
+        def get_option_index(self, _option_id: str) -> int:
+            raise OptionDoesNotExist("missing")
+
+        def action_first(self) -> None:
+            self.first_selected = True
+
+    options = MissingOptionList()
+
+    screen._restore_highlight(options, "missing")
+
+    assert options.highlighted is None
+    assert options.first_selected is True
+
+
+def test_file_picker_restore_highlight_reraises_unexpected_option_errors(
+    picker_files: list[PRFile],
+) -> None:
+    screen = FilePickerScreen(files=picker_files, selected_file=None)
+
+    class BrokenOptionList:
+        def get_option_index(self, _option_id: str) -> int:
+            raise RuntimeError("option list failed")
+
+        def action_first(self) -> None:
+            raise AssertionError("fallback should not hide unexpected errors")
+
+    with pytest.raises(RuntimeError, match="option list failed"):
+        screen._restore_highlight(BrokenOptionList(), "broken")
 
 
 @pytest.mark.asyncio

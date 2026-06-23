@@ -10,6 +10,16 @@ from rit.ui.widgets.diff_view import DiffView
 from tests.conftest import wait_until
 
 
+def _diff_view_render_idle(diff_view: DiffView) -> bool:
+    return (
+        not diff_view._hl_state.window_worker_active
+        and diff_view._hl_state.window_inflight is None
+        and diff_view._hl_state.queued_window is None
+        and not diff_view._cursor_ui.flush_pending
+        and not diff_view._virt.render_pending
+    )
+
+
 @pytest.fixture
 def sample_patch() -> str:
     """Sample patch for testing."""
@@ -378,6 +388,7 @@ class TestDiffViewVisualMode:
             await pilot.pause()
             diff_view.focus()
             await pilot.pause()
+            await wait_until(lambda: _diff_view_render_idle(diff_view), timeout=5.0)
 
             await pilot.press("G")
             await wait_until(
@@ -386,8 +397,7 @@ class TestDiffViewVisualMode:
                     and diff_view._is_line_rendered(diff_view.cursor_line)
                     and (current_row := diff_view._current_row()) is not None
                     and diff_view._row_is_visible(current_row)
-                    and not diff_view._cursor_ui.flush_pending
-                    and not diff_view._virt.render_pending
+                    and _diff_view_render_idle(diff_view)
                 ),
                 timeout=5.0,
             )

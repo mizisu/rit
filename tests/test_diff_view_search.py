@@ -5,6 +5,7 @@ from textual.widgets import Input
 import pytest
 
 from rit.core.diff import parse_patch
+from rit.ui.widgets import diff_view as diff_view_module
 from rit.ui.widgets.diff_view import DiffView
 
 
@@ -187,6 +188,158 @@ async def test_search_bar_escape_dismisses_without_searching() -> None:
 
         assert search_bar.display is False
         assert diff_view._search_query == ""
+
+
+@pytest.mark.asyncio
+async def test_search_input_change_delegates_to_search_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DiffView should keep search-change policy inside the search module."""
+
+    patch = """@@ -1,2 +1,2 @@
+alpha
+beta"""
+    calls: list[tuple[DiffView, str]] = []
+
+    def handle_changed(view: DiffView, value: str) -> None:
+        calls.append((view, value))
+
+    monkeypatch.setattr(
+        diff_view_module._search,
+        "handle_changed",
+        handle_changed,
+        raising=False,
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff = parse_patch(patch, "test.py")
+
+        await diff_view.show_diff("test.py", diff)
+        await pilot.pause()
+
+        search_input = diff_view.query_one("#diff-search-input", Input)
+        search_input.value = "  alpha  "
+        await pilot.pause()
+
+        assert calls == [(diff_view, "  alpha  ")]
+
+
+@pytest.mark.asyncio
+async def test_search_input_submit_delegates_to_search_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DiffView should keep search-submit policy inside the search module."""
+
+    patch = """@@ -1,2 +1,2 @@
+alpha
+beta"""
+    calls: list[tuple[DiffView, str]] = []
+
+    def handle_submitted_input(view: DiffView, value: str) -> None:
+        calls.append((view, value))
+
+    monkeypatch.setattr(
+        diff_view_module._search,
+        "handle_submitted_input",
+        handle_submitted_input,
+        raising=False,
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff = parse_patch(patch, "test.py")
+
+        await diff_view.show_diff("test.py", diff)
+        await pilot.press("/")
+        await pilot.pause()
+
+        search_input = diff_view.query_one("#diff-search-input", Input)
+        search_input.value = "alpha"
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert calls == [(diff_view, "alpha")]
+
+
+@pytest.mark.asyncio
+async def test_close_search_delegates_to_search_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DiffView should keep search-close policy inside the search module."""
+
+    calls: list[tuple[DiffView, bool]] = []
+
+    def close_search(view: DiffView, *, clear_query: bool) -> None:
+        calls.append((view, clear_query))
+
+    monkeypatch.setattr(
+        diff_view_module._search,
+        "close_search",
+        close_search,
+        raising=False,
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff = parse_patch("@@ -1,1 +1,1 @@\n alpha", "test.py")
+
+        await diff_view.show_diff("test.py", diff)
+        await pilot.pause()
+
+        diff_view._close_search(clear_query=True)
+
+        assert calls == [(diff_view, True)]
+
+
+@pytest.mark.asyncio
+async def test_start_search_delegates_to_search_module(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DiffView should keep search-open policy inside the search module."""
+
+    calls: list[DiffView] = []
+
+    def start_search(view: DiffView) -> None:
+        calls.append(view)
+
+    monkeypatch.setattr(
+        diff_view_module._search,
+        "start_search",
+        start_search,
+        raising=False,
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff = parse_patch("@@ -1,1 +1,1 @@\n alpha", "test.py")
+
+        await diff_view.show_diff("test.py", diff)
+        await pilot.pause()
+
+        diff_view.action_start_search()
+
+        assert calls == [diff_view]
 
 
 @pytest.mark.asyncio

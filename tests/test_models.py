@@ -1,14 +1,18 @@
 """Tests for data models."""
 
 from datetime import datetime, timezone
+from typing import Literal, get_args, get_origin, get_type_hints
 
 from rit.state.models import (
-    PRComment,
-    PRReview,
-    PRUser,
     CommentThread,
     NodeList,
+    PR,
+    PRComment,
+    PRReview,
+    ReviewRequest,
+    PRUser,
     ReviewThread,
+    ReviewThreadInfo,
     group_comments_into_threads,
 )
 
@@ -36,6 +40,44 @@ def make_comment(
         in_reply_to_id=in_reply_to_id,
         diff_hunk="@@ -10,3 +10,3 @@\n-old\n+new",
     )
+
+
+def test_review_thread_info_is_state_model() -> None:
+    info = ReviewThreadInfo(
+        thread_id="thread-1",
+        is_resolved=False,
+        path="src/app.py",
+        line=7,
+        root_comment_id=501,
+    )
+
+    assert info.thread_id == "thread-1"
+    assert info.root_comment_id == 501
+
+
+def test_model_validators_accept_unknown_json_values_without_any_contract() -> None:
+    validators = [
+        PRComment.parse_reply_to,
+        PRComment.parse_review_id,
+        ReviewRequest.parse_requested_reviewer,
+        PRReview.parse_state,
+    ]
+
+    assert [get_type_hints(validator)["v"] for validator in validators] == [
+        object,
+        object,
+        object,
+        object,
+    ]
+
+
+class TestNodeList:
+    """Tests for GraphQL connection list helpers."""
+
+    def test_from_nodes_materializes_iterables(self) -> None:
+        users = NodeList.from_nodes(PRUser(login=login) for login in ["alice", "bob"])
+
+        assert [user.login for user in users.nodes] == ["alice", "bob"]
 
 
 class TestPRComment:
@@ -140,6 +182,19 @@ class TestPRReview:
         assert review.created_at == datetime(
             2026, 6, 18, 6, 25, 36, tzinfo=timezone.utc
         )
+
+
+class TestPR:
+    """Tests for PR summary helpers."""
+
+    def test_state_display_type_matches_header_status_values(self) -> None:
+        getter = PR.state_display.fget
+        assert getter is not None
+
+        return_type = getter.__annotations__["return"]
+
+        assert get_origin(return_type) is Literal
+        assert get_args(return_type) == ("Open", "Merged", "Closed", "Draft")
 
 
 class TestReviewThread:

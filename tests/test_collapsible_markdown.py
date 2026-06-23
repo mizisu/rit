@@ -9,6 +9,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Vertical
 from textual.css.query import NoMatches
 
+import rit.ui.markdown_images as markdown_images_module
 from rit.ui.components.collapsible_markdown import (
     CopyableCodeBlock,
     DetailsBlock,
@@ -45,7 +46,7 @@ class TestParseDetailsBlocks:
 
     def test_none_input(self) -> None:
         """None input returns empty list."""
-        result = parse_details_blocks(None)  # type: ignore
+        result = parse_details_blocks(None)
         assert result == []
 
     def test_no_details_tag(self) -> None:
@@ -332,6 +333,23 @@ class TestParseMarkdownImages:
         assert image.alt == "Screenshot"
         assert image.src == "https://example.com/ui.png"
 
+    def test_html_image_parser_errors_are_not_silently_dropped(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class FailingParser:
+            attrs: dict[str, str] = {}
+
+            def feed(self, _tag: str) -> None:
+                raise RuntimeError("parser failed")
+
+        monkeypatch.setattr(markdown_images_module, "_ImgTagParser", FailingParser)
+
+        with pytest.raises(RuntimeError, match="parser failed"):
+            parse_markdown_image_parts(
+                '<img alt="Screenshot" src="https://example.com/ui.png">',
+            )
+
     def test_inline_markdown_badges_stay_markdown_text(self) -> None:
         body = (
             "## [![Quality Gate Failed](https://example.com/qg-failed-20px.png "
@@ -516,6 +534,7 @@ async def test_markdown_image_block_wraps_frame_to_preview_width() -> None:
         block_width = getattr(block.styles.width, "value", None)
         image_width = getattr(image_widget.styles.width, "value", None)
 
+        assert image_width is not None
         assert block_width == image_width + 2
         assert image_width >= 100
         assert len(app.query(".markdown-image-caption")) == 0
@@ -591,6 +610,8 @@ async def test_markdown_image_table_wraps_to_content_width() -> None:
         image_block_width = getattr(image_block.styles.width, "value", None)
         image_width = getattr(image_widget.styles.width, "value", None)
 
+        assert image_block_width is not None
+        assert image_width is not None
         assert table_width == image_block_width + 14
         assert image_width >= 100
 

@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Static
@@ -8,7 +10,22 @@ from tests.conftest import wait_until
 
 
 @pytest.mark.asyncio
-async def test_comment_card_can_delay_markdown_body_mount() -> None:
+async def test_comment_card_can_delay_markdown_body_mount(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduled_callbacks: list[tuple[float, Callable[[], None]]] = []
+
+    def capture_timer(
+        self: CommentCard,
+        delay: float,
+        callback: Callable[[], None],
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        scheduled_callbacks.append((delay, callback))
+
+    monkeypatch.setattr(CommentCard, "set_timer", capture_timer)
+
     class TestApp(App[None]):
         def compose(self) -> ComposeResult:
             yield CommentCard(
@@ -23,7 +40,11 @@ async def test_comment_card_can_delay_markdown_body_mount() -> None:
 
         assert len(app.query("MarkdownH1")) == 0
 
-        await wait_until(lambda: len(app.query("MarkdownH1")) == 1)
+        mount_delay, mount_callback = scheduled_callbacks.pop(0)
+        assert mount_delay == 0.01
+        mount_callback()
+
+        await wait_until(lambda: len(app.query("MarkdownH1")) == 1, timeout=2.0)
 
         assert len(app.query("MarkdownH1")) == 1
 
@@ -33,6 +54,18 @@ async def test_comment_card_shows_plain_preview_while_body_mount_is_delayed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(comment_card_module, "BODY_PREVIEW_RETIRE_DELAY", 0.01)
+    scheduled_callbacks: list[tuple[float, Callable[[], None]]] = []
+
+    def capture_timer(
+        self: CommentCard,
+        delay: float,
+        callback: Callable[[], None],
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        scheduled_callbacks.append((delay, callback))
+
+    monkeypatch.setattr(CommentCard, "set_timer", capture_timer)
 
     class TestApp(App[None]):
         def compose(self) -> ComposeResult:
@@ -53,15 +86,20 @@ async def test_comment_card_shows_plain_preview_while_body_mount_is_delayed(
         assert "first item" in text
         assert len(app.query("MarkdownH1")) == 0
 
-        await wait_until(lambda: len(app.query("MarkdownH1")) == 1)
+        mount_delay, mount_callback = scheduled_callbacks.pop(0)
+        assert mount_delay == 0.01
+        mount_callback()
+
+        await wait_until(lambda: len(app.query("MarkdownH1")) == 1, timeout=2.0)
 
         assert len(app.query(".comment-body-preview")) == 1
         assert len(app.query("MarkdownH1")) == 1
 
-        await wait_until(
-            lambda: len(app.query(".comment-body-preview")) == 0,
-            timeout=0.5,
-        )
+        retire_delay, retire_callback = scheduled_callbacks.pop(0)
+        assert retire_delay == 0.01
+        retire_callback()
+
+        await wait_until(lambda: len(app.query(".comment-body-preview")) == 0)
 
         assert len(app.query(".comment-body-preview")) == 0
 

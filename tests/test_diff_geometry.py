@@ -1,12 +1,15 @@
 """Tests for DiffView geometry helpers."""
 
 from rit.core.diff import parse_patch
+from rit.core.types import DiffHunk, DiffLine
 from rit.ui.widgets.diff_geometry import (
     FILE_DIFF_HEADER_HEIGHT,
     ViewportGeometry,
     build_diff_geometry,
     cursor_viewport_offset,
+    hunk_lines_for_window,
     line_index_at_vertical_offset,
+    merge_line_ranges,
     row_vertical_bounds,
     row_is_visible,
     scroll_target_for_row_viewport_offset,
@@ -208,4 +211,33 @@ def test_scroll_target_for_span_respects_vertical_scrolloff() -> None:
             scrolloff=2,
         )
         == 19
+    )
+
+
+def test_merge_line_ranges_sorts_and_coalesces_overlapping_ranges() -> None:
+    assert merge_line_ranges([(8, 9), (1, 2), (3, 5), (5, 7)]) == [(1, 9)]
+    assert merge_line_ranges([(4, 4), (8, 9), (6, 6)]) == [(4, 4), (6, 6), (8, 9)]
+    assert merge_line_ranges([]) == []
+
+
+def test_hunk_lines_for_window_slices_by_global_line_index() -> None:
+    lines = [
+        DiffLine(old_line_no=1, new_line_no=1, line_index=10),
+        DiffLine(old_line_no=2, new_line_no=2, line_index=11),
+        DiffLine(old_line_no=3, new_line_no=3, line_index=12),
+    ]
+    hunk = DiffHunk(old_start=1, old_count=3, new_start=1, new_count=3, lines=lines)
+
+    assert hunk_lines_for_window(hunk, None, None) == lines
+    assert hunk_lines_for_window(hunk, 11, 20) == lines[1:]
+    assert hunk_lines_for_window(hunk, 0, 10) == lines[:1]
+    assert hunk_lines_for_window(hunk, 20, 30) == []
+    assert hunk_lines_for_window(hunk, 12, 11) == []
+    assert (
+        hunk_lines_for_window(
+            DiffHunk(old_start=1, old_count=0, new_start=1, new_count=0),
+            0,
+            1,
+        )
+        == []
     )

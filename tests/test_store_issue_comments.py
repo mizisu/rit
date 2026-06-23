@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from rit.state.models import PRIssueComment, PRUser
+from rit.state.models import PR, PRIssueComment, PRUser
 from rit.state.store import PRStore
 
 
@@ -24,6 +24,7 @@ class FakeCommentService:
 @pytest.mark.asyncio
 async def test_submit_issue_comment_updates_store_state() -> None:
     store = PRStore(pr_number=123)
+    store.state.pr = PR(number=123)
     service = FakeCommentService()
     store._service = service  # type: ignore[assignment]
 
@@ -32,6 +33,8 @@ async def test_submit_issue_comment_updates_store_state() -> None:
     assert service.calls == [(123, "hello world")]
     assert comment.body == "hello world"
     assert store.state.issue_comments == [comment]
+    assert store.state.pr is not None
+    assert store.state.pr.issue_comments == [comment]
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@ from textual.app import App, ComposeResult
 
 from rit.core.diff import parse_patch
 from rit.state.models import NodeList, PRComment, ReviewThread
+from rit.ui.messages import Flash
 from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets.diff_view import DiffView
 
@@ -122,6 +123,77 @@ def test_resolve_line_index_falls_back_to_diff_hunk_region() -> None:
     )
 
     assert _comments._resolve_line_index(view, comment) == 1
+
+
+@pytest.mark.asyncio
+async def test_toggle_resolve_rolls_back_and_flashes_when_store_update_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread = _make_thread(line=2, original_line=2, side="RIGHT")
+    thread.id = "thread-1"
+    updates: list[bool] = []
+
+    class Store:
+        async def resolve_thread(self, thread_id: str, root_id: int) -> bool:
+            raise RuntimeError("mutation failed")
+
+    class View:
+        cursor_line = 0
+        store = Store()
+        _comment_threads_by_line: dict[int, list[ReviewThread]] = {}
+        messages: list[Flash] = []
+
+        def post_message(self, message: Flash) -> None:
+            self.messages.append(message)
+
+    view = View()
+    monkeypatch.setattr(_comments, "active_thread", lambda *_args: thread)
+    monkeypatch.setattr(
+        _comments,
+        "_update_thread_widget_resolved",
+        lambda _view, _line, _thread, is_resolved: updates.append(is_resolved),
+    )
+
+    await _comments.toggle_resolve(view)
+
+    assert updates == [True, False]
+    assert view.messages[-1].content == "Error: mutation failed"
+    assert view.messages[-1].style == "error"
+
+
+@pytest.mark.asyncio
+async def test_toggle_resolve_reraises_unexpected_success_flash_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread = _make_thread(line=2, original_line=2, side="RIGHT")
+    thread.id = "thread-1"
+    updates: list[bool] = []
+
+    class Store:
+        async def resolve_thread(self, thread_id: str, root_id: int) -> bool:
+            return True
+
+    class View:
+        cursor_line = 0
+        store = Store()
+        _comment_threads_by_line: dict[int, list[ReviewThread]] = {}
+
+        def post_message(self, message: Flash) -> None:
+            if message.style == "success":
+                raise RuntimeError("flash dispatch failed")
+
+    view = View()
+    monkeypatch.setattr(_comments, "active_thread", lambda *_args: thread)
+    monkeypatch.setattr(
+        _comments,
+        "_update_thread_widget_resolved",
+        lambda _view, _line, _thread, is_resolved: updates.append(is_resolved),
+    )
+
+    with pytest.raises(RuntimeError, match="flash dispatch failed"):
+        await _comments.toggle_resolve(view)
+
+    assert updates == [True]
 
 
 @pytest.mark.asyncio

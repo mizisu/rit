@@ -1,12 +1,58 @@
 import pytest
 from textual.app import App
 from textual.widgets import Input, OptionList
+from textual.widgets.option_list import OptionDoesNotExist
 
 from rit.ui.screens.multi_select_picker import (
     MultiSelectItem,
     MultiSelectPickerScreen,
     MultiSelectResult,
 )
+
+
+def test_multi_select_restore_highlight_falls_back_when_previous_option_is_missing() -> (
+    None
+):
+    screen = MultiSelectPickerScreen(
+        title="Edit assignees",
+        items=[],
+        selected_keys=set(),
+    )
+
+    class MissingOptionList:
+        highlighted: int | None = None
+        first_selected = False
+
+        def get_option_index(self, _option_id: str) -> int:
+            raise OptionDoesNotExist("missing")
+
+        def action_first(self) -> None:
+            self.first_selected = True
+
+    options = MissingOptionList()
+
+    screen._restore_highlight(options, "missing")
+
+    assert options.highlighted is None
+    assert options.first_selected is True
+
+
+def test_multi_select_restore_highlight_reraises_unexpected_option_errors() -> None:
+    screen = MultiSelectPickerScreen(
+        title="Edit assignees",
+        items=[],
+        selected_keys=set(),
+    )
+
+    class BrokenOptionList:
+        def get_option_index(self, _option_id: str) -> int:
+            raise RuntimeError("option list failed")
+
+        def action_first(self) -> None:
+            raise AssertionError("fallback should not hide unexpected errors")
+
+    with pytest.raises(RuntimeError, match="option list failed"):
+        screen._restore_highlight(BrokenOptionList(), "broken")
 
 
 @pytest.mark.asyncio

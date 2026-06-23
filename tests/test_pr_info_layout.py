@@ -4,9 +4,11 @@ from pathlib import Path
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.css.query import NoMatches
 
 from rit.state.store import PRStore
 from rit.ui.components.pr_info import PRInfo
+from rit.ui.components.pr_timeline import PRTimeline
 
 ROOT = Path(__file__).parents[1]
 
@@ -29,6 +31,39 @@ async def test_pr_info_groups_main_and_sidebar_in_centered_layout() -> None:
 
         assert main_scroll.parent is layout
         assert sidebar.parent is layout
+
+
+def test_pr_info_mount_ignores_missing_scroll_widgets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pr_info = PRInfo(PRStore())
+
+    def missing_widget(*_args: object, **_kwargs: object) -> object:
+        raise NoMatches("missing")
+
+    monkeypatch.setattr(pr_info, "query_one", missing_widget)
+
+    pr_info.on_mount()
+
+
+def test_pr_info_mount_reraises_unexpected_timeline_wiring_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pr_info = PRInfo(PRStore())
+
+    class BrokenTimeline:
+        def set_scroll_container(self, _container: object) -> None:
+            raise RuntimeError("timeline wiring failed")
+
+    def query_one(*args: object, **_kwargs: object) -> object:
+        if args == (PRTimeline,):
+            return BrokenTimeline()
+        return object()
+
+    monkeypatch.setattr(pr_info, "query_one", query_one)
+
+    with pytest.raises(RuntimeError, match="timeline wiring failed"):
+        pr_info.on_mount()
 
 
 def test_pr_info_css_uses_github_like_center_column() -> None:

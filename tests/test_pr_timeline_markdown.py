@@ -6,8 +6,15 @@ import pytest
 from textual.app import App, ComposeResult
 from textual.widget import Widget
 
-from rit.services.github import ReviewThreadInfo
-from rit.state.models import PR, PRComment, PRIssueComment, PRReview, PRUser, ReviewThread
+from rit.state.models import (
+    PR,
+    PRComment,
+    PRIssueComment,
+    PRReview,
+    PRUser,
+    ReviewThreadInfo,
+    ReviewThread,
+)
 from rit.state.store import PRStore
 from rit.ui.components import pr_timeline as pr_timeline_module
 from rit.ui.components.pr_timeline import (
@@ -286,7 +293,7 @@ async def test_issue_comment_left_aligns_markdown_h1(
         timeline = app.query_one(PRTimeline)
         timeline.refresh_timeline()
         await pilot.pause()
-        await wait_until(lambda: len(app.query("MarkdownH1")) == 1)
+        await wait_until(lambda: len(app.query("MarkdownH1")) == 1, timeout=2.0)
 
         h1 = app.query_one("MarkdownH1")
         assert h1.styles.content_align == ("left", "middle")

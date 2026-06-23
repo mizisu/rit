@@ -225,6 +225,7 @@ async def test_upsert_pending_inline_comment_syncs_pending_review() -> None:
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = FakeInlineCommentService()
     store._service = service  # type: ignore[assignment]
+    previous_version = store.pending_review_version
 
     draft = await store.upsert_pending_inline_comment(
         "hello",
@@ -238,6 +239,7 @@ async def test_upsert_pending_inline_comment_syncs_pending_review() -> None:
         [("src/app.py", 7, "RIGHT", "hello")]
     ]
     assert store.state.pending_review_id == 100
+    assert store.pending_review_version == previous_version + 2
 
 
 @pytest.mark.asyncio
@@ -439,6 +441,7 @@ async def test_load_pr_data_restores_pending_review_comments() -> None:
 
     service.get_pr_all = get_pr_all  # type: ignore[method-assign]
     store._service = service  # type: ignore[assignment]
+    previous_version = store.pending_review_version
 
     await store._load_pr_data()
 
@@ -448,3 +451,4 @@ async def test_load_pr_data_restores_pending_review_comments() -> None:
         store.state.pending_review_comments[0]
     ]
     assert store.state.pending_review_comments[0].body == "hello"
+    assert store.pending_review_version == previous_version + 1

@@ -12,7 +12,7 @@ from textual.widgets import Static
 from rit.core.diff import parse_patch
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.services.github import PRDiscussion
-from rit.state.models import PR, PRFile
+from rit.state.models import LoadingState, PR, PRFile
 from rit.state.store import PRStore
 from rit.ui.components.file_changes import FileChanges
 from rit.ui.widgets.diff_render import _create_file_header_widget
@@ -103,6 +103,22 @@ class FakeFilesAndStreamingService(FakeFilesService):
         yield self.section
 
 
+class FakeEmptyFileSourcesService(FakeFilesService):
+    def __init__(self) -> None:
+        super().__init__({})
+        self.stream_calls: list[int] = []
+        self.raw_diff_calls: list[int] = []
+
+    async def iter_pr_diff_sections(self, pr_number: int):
+        self.stream_calls.append(pr_number)
+        if False:
+            yield ""
+
+    async def get_pr_diff_text(self, pr_number: int) -> str:
+        self.raw_diff_calls.append(pr_number)
+        return ""
+
+
 def test_store_get_file_diff_parses_lazily_and_caches_status_metadata() -> None:
     patch = "@@ -1,1 +1,1 @@\n-old\n+new"
     store = PRStore()
@@ -122,6 +138,35 @@ def test_store_get_file_diff_parses_lazily_and_caches_status_metadata() -> None:
     assert diff.old_filename == "old.py"
     assert diff.is_new is True
     assert store.get_file_diff("new.py") is diff
+
+
+def test_sidebar_width_watch_ignores_missing_file_tree_before_mount() -> None:
+    FileChanges(PRStore()).watch_sidebar_width(42)
+
+
+def test_sidebar_width_watch_reraises_unexpected_style_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BrokenStyles:
+        @property
+        def width(self) -> int:
+            return 35
+
+        @width.setter
+        def width(self, _value: int) -> None:
+            raise RuntimeError("style update failed")
+
+    class BrokenFileTree:
+        styles = BrokenStyles()
+
+    monkeypatch.setattr(
+        FileChanges,
+        "file_tree",
+        property(lambda _self: BrokenFileTree()),
+    )
+
+    with pytest.raises(RuntimeError, match="style update failed"):
+        FileChanges(PRStore()).watch_sidebar_width(42)
 
 
 @pytest.mark.asyncio
@@ -340,6 +385,27 @@ async def test_store_load_files_switches_to_raw_stream_when_rest_limit_is_exceed
     assert service.multi_page_calls == []
     assert service.stream_calls == [123]
     assert store.state.files[-1].filename == "raw.py"
+
+
+@pytest.mark.asyncio
+async def test_store_load_files_marks_error_when_all_file_sources_are_empty() -> None:
+    service = FakeEmptyFileSourcesService()
+    messages = []
+    store = PRStore(pr_number=123)
+    store._service = cast(Any, service)
+    store.set_message_sink(messages.append)
+
+    await store.load_files()
+
+    assert service.page_calls == [(123, 1, 100)]
+    assert service.stream_calls == [123]
+    assert service.raw_diff_calls == [123]
+    assert store.state.files_loading == LoadingState.ERROR
+    assert store.state.error == "No changed files could be loaded"
+    assert messages[-1] == PRStore.ErrorOccurred(
+        error="No changed files could be loaded",
+        source="load_files",
+    )
 
 
 class DummySettings:
@@ -662,6 +728,31 @@ def test_file_header_prefers_visible_file_list_over_stale_lookup_cache() -> None
     header_text = str(getattr(header.content, "plain", header.content))
     assert "+12" in header_text
     assert "-3" in header_text
+
+
+def test_file_header_width_accounts_for_rename_display_path_without_viewport() -> None:
+    view = DiffView(store=PRStore())
+    view.split = False
+
+    header = _create_file_header_widget(
+        view,
+        hunk_index=0,
+        hunk=DiffHunk(
+            old_start=1,
+            old_count=1,
+            new_start=1,
+            new_count=1,
+            starts_file=True,
+            file_path="new.py",
+            file_old_path="old/location.py",
+            file_additions=1,
+            file_deletions=0,
+        ),
+    )
+
+    assert isinstance(header, Static)
+    header_text = str(getattr(header.content, "plain", header.content))
+    assert header_text == "▾ +1 old/location.py -> new.py"
 
 
 @pytest.mark.asyncio
