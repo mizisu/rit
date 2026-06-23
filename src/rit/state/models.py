@@ -1,20 +1,60 @@
 """PR data models matching GitHub GraphQL/REST response structures."""
 
+from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Generic, Literal, TypeVar
+from typing import Generic, Literal, TypeVar
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from rit.core.datetime_utils import datetime_min_utc, datetime_sort_key
 
+
+__all__ = (
+    "CommentThread",
+    "FileViewedState",
+    "LoadingState",
+    "NodeList",
+    "PR",
+    "PRComment",
+    "PRFile",
+    "PRIssueComment",
+    "PRLabel",
+    "PRReview",
+    "PRState",
+    "PRTeam",
+    "PRUser",
+    "PendingReviewComment",
+    "ReviewRequest",
+    "ReviewState",
+    "ReviewThread",
+    "ReviewThreadInfo",
+    "group_comments_into_threads",
+)
+
+
 T = TypeVar("T")
+
+
+def _dict_value(value: object, key: str) -> object | None:
+    if not isinstance(value, dict):
+        return None
+    for item_key, item_value in value.items():
+        if item_key == key:
+            return item_value
+    return None
 
 
 class NodeList(BaseModel, Generic[T]):
     """GraphQL Connection's { nodes: [...] } wrapper."""
 
     nodes: list[T] = Field(default_factory=list)
+
+    @classmethod
+    def from_nodes(cls, nodes: Iterable[T]) -> "NodeList[T]":
+        """Return a connection wrapper from any iterable of nodes."""
+        return cls(nodes=list(nodes))
 
 
 class LoadingState(Enum):
@@ -42,6 +82,17 @@ class FileViewedState(Enum):
     UNVIEWED = "UNVIEWED"
     VIEWED = "VIEWED"
     DISMISSED = "DISMISSED"
+
+
+@dataclass
+class ReviewThreadInfo:
+    """Store cache entry for a review thread keyed by root comment."""
+
+    thread_id: str
+    is_resolved: bool
+    path: str
+    line: int | None
+    root_comment_id: int
 
 
 class PRUser(BaseModel):
@@ -129,16 +180,16 @@ class PRComment(BaseModel):
 
     @field_validator("in_reply_to_id", mode="before")
     @classmethod
-    def parse_reply_to(cls, v: Any) -> int | None:
+    def parse_reply_to(cls, v: object) -> object:
         if isinstance(v, dict):
-            return v.get("databaseId")
+            return _dict_value(v, "databaseId")
         return v
 
     @field_validator("pull_request_review_id", mode="before")
     @classmethod
-    def parse_review_id(cls, v: Any) -> int | None:
+    def parse_review_id(cls, v: object) -> object:
         if isinstance(v, dict):
-            return v.get("databaseId")
+            return _dict_value(v, "databaseId")
         return v
 
 
@@ -171,13 +222,13 @@ class ReviewRequest(BaseModel):
 
     @field_validator("requested_reviewer", mode="before")
     @classmethod
-    def parse_requested_reviewer(cls, v: Any) -> PRUser | PRTeam | None:
+    def parse_requested_reviewer(cls, v: object) -> PRUser | PRTeam | None:
         if isinstance(v, (PRUser, PRTeam)) or v is None:
             return v
         if isinstance(v, dict):
-            if v.get("login"):
+            if _dict_value(v, "login"):
                 return PRUser.model_validate(v)
-            if v.get("slug") or v.get("name"):
+            if _dict_value(v, "slug") or _dict_value(v, "name"):
                 return PRTeam.model_validate(v)
         return None
 
@@ -267,7 +318,7 @@ class PRReview(BaseModel):
 
     @field_validator("state", mode="before")
     @classmethod
-    def parse_state(cls, v: Any) -> ReviewState:
+    def parse_state(cls, v: object) -> object:
         if isinstance(v, str):
             try:
                 return ReviewState(v)
@@ -411,7 +462,7 @@ class PR(BaseModel):
         return PRState.OPEN
 
     @property
-    def state_display(self) -> str:
+    def state_display(self) -> Literal["Open", "Merged", "Closed", "Draft"]:
         pr_state = self.pr_state
         if pr_state == PRState.MERGED:
             return "Merged"
