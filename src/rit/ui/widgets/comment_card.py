@@ -10,6 +10,12 @@ from textual.widgets import Static
 
 from rit.ui.collapsible_markdown import mount_markdown_with_details
 
+__all__ = (
+    "BODY_PREVIEW_RETIRE_DELAY",
+    "CommentCard",
+)
+
+
 BODY_PREVIEW_RETIRE_DELAY = 0.8
 
 

@@ -7,6 +7,7 @@ from typing import Literal
 from textual import events, on
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import var
 from textual.widgets import Rule, Static
@@ -14,6 +15,9 @@ from textual.widgets import Rule, Static
 from rit.state.reviewer_status import ReviewerDisplayState, derive_reviewer_states
 from rit.state.store import PRStore
 from rit.ui.components.pr_timeline import PRTimeline
+
+__all__ = ("PRInfo",)
+
 
 _CSS_PATH = Path(__file__).parent / "pr_info.tcss"
 _DEFAULT_CSS = _CSS_PATH.read_text() if _CSS_PATH.exists() else ""
@@ -65,7 +69,7 @@ class PRInfo(Container):
             main_scroll = self.query_one("#main-scroll", VerticalScroll)
             timeline = self.query_one(PRTimeline)
             timeline.set_scroll_container(main_scroll)
-        except Exception:
+        except NoMatches:
             pass
 
         if self.store.state.pr:

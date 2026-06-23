@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, cast
+from typing import Literal
 
 from textual import on
 from textual.app import ComposeResult
@@ -9,6 +9,8 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import OptionList, Static
 from textual.widgets.option_list import Option
+
+__all__ = ("BranchPickerScreen",)
 
 
 class BranchPickerScreen(ModalScreen[Literal["head", "base"] | None]):
@@ -90,5 +92,7 @@ class BranchPickerScreen(ModalScreen[Literal["head", "base"] | None]):
     @on(OptionList.OptionSelected, "#branch-options")
     def on_option_selected(self, event: OptionList.OptionSelected) -> None:
         option_id = event.option_id
-        if option_id in {"head", "base"}:
-            self.dismiss(cast(Literal["head", "base"], option_id))
+        if option_id == "head":
+            self.dismiss("head")
+        elif option_id == "base":
+            self.dismiss("base")

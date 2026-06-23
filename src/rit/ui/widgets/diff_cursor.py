@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from typing import TYPE_CHECKING, Literal
 
 from textual.containers import VerticalScroll
@@ -11,11 +12,17 @@ from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets import diff_geometry as _geometry
 from rit.ui.widgets import diff_search as _search
+from rit.ui.widgets import diff_cursor_update as _cursor_update
 from rit.ui.widgets import diff_virtual as _virtual
+from rit.ui.widgets import diff_visual_mode as _visual_mode
+from rit.ui.widgets import diff_word_motion as _word_motion
 from rit.ui.widgets.diff_types import RenderedRow, SplitDiffBlock, UnifiedDiffBlock
 
 if TYPE_CHECKING:
     from rit.ui.widgets.diff_view import DiffView
+
+
+__all__ = ()
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +254,10 @@ def _jump_half_page(view: DiffView, direction: int) -> None:
 def _cursor_left(view: DiffView) -> None:
     if not view._all_lines:
         return
-    if view.visual_mode and view.visual_type == "line":
+    if not _visual_mode.allows_column_motion(
+        visual_mode=view.visual_mode,
+        visual_type=view.visual_type,
+    ):
         return
     count = _consume_count(view)
     if view.cursor_column > 0:
@@ -257,7 +267,10 @@ def _cursor_left(view: DiffView) -> None:
 def _cursor_right(view: DiffView) -> None:
     if not view._all_lines:
         return
-    if view.visual_mode and view.visual_type == "line":
+    if not _visual_mode.allows_column_motion(
+        visual_mode=view.visual_mode,
+        visual_type=view.visual_type,
+    ):
         return
     if view.cursor_line >= len(view._all_lines):
         return
@@ -274,7 +287,10 @@ def _cursor_right(view: DiffView) -> None:
 def _start_of_line(view: DiffView) -> None:
     if not view._all_lines:
         return
-    if view.visual_mode and view.visual_type == "line":
+    if not _visual_mode.allows_column_motion(
+        visual_mode=view.visual_mode,
+        visual_type=view.visual_type,
+    ):
         return
     _move_cursor(view, column=0)
 
@@ -282,7 +298,10 @@ def _start_of_line(view: DiffView) -> None:
 def _first_non_blank(view: DiffView) -> None:
     if not view._all_lines:
         return
-    if view.visual_mode and view.visual_type == "line":
+    if not _visual_mode.allows_column_motion(
+        visual_mode=view.visual_mode,
+        visual_type=view.visual_type,
+    ):
         return
     if not (0 <= view.cursor_line < len(view._all_lines)):
         return
@@ -296,7 +315,10 @@ def _first_non_blank(view: DiffView) -> None:
 def _end_of_line(view: DiffView) -> None:
     if not view._all_lines:
         return
-    if view.visual_mode and view.visual_type == "line":
+    if not _visual_mode.allows_column_motion(
+        visual_mode=view.visual_mode,
+        visual_type=view.visual_type,
+    ):
         return
     if not (0 <= view.cursor_line < len(view._all_lines)):
         return
@@ -356,7 +378,7 @@ def _next_word_once(view: DiffView) -> bool:
     if not view._all_lines or view.cursor_line >= len(view._all_lines):
         return False
     text = view._get_cursor_text()
-    next_pos = _find_next_word_start(text, view.cursor_column)
+    next_pos = _word_motion.next_word_start(text, view.cursor_column)
     if next_pos is not None:
         return _move_cursor(view, column=next_pos)
 
@@ -373,7 +395,7 @@ def _next_word_once(view: DiffView) -> bool:
                 column=0,
                 scroll_in_visual=view.visual_mode,
             )
-        first_word_pos = _find_first_word(next_text)
+        first_word_pos = _word_motion.first_word_start(next_text)
         if first_word_pos < len(next_text):
             return _move_cursor(
                 view,
@@ -389,7 +411,7 @@ def _prev_word_once(view: DiffView) -> bool:
     if not view._all_lines or view.cursor_line >= len(view._all_lines):
         return False
     text = view._get_cursor_text()
-    prev_pos = _find_prev_word_start(text, view.cursor_column)
+    prev_pos = _word_motion.previous_word_start(text, view.cursor_column)
     if prev_pos is not None:
         return _move_cursor(view, column=prev_pos)
 
@@ -406,7 +428,7 @@ def _prev_word_once(view: DiffView) -> bool:
                 column=0,
                 scroll_in_visual=view.visual_mode,
             )
-        prev_word_start = _find_last_word_start(prev_text)
+        prev_word_start = _word_motion.last_word_start(prev_text)
         if prev_word_start is not None:
             return _move_cursor(
                 view,
@@ -422,7 +444,7 @@ def _end_word_once(view: DiffView) -> bool:
     if not view._all_lines or view.cursor_line >= len(view._all_lines):
         return False
     text = view._get_cursor_text()
-    end_pos = _find_next_word_end(text, view.cursor_column)
+    end_pos = _word_motion.next_word_end(text, view.cursor_column)
     if end_pos is not None:
         return _move_cursor(view, column=end_pos)
 
@@ -431,10 +453,10 @@ def _end_word_once(view: DiffView) -> bool:
     for target_row in rows[current + 1 :]:
         pane = _pane_for_row(view, target_row)
         next_text = _get_cursor_text_for_target(view, target_row.line_index, pane)
-        first_word_pos = _find_first_word(next_text)
+        first_word_pos = _word_motion.first_word_start(next_text)
         if first_word_pos >= len(next_text):
             continue
-        end_pos = _find_next_word_end(next_text, first_word_pos - 1)
+        end_pos = _word_motion.next_word_end(next_text, first_word_pos - 1)
         return _move_cursor(
             view,
             line=target_row.line_index,
@@ -445,104 +467,10 @@ def _end_word_once(view: DiffView) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# Word boundary helpers
-# ---------------------------------------------------------------------------
-
-
-def _is_word_char(char: str) -> bool:
-    return char.isalnum() or char == "_"
-
-
 def _pane_for_row(view: DiffView, row: RenderedRow) -> Literal["old", "new"]:
     if row.side == "auto":
         return view.cursor_pane
     return row.side
-
-
-def _find_first_word(text: str) -> int:
-    pos = 0
-    while pos < len(text) and text[pos].isspace():
-        pos += 1
-    return pos
-
-
-def _find_next_word_start(text: str, pos: int) -> int | None:
-    if pos >= len(text) - 1:
-        return None
-    current_pos = pos
-    if _is_word_char(text[current_pos]):
-        while current_pos < len(text) and _is_word_char(text[current_pos]):
-            current_pos += 1
-    elif not text[current_pos].isspace():
-        while (
-            current_pos < len(text)
-            and not text[current_pos].isspace()
-            and not _is_word_char(text[current_pos])
-        ):
-            current_pos += 1
-    while current_pos < len(text) and text[current_pos].isspace():
-        current_pos += 1
-    return current_pos if current_pos < len(text) else None
-
-
-def _find_prev_word_start(text: str, pos: int) -> int | None:
-    if pos <= 0:
-        return None
-    current_pos = pos - 1
-    while current_pos > 0 and text[current_pos].isspace():
-        current_pos -= 1
-    if _is_word_char(text[current_pos]):
-        while current_pos > 0 and _is_word_char(text[current_pos - 1]):
-            current_pos -= 1
-    else:
-        while (
-            current_pos > 0
-            and not text[current_pos - 1].isspace()
-            and not _is_word_char(text[current_pos - 1])
-        ):
-            current_pos -= 1
-    return current_pos
-
-
-def _find_next_word_end(text: str, pos: int) -> int | None:
-    if pos >= len(text) - 1:
-        return None
-    current_pos = pos + 1
-    while current_pos < len(text) and text[current_pos].isspace():
-        current_pos += 1
-    if current_pos >= len(text):
-        return None
-    if _is_word_char(text[current_pos]):
-        while current_pos < len(text) - 1 and _is_word_char(text[current_pos + 1]):
-            current_pos += 1
-    else:
-        while (
-            current_pos < len(text) - 1
-            and not text[current_pos + 1].isspace()
-            and not _is_word_char(text[current_pos + 1])
-        ):
-            current_pos += 1
-    return current_pos
-
-
-def _find_last_word_start(text: str) -> int | None:
-    current_pos = len(text) - 1
-    while current_pos >= 0 and text[current_pos].isspace():
-        current_pos -= 1
-    if current_pos < 0:
-        return None
-    if _is_word_char(text[current_pos]):
-        while current_pos > 0 and _is_word_char(text[current_pos - 1]):
-            current_pos -= 1
-    else:
-        while (
-            current_pos > 0
-            and not text[current_pos - 1].isspace()
-            and not _is_word_char(text[current_pos - 1])
-        ):
-            current_pos -= 1
-    return current_pos
 
 
 # ---------------------------------------------------------------------------
@@ -865,8 +793,8 @@ def _flush_cursor_ui_now_if_safe(view: DiffView) -> None:
 def _queue_cursor_ui_flush(
     view: DiffView,
     *,
-    cursor_lines: set[int] | None = None,
-    selection_dirty_lines: set[int] | None = None,
+    cursor_lines: Collection[int] | None = None,
+    selection_dirty_lines: Collection[int] | None = None,
     selection_full_refresh: bool = False,
     sync_search_match: bool = False,
     update_status_line: bool = False,
@@ -878,23 +806,24 @@ def _queue_cursor_ui_flush(
             view._update_status_line()
         return
 
-    if cursor_lines:
-        view._cursor_ui.dirty_lines.update(
-            line_idx
-            for line_idx in cursor_lines
-            if 0 <= line_idx < len(view._all_lines)
-        )
-    if selection_dirty_lines:
-        view._cursor_ui.selection_dirty.update(
-            line_idx
-            for line_idx in selection_dirty_lines
-            if 0 <= line_idx < len(view._all_lines)
-        )
-    if selection_full_refresh:
+    request = _cursor_update.cursor_flush_request(
+        line_count=len(view._all_lines),
+        cursor_lines=cursor_lines,
+        selection_dirty_lines=selection_dirty_lines,
+        selection_full_refresh=selection_full_refresh,
+        sync_search_match=sync_search_match,
+        update_status_line=update_status_line,
+    )
+
+    if request.cursor_lines:
+        view._cursor_ui.dirty_lines.update(request.cursor_lines)
+    if request.selection_dirty_lines:
+        view._cursor_ui.selection_dirty.update(request.selection_dirty_lines)
+    if request.selection_full_refresh:
         view._cursor_ui.selection_full_refresh = True
-    if sync_search_match:
+    if request.sync_search_match:
         view._cursor_ui.sync_search = True
-    if update_status_line:
+    if request.update_status_line:
         view._cursor_ui.update_status = True
 
     if view._cursor_ui.flush_pending:
@@ -902,6 +831,20 @@ def _queue_cursor_ui_flush(
 
     view._cursor_ui.flush_pending = True
     view.call_next(view._flush_queued_cursor_ui_updates)
+
+
+def _queue_cursor_update(
+    view: DiffView,
+    update: _cursor_update.CursorRepaintUpdate,
+) -> None:
+    queue_update = _cursor_update.cursor_queue_update(update)
+    _queue_cursor_ui_flush(
+        view,
+        cursor_lines=queue_update.cursor_lines,
+        selection_dirty_lines=queue_update.selection_dirty_lines,
+        sync_search_match=queue_update.sync_search_match,
+        update_status_line=queue_update.update_status_line,
+    )
 
 
 def _flush_queued_cursor_ui_updates(view: DiffView) -> None:
@@ -922,11 +865,12 @@ def _flush_queued_cursor_ui_updates(view: DiffView) -> None:
     if not view.is_mounted:
         return
 
-    if view.visual_mode:
-        if selection_full_refresh:
-            cursor_lines.clear()
-        elif selection_dirty_lines:
-            cursor_lines.difference_update(selection_dirty_lines)
+    cursor_lines = _cursor_update.cursor_lines_for_flush(
+        cursor_lines=cursor_lines,
+        selection_dirty_lines=selection_dirty_lines,
+        selection_full_refresh=selection_full_refresh,
+        visual_mode=view.visual_mode,
+    )
 
     if cursor_lines:
         _blocks._refresh_grouped_blocks_for_lines(view, cursor_lines)
@@ -965,45 +909,38 @@ def _apply_cursor_move_side_effects(
     new_pane: Literal["old", "new"],
     scroll_in_visual: bool,
 ) -> None:
-    line_changed = old_line != new_line
-    column_changed = old_column != new_column
-    pane_changed = old_pane != new_pane
+    move_update = _cursor_update.cursor_move_update(
+        old_line=old_line,
+        new_line=new_line,
+        old_column=old_column,
+        new_column=new_column,
+        old_pane=old_pane,
+        new_pane=new_pane,
+        visual_mode=view.visual_mode,
+        search_query=view._search_query,
+    )
 
-    dirty_cursor_lines = {new_line}
-    if line_changed:
-        dirty_cursor_lines.add(old_line)
+    if move_update.line_changed:
         hunk_index = view._get_hunk_index_for_line(new_line)
         if hunk_index is not None and hunk_index != view.current_hunk_index:
             view.current_hunk_index = hunk_index
         _virtual._maybe_update_virtual_window(view, new_line)
         _comments.update_cursor_highlight(view, old_line, new_line)
 
-    dirty_lines: set[int] = set()
-    if view.visual_mode:
-        dirty_lines = {new_line}
-        if line_changed:
-            dirty_lines.add(old_line)
-        if scroll_in_visual and (line_changed or pane_changed):
-            if not view._cursor_ui.suppress_scroll:
-                _scroll_to_cursor(view)
-    else:
-        if line_changed or pane_changed:
-            if not view._cursor_ui.suppress_scroll:
-                _scroll_to_cursor(view)
+    scroll_update = _cursor_update.cursor_move_scroll_update(
+        move_update,
+        visual_mode=view.visual_mode,
+        scroll_in_visual=scroll_in_visual,
+        suppress_scroll=view._cursor_ui.suppress_scroll,
+    )
 
-    if column_changed or pane_changed:
-        if not view._cursor_ui.suppress_scroll:
-            _scroll_to_cursor_horizontal(view)
+    if scroll_update.scroll_vertical:
+        _scroll_to_cursor(view)
+    if scroll_update.scroll_horizontal:
+        _scroll_to_cursor_horizontal(view)
 
-    if line_changed or pane_changed or column_changed:
-        _queue_cursor_ui_flush(
-            view,
-            cursor_lines=dirty_cursor_lines,
-            selection_dirty_lines=dirty_lines if view.visual_mode else None,
-            sync_search_match=True,
-            update_status_line=(line_changed or pane_changed)
-            or (column_changed and bool(view._search_query)),
-        )
+    if move_update.changed:
+        _queue_cursor_update(view, move_update)
 
 
 def _move_cursor(
@@ -1036,10 +973,10 @@ def _move_cursor(
 
     target_text = _get_cursor_text_for_target(view, target_line, target_side)
     requested_column = old_column if column is None else column
-    if target_text:
-        target_column = max(0, min(requested_column, len(target_text) - 1))
-    else:
-        target_column = 0
+    target_column = _cursor_update.clamp_cursor_column(
+        requested_column=requested_column,
+        text_length=len(target_text),
+    )
 
     if (
         target_line == old_line
@@ -1128,10 +1065,10 @@ def _move_cursor_rows(
 
 def _clamp_cursor_column_to_current_row(view: DiffView) -> None:
     text = view._get_cursor_text()
-    if text:
-        view.cursor_column = min(view.cursor_column, len(text) - 1)
-    else:
-        view.cursor_column = 0
+    view.cursor_column = _cursor_update.clamp_cursor_column(
+        requested_column=view.cursor_column,
+        text_length=len(text),
+    )
 
 
 def _first_row_for_line(view: DiffView, line_index: int) -> RenderedRow | None:

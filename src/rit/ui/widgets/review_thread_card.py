@@ -14,6 +14,11 @@ from rit.state.models import PRComment
 from rit.ui.icons import get_file_icon
 from rit.ui.widgets.comment_card import CommentCard
 
+__all__ = (
+    "ReviewThreadCard",
+    "ReviewThreadItem",
+)
+
 
 class ReviewThreadCard(Vertical):
     DEFAULT_CSS = """

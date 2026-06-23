@@ -11,6 +11,20 @@ from textual.widgets import Button, Markdown, Collapsible, Static
 from rit.ui.markdown_images import ImageFetcher, mount_markdown_image_parts
 from rit.ui.messages import Flash
 
+__all__ = (
+    "CopyableCodeBlock",
+    "DetailsBlock",
+    "LAZY_LOAD_THRESHOLD",
+    "LazyCollapsible",
+    "MarkdownCodePart",
+    "MarkdownPart",
+    "mount_markdown_code_parts",
+    "mount_markdown_with_details",
+    "parse_details_blocks",
+    "parse_fenced_code_blocks",
+)
+
+
 # Threshold for lazy loading large content (in characters)
 LAZY_LOAD_THRESHOLD = 2000
 
@@ -158,7 +172,7 @@ def _find_matching_close_tag(text: str, start_pos: int) -> int:
     return -1
 
 
-def parse_details_blocks(body: str) -> list[MarkdownPart]:
+def parse_details_blocks(body: str | None) -> list[MarkdownPart]:
     if not body:
         return []
 

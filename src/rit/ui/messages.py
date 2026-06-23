@@ -4,6 +4,11 @@ from typing import Literal
 from textual.content import Content
 from textual.message import Message
 
+__all__ = (
+    "Flash",
+    "SettingChanged",
+)
+
 
 @dataclass
 class Flash(Message):

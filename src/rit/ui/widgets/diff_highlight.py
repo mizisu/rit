@@ -6,6 +6,7 @@ import asyncio
 from functools import partial
 from typing import TYPE_CHECKING
 
+from textual.message_pump import NoActiveAppError
 
 from rit.core.highlighting import (
     highlight_lines_for_diff,
@@ -21,6 +22,9 @@ if TYPE_CHECKING:
     pass
 
 
+__all__ = ()
+
+
 async def _prewarm_highlighter(view) -> None:
     await asyncio.to_thread(prewarm_highlighter)
 
@@ -28,7 +32,7 @@ async def _prewarm_highlighter(view) -> None:
 def _current_highlight_dark_mode(view) -> bool:
     try:
         theme = view.app.available_themes.get(view.app.theme)
-    except Exception:
+    except NoActiveAppError:
         return True
     if theme is None:
         return True

@@ -9,9 +9,16 @@ from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Input, OptionList, Static
-from textual.widgets.option_list import Option
+from textual.widgets.option_list import Option, OptionDoesNotExist
 
 from rit.state.models import PRFile
+
+__all__ = (
+    "FilePickerMatch",
+    "FilePickerScreen",
+    "rank_file_matches",
+)
+
 
 MAX_VISIBLE_MATCHES = 200
 MATCH_STYLE = "bold cyan"
@@ -330,7 +337,7 @@ class FilePickerScreen(ModalScreen[str | None]):
             try:
                 options.highlighted = options.get_option_index(option_id)
                 return
-            except Exception:
+            except OptionDoesNotExist:
                 pass
         options.action_first()
 

@@ -20,6 +20,20 @@ from rit.ui.widgets.diff_visual import (
     SyncedCodeScroll,
 )
 
+__all__ = (
+    "CursorUIState",
+    "DEFAULT_DIFF_LAYOUT",
+    "DiffLayout",
+    "DiffSearchMatch",
+    "HighlightState",
+    "RenderedRow",
+    "SplitBlockLineStaticData",
+    "SplitDiffBlock",
+    "UnifiedBlockRowStaticData",
+    "UnifiedDiffBlock",
+    "VirtualState",
+)
+
 
 @dataclass(frozen=True)
 class RenderedRow:

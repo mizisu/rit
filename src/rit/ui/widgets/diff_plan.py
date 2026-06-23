@@ -8,6 +8,13 @@ from typing import Literal
 from rit.core.types import DiffLine, FileDiff
 from rit.ui.widgets.diff_types import RenderedRow
 
+__all__ = (
+    "DiffPlan",
+    "RenderedRowsPlan",
+    "build_diff_plan",
+    "build_rendered_rows",
+)
+
 
 @dataclass(frozen=True)
 class RenderedRowsPlan:

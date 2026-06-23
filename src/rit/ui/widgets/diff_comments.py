@@ -29,6 +29,30 @@ if TYPE_CHECKING:
     from rit.ui.widgets.diff_view import DiffView
 
 
+__all__ = (
+    "COLLAPSED_THREAD_HEIGHT",
+    "COMMENT_HEIGHT_ESTIMATE",
+    "PENDING_DRAFT_HEIGHT_ESTIMATE",
+    "active_comment_widget",
+    "active_pending_draft",
+    "active_thread",
+    "build_comment_map",
+    "clear_state",
+    "comment_widgets_in_order",
+    "estimate_pending_draft_height",
+    "estimate_thread_height",
+    "mount_comments_for_line",
+    "mount_pending_drafts_for_line",
+    "mount_side_aware_widget",
+    "next_comment",
+    "prev_comment",
+    "toggle_resolve",
+    "total_comments_at_line",
+    "try_toggle_current",
+    "update_cursor_highlight",
+)
+
+
 # ---------------------------------------------------------------------------
 # Height estimation for virtual layout
 # ---------------------------------------------------------------------------
@@ -713,20 +737,18 @@ async def toggle_resolve(view: DiffView) -> None:
             success = await view.store.resolve_thread(thread_id, root_id)
         else:
             success = await view.store.unresolve_thread(thread_id, root_id)
-
-        if success:
-            verb = "Resolved" if new_resolved else "Unresolved"
-            view.post_message(Flash(f"{verb} thread", style="success", duration=2.0))
-        else:
-            _update_thread_widget_resolved(
-                view, view.cursor_line, thread, not new_resolved
-            )
-            view.post_message(
-                Flash("Failed to toggle resolve", style="error", duration=3.0)
-            )
     except Exception as e:
         _update_thread_widget_resolved(view, view.cursor_line, thread, not new_resolved)
         view.post_message(Flash(f"Error: {e}", style="error", duration=3.0))
+        return
+
+    if success:
+        verb = "Resolved" if new_resolved else "Unresolved"
+        view.post_message(Flash(f"{verb} thread", style="success", duration=2.0))
+        return
+
+    _update_thread_widget_resolved(view, view.cursor_line, thread, not new_resolved)
+    view.post_message(Flash("Failed to toggle resolve", style="error", duration=3.0))
 
 
 def _update_thread_widget_resolved(

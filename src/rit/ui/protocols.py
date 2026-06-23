@@ -1,5 +1,7 @@
 from typing import Protocol, runtime_checkable
 
+__all__ = ("NavigableProtocol",)
+
 
 @runtime_checkable
 class NavigableProtocol(Protocol):

@@ -8,6 +8,7 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import reactive, var
 from textual.widgets import Input, Static, Tree
@@ -18,6 +19,9 @@ from rit.ui.messages import Flash
 
 if TYPE_CHECKING:
     from rit.state.store import PRStore
+
+
+__all__ = ("FileTree",)
 
 
 @dataclass
@@ -34,16 +38,16 @@ class ReviewTree(Tree[str]):
 
     def on_mount(self) -> None:
         super().on_mount()
-        # Hack: remove default Tree bindings so they bubble up to MainScreen
-        try:
-            if hasattr(self._bindings, "keys"):
-                keys_dict = getattr(self._bindings, "keys")
-                if "space" in keys_dict:
-                    del keys_dict["space"]
-                if "enter" in keys_dict:
-                    del keys_dict["enter"]
-        except Exception:
-            pass
+        _remove_review_tree_default_bindings(self._bindings)
+
+
+def _remove_review_tree_default_bindings(bindings: object) -> None:
+    keys_dict = getattr(bindings, "keys", None)
+    if not isinstance(keys_dict, dict):
+        return
+
+    keys_dict.pop("space", None)
+    keys_dict.pop("enter", None)
 
 
 class FileTree(Vertical):
@@ -513,7 +517,7 @@ class FileTree(Vertical):
     def _focused_cursor_state(self) -> tuple[bool, str | None, int | None]:
         try:
             tree = self.query_one("#file-tree", Tree)
-        except Exception:
+        except NoMatches:
             return (False, None, None)
 
         if not tree.has_focus:
@@ -561,7 +565,7 @@ class FileTree(Vertical):
                 )
             else:
                 count_widget.update(f"Files ({self.total_file_count})")
-        except Exception:
+        except NoMatches:
             pass
 
     def _file_label(self, file: PRFile, show_path: bool = True) -> Text:

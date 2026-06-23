@@ -16,6 +16,20 @@ from textual.widget import Widget
 from textual.widgets import Static
 from textual.containers import HorizontalScroll
 
+__all__ = (
+    "DiffCode",
+    "LineAnnotations",
+    "LineContent",
+    "MISSING_SIDE_BACKGROUND_STYLE",
+    "MISSING_SIDE_HATCH",
+    "MISSING_SIDE_HATCH_STEP",
+    "MISSING_SIDE_HATCH_STYLE",
+    "MISSING_SIDE_STYLE",
+    "SyncedCodeScroll",
+    "missing_side_hatch_text",
+)
+
+
 MISSING_SIDE_BACKGROUND_STYLE = "on $background"
 MISSING_SIDE_HATCH_STYLE = "$text-disabled 9% on $background"
 MISSING_SIDE_STYLE = MISSING_SIDE_BACKGROUND_STYLE

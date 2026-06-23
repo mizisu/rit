@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, cast
+from typing import Literal
 
 from textual import on
 from textual.app import ComposeResult
@@ -14,6 +14,19 @@ from rit.state.models import PendingReviewComment
 from rit.ui.widgets.comment_card import CommentCard
 
 ReviewEvent = Literal["APPROVE", "COMMENT", "REQUEST_CHANGES"]
+
+__all__ = (
+    "ReviewEvent",
+    "ReviewSubmitScreen",
+)
+
+
+def _review_event_from_option_id(option_id: object) -> ReviewEvent:
+    if option_id == "APPROVE":
+        return "APPROVE"
+    if option_id == "REQUEST_CHANGES":
+        return "REQUEST_CHANGES"
+    return "COMMENT"
 
 
 class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
@@ -169,7 +182,7 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
         options = self.query_one("#review-submit-actions", OptionList)
         highlighted = options.highlighted_option
         option_id = highlighted.id if highlighted is not None else "COMMENT"
-        event = cast(ReviewEvent, option_id)
+        event = _review_event_from_option_id(option_id)
         body = self.query_one("#review-submit-body", TextArea).text.strip()
         if event == "REQUEST_CHANGES" and not body:
             self.notify("Review body cannot be empty", severity="warning")

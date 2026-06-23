@@ -16,6 +16,9 @@ from rit.ui.widgets import diff_geometry as _geometry
 if TYPE_CHECKING:
     from rit.core.types import DiffLine
 
+__all__ = ()
+
+
 _RENDER_REQUEST_CONTEXT: ContextVar[int | None] = ContextVar(
     "diff_view_render_request", default=None
 )
@@ -317,7 +320,7 @@ async def _remove_virtualized_lines(
         view._code_widgets_by_line.pop(line_idx, None)
         view._unregister_line_widgets(line_idx)
 
-    return view._merge_line_ranges(repair_ranges)
+    return _geometry.merge_line_ranges(repair_ranges)
 
 
 async def _clear_virtual_hunk_headers(view) -> None:
@@ -628,6 +631,13 @@ def _reveal_cursor_after_virtual_render(view, request_token: int) -> None:
     view._virt.suppress_next_viewport_shift = True
 
 
+def _complete_cursor_driven_virtual_render(view, request_token: int) -> None:
+    if not view._is_current_render_request(request_token):
+        return
+    view._virt.render_pending = False
+    _reveal_cursor_after_virtual_render(view, request_token)
+
+
 async def _run_virtual_window_render_for_request(view, request_token: int) -> None:
     token = _RENDER_REQUEST_CONTEXT.set(request_token)
     try:
@@ -654,9 +664,10 @@ async def _render_virtual_window_and_finalize(view) -> None:
             )
         else:
             await view._render_diff()
-    finally:
+    except Exception:
         if view._is_current_render_request(request_token):
             view._virt.render_pending = False
+        raise
 
     if not view._is_current_render_request(request_token):
         return
@@ -685,9 +696,12 @@ async def _render_virtual_window_and_finalize(view) -> None:
                 return
 
         view.call_after_refresh(
-            lambda: _reveal_cursor_after_virtual_render(view, request_token)
+            lambda: _complete_cursor_driven_virtual_render(view, request_token)
         )
         return
+
+    view._virt.render_pending = False
+
     if queued_center is None or not view._virt.active or not view.is_mounted:
         return
 

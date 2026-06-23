@@ -7,6 +7,8 @@ from textual.reactive import var
 from textual.timer import Timer
 from textual.widgets import Static
 
+__all__ = ("FlashWidget",)
+
 
 class FlashWidget(Static):
     """Temporary notification widget that auto-hides after a duration."""

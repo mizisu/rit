@@ -1,29 +1,49 @@
 from __future__ import annotations
 
-import asyncio
-from bisect import bisect_right
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 
 from textual import getters, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
+from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.widgets import Static
 
-from rit.core.types import DiffHunk, DiffLine, FileDiff
+from rit.core.types import FileDiff
 from rit.state.store import PRStore
+from rit.ui.components.combined_diff import (
+    COMBINED_DIFF_FILENAME,
+    build_combined_diff_document,
+    load_missing_combined_file_diffs,
+)
+from rit.ui.components.files_render_session import FilesRenderSession
 from rit.ui.messages import Flash
 from rit.ui.widgets import DiffView, FileTree
 from rit.ui.widgets.resize_handle import ResizeHandle
 
 if TYPE_CHECKING:
-    pass
+    from rit.ui.components.combined_diff import CombinedDiffDocument
 
 
-COMBINED_DIFF_FILENAME = "All files"
+__all__ = (
+    "COMBINED_DIFF_FILENAME",
+    "FileChanges",
+)
+
+
 COMBINED_FILES_THRESHOLD = 2
 COMBINED_DIFF_LOAD_CONCURRENCY = 8
+
+
+def _diff_mode_setting(value: object) -> Literal["auto", "split", "unified"] | None:
+    if value == "auto":
+        return "auto"
+    if value == "split":
+        return "split"
+    if value == "unified":
+        return "unified"
+    return None
 
 
 class GhostHandle(Static):
@@ -71,6 +91,19 @@ class FileChanges(Horizontal):
     resize_handle = getters.query_one(ResizeHandle)
     ghost_handle = getters.query_one(GhostHandle)
 
+    @property
+    def _showing_combined_files(self) -> bool:
+        return self._render_session.showing_combined_files
+
+    @property
+    def _combined_document(self) -> CombinedDiffDocument | None:
+        return self._render_session.combined_document
+
+    @property
+    def _combined_file_line_starts(self) -> dict[str, int]:
+        document = self._render_session.combined_document
+        return dict(document.file_line_starts) if document is not None else {}
+
     def __init__(self, store: PRStore) -> None:
         super().__init__()
         self.store = store
@@ -78,20 +111,10 @@ class FileChanges(Horizontal):
         self._is_dragging = False
         self._queued_file_render: tuple[str, FileDiff | None, bool, bool] | None = None
         self._file_render_worker_active = False
-        self._queued_combined_render: tuple[tuple[str, ...], bool] | None = None
+        self._render_session = FilesRenderSession(
+            combined_threshold=COMBINED_FILES_THRESHOLD,
+        )
         self._combined_render_worker_active = False
-        self._combined_files_signature: tuple[str, ...] | None = None
-        self._combined_file_line_starts: dict[str, int] = {}
-        self._combined_file_start_lines: list[int] = []
-        self._combined_file_start_names: list[str] = []
-        self._combined_line_lookup: dict[
-            tuple[str, int, Literal["LEFT", "RIGHT"]], int
-        ] = {}
-        self._showing_combined_files = False
-        self._pending_combined_file_jump: tuple[str, bool] | None = None
-        self._pending_location_jump: (
-            tuple[str, int, Literal["LEFT", "RIGHT"], bool] | None
-        ) = None
 
     def compose(self) -> ComposeResult:
         yield FileTree(store=self.store, id="file-tree-sidebar")
@@ -113,7 +136,7 @@ class FileChanges(Horizontal):
     def watch_sidebar_width(self, width: int) -> None:
         try:
             self.file_tree.styles.width = width
-        except Exception:
+        except NoMatches:
             pass
 
     def _apply_diff_settings_from_app(self) -> None:
@@ -130,12 +153,10 @@ class FileChanges(Horizontal):
         self._apply_setting(key, value)
 
     def _apply_setting(self, key: str, value: object) -> None:
-        if (
-            key == "ui.diff_mode"
-            and isinstance(value, str)
-            and value in {"auto", "split", "unified"}
-        ):
-            self.diff_view.mode = cast(Literal["auto", "split", "unified"], value)
+        if key == "ui.diff_mode":
+            mode = _diff_mode_setting(value)
+            if mode is not None:
+                self.diff_view.mode = mode
         elif key == "ui.show_line_numbers" and isinstance(value, bool):
             self.diff_view.show_line_numbers = value
         elif key == "ui.word_diff" and isinstance(value, bool):
@@ -204,15 +225,18 @@ class FileChanges(Horizontal):
         )
 
     def _uses_combined_files(self) -> bool:
-        return len(self.store.state.files) >= COMBINED_FILES_THRESHOLD
+        return self._render_session.uses_combined_files(self.store.state.files)
 
     def _queue_combined_file_jump(self, filename: str, *, focus_diff: bool) -> bool:
-        if not self._uses_combined_files():
+        if not self._render_session.queue_combined_file_jump(
+            self.store.state.files,
+            filename,
+            focus_diff=focus_diff,
+        ):
             return False
 
         self.store.state.selected_file = filename
         self.file_tree.select_file(filename, emit_message=False)
-        self._pending_combined_file_jump = (filename, focus_diff)
         self._queue_combined_files_render(focus_diff=False)
         return True
 
@@ -222,19 +246,13 @@ class FileChanges(Horizontal):
         focus_diff: bool = False,
         force: bool = False,
     ) -> bool:
-        signature = tuple(file.filename for file in self.store.state.files)
-        if len(signature) < COMBINED_FILES_THRESHOLD:
-            return False
-
-        if (
-            not force
-            and self._showing_combined_files
-            and self.diff_view.current_file == COMBINED_DIFF_FILENAME
-            and self._combined_files_signature == signature
+        if not self._render_session.queue_combined_render(
+            self.store.state.files,
+            current_file=self.diff_view.current_file,
+            focus_diff=focus_diff,
+            force=force,
         ):
-            return True
-
-        self._queued_combined_render = (signature, focus_diff)
+            return False
         if self._combined_render_worker_active:
             return True
 
@@ -248,29 +266,28 @@ class FileChanges(Horizontal):
 
     async def _drain_queued_combined_render_requests(self) -> None:
         while True:
-            request = self._queued_combined_render
+            request = self._render_session.take_queued_combined_render()
             if request is None:
                 self._combined_render_worker_active = False
-                if self._queued_combined_render is None:
+                if not self._render_session.has_queued_combined_render():
                     return
                 self._combined_render_worker_active = True
                 continue
 
-            self._queued_combined_render = None
-            signature, focus_diff = request
+            signature = request.signature
+            focus_diff = request.focus_diff
             await self._ensure_combined_file_diffs_loaded(signature)
-            if self._queued_combined_render is not None:
+            if self._render_session.has_queued_combined_render():
                 continue
 
-            combined = self._build_combined_files_diff(signature)
-            if combined is None:
+            document = self._build_combined_document(signature)
+            if document is None:
                 continue
 
-            self._combined_files_signature = signature
-            self._showing_combined_files = True
+            self._render_session.record_combined_document(signature, document)
             self._queue_file_render_request(
                 COMBINED_DIFF_FILENAME,
-                combined,
+                document.diff,
                 focus_diff=focus_diff,
                 sync_tree_selection=False,
             )
@@ -279,176 +296,54 @@ class FileChanges(Horizontal):
         self,
         signature: tuple[str, ...],
     ) -> None:
-        missing = [
-            filename
-            for filename in signature
-            if filename not in self.store.state.file_diffs
-        ]
-        if not missing:
-            return
+        await load_missing_combined_file_diffs(
+            signature,
+            self.store.state.file_diffs,
+            self.store.get_file_diff_async,
+            concurrency=COMBINED_DIFF_LOAD_CONCURRENCY,
+        )
 
-        semaphore = asyncio.Semaphore(COMBINED_DIFF_LOAD_CONCURRENCY)
-
-        async def load(filename: str) -> None:
-            async with semaphore:
-                await self.store.get_file_diff_async(filename)
-
-        await asyncio.gather(*(load(filename) for filename in missing))
-
-    def _reset_combined_indexes(self) -> None:
-        self._combined_file_line_starts = {}
-        self._combined_file_start_lines = []
-        self._combined_file_start_names = []
-        self._combined_line_lookup = {}
-
-    def _record_combined_file_start(self, filename: str, line_index: int) -> None:
-        self._combined_file_line_starts[filename] = line_index
-        self._combined_file_start_lines.append(line_index)
-        self._combined_file_start_names.append(filename)
-
-    def _record_combined_line_lookup(
-        self,
-        filename: str,
-        line: DiffLine,
-        line_index: int,
-    ) -> None:
-        if line.old_line_no is not None:
-            self._combined_line_lookup[
-                (filename, line.old_line_no, "LEFT")
-            ] = line_index
-        if line.new_line_no is not None:
-            self._combined_line_lookup[
-                (filename, line.new_line_no, "RIGHT")
-            ] = line_index
-
-    def _build_combined_files_diff(
+    def _build_combined_document(
         self,
         signature: tuple[str, ...],
-    ) -> FileDiff | None:
+    ) -> CombinedDiffDocument | None:
         state = self.store.state
         if len(signature) < COMBINED_FILES_THRESHOLD:
             return None
 
-        files = [
-            state.files_by_filename.get(filename)
-            or next(
+        files = []
+        for filename in signature:
+            file = state.files_by_filename.get(filename) or next(
                 (file for file in state.files if file.filename == filename),
                 None,
             )
-            for filename in signature
-        ]
-        if any(file is None for file in files):
-            return None
-        if not all(filename in state.file_diffs for filename in signature):
-            return None
-
-        hunks: list[DiffHunk] = []
-        self._reset_combined_indexes()
-        next_line_index = 0
-        is_fully_refined = True
-
-        for file in files:
             if file is None:
                 return None
-            diff = state.file_diffs[file.filename]
-            is_fully_refined = is_fully_refined and diff.is_fully_refined
-            file_start_recorded = False
+            files.append(file)
 
-            if not diff.hunks:
-                self._record_combined_file_start(file.filename, next_line_index)
-                hunks.append(
-                    DiffHunk(
-                        old_start=0,
-                        old_count=0,
-                        new_start=0,
-                        new_count=0,
-                        header="no textual changes",
-                        lines=[
-                            DiffLine(
-                                old_line_no=None,
-                                new_line_no=None,
-                                old_content="",
-                                new_content="No textual changes",
-                                file_path=file.filename,
-                            )
-                        ],
-                        starts_file=True,
-                        file_path=file.filename,
-                        file_old_path=file.previous_filename,
-                        file_status=file.status,
-                        file_additions=file.additions,
-                        file_deletions=file.deletions,
-                    )
-                )
-                next_line_index += 1
-                continue
-
-            for hunk in diff.hunks:
-                starts_file = not file_start_recorded
-                if starts_file:
-                    self._record_combined_file_start(file.filename, next_line_index)
-                    file_start_recorded = True
-
-                for offset, line in enumerate(hunk.lines):
-                    line.file_path = file.filename
-                    self._record_combined_line_lookup(
-                        file.filename,
-                        line,
-                        next_line_index + offset,
-                    )
-
-                hunks.append(
-                    DiffHunk(
-                        old_start=hunk.old_start,
-                        old_count=hunk.old_count,
-                        new_start=hunk.new_start,
-                        new_count=hunk.new_count,
-                        header=hunk.header,
-                        lines=hunk.lines,
-                        starts_file=starts_file,
-                        file_path=file.filename if starts_file else None,
-                        file_old_path=file.previous_filename if starts_file else None,
-                        file_status=file.status,
-                        file_additions=file.additions,
-                        file_deletions=file.deletions,
-                    )
-                )
-                next_line_index += len(hunk.lines)
-
-        return FileDiff(
-            filename=COMBINED_DIFF_FILENAME,
-            hunks=hunks,
-            is_fully_refined=is_fully_refined,
-            show_hunk_headers=False,
-        )
+        document = build_combined_diff_document(files, state.file_diffs)
+        if document is None:
+            return None
+        return document
 
     def _jump_to_combined_file(self, filename: str, *, focus_diff: bool) -> bool:
-        if not self._showing_combined_files:
+        if not self._render_session.showing_combined_files:
             return False
 
-        line_index = self._combined_file_line_starts.get(filename)
+        document = self._render_session.combined_document
+        if document is None:
+            return False
+
+        line_index = document.file_line_starts.get(filename)
         if line_index is None:
             return False
 
         self.store.state.selected_file = filename
-        self.diff_view.cursor_line = line_index
-        if 0 <= line_index < len(self.diff_view._line_top_offsets):
-            self.diff_view.scroll_to(
-                y=max(0, self.diff_view._line_top_offsets[line_index] - 2),
-                animate=False,
-            )
-        if focus_diff:
-            self.diff_view.focus()
+        self.diff_view.jump_to_line_index(line_index, side="RIGHT", focus=focus_diff)
         return True
 
     def _combined_file_for_line(self, line_index: int) -> str | None:
-        if not self._showing_combined_files or not self._combined_file_start_lines:
-            return None
-
-        index = bisect_right(self._combined_file_start_lines, line_index) - 1
-        if index < 0:
-            return None
-        return self._combined_file_start_names[index]
+        return self._render_session.combined_file_for_line(line_index)
 
     def _sync_combined_selection_for_cursor(self) -> None:
         filename = self._combined_file_for_line(self.diff_view.cursor_line)
@@ -472,7 +367,7 @@ class FileChanges(Horizontal):
         focus_diff: bool,
     ) -> bool:
         """Jump to a file/line location, preserving combined-diff navigation."""
-        if self._showing_combined_files:
+        if self._render_session.showing_combined_files:
             line_index = self._line_index_for_location(filename, line, side)
             if line_index is None:
                 return False
@@ -482,7 +377,12 @@ class FileChanges(Horizontal):
             return True
 
         if self._uses_combined_files():
-            self._pending_location_jump = (filename, line, side, focus_diff)
+            self._render_session.queue_location_jump(
+                filename,
+                line,
+                side,
+                focus_diff=focus_diff,
+            )
             self.store.state.selected_file = filename
             self.file_tree.select_file(filename, emit_message=False)
             self._queue_combined_files_render(focus_diff=False)
@@ -495,7 +395,12 @@ class FileChanges(Horizontal):
             self._jump_to_diff_line(line_index, side=side, focus_diff=focus_diff)
             return True
 
-        self._pending_location_jump = (filename, line, side, focus_diff)
+        self._render_session.queue_location_jump(
+            filename,
+            line,
+            side,
+            focus_diff=focus_diff,
+        )
         self._queue_file_render_request(
             filename,
             None,
@@ -510,44 +415,20 @@ class FileChanges(Horizontal):
         line: int,
         side: Literal["LEFT", "RIGHT"],
     ) -> int | None:
-        diff = self.diff_view._diff
+        diff = self.diff_view.current_diff
         if diff is None:
             return None
 
         if diff.filename == COMBINED_DIFF_FILENAME:
-            cached = self._combined_line_lookup.get((filename, line, side))
+            document = self._render_session.combined_document
+            cached = (
+                document.line_index_for_location(filename, line, side)
+                if document is not None
+                else None
+            )
             if cached is not None:
                 return cached
-            current_file = None
-        else:
-            current_file = diff.filename
-            if current_file == filename:
-                line_map = (
-                    self.diff_view._line_index_by_old_number
-                    if side == "LEFT"
-                    else self.diff_view._line_index_by_new_number
-                )
-                cached = line_map.get(line)
-                if cached is not None:
-                    return cached
-
-        active_file = current_file
-        target_attr = "old_line_no" if side == "LEFT" else "new_line_no"
-        found_target_file = False
-
-        for hunk in diff.hunks:
-            if hunk.starts_file and hunk.file_path:
-                if found_target_file and hunk.file_path != filename:
-                    break
-                active_file = hunk.file_path
-            if active_file != filename:
-                continue
-            found_target_file = True
-            for diff_line in hunk.lines:
-                if getattr(diff_line, target_attr) == line:
-                    return diff_line.line_index
-
-        return None
+        return self.diff_view.line_index_for_location(filename, line, side)
 
     def _jump_to_diff_line(
         self,
@@ -556,58 +437,35 @@ class FileChanges(Horizontal):
         side: Literal["LEFT", "RIGHT"],
         focus_diff: bool,
     ) -> None:
-        diff_view = self.diff_view
-        target_pane: Literal["old", "new"] = "old" if side == "LEFT" else "new"
-        target_row = None
-        for row in diff_view._rows_for_current_mode():
-            if row.line_index != line_index:
-                continue
-            if row.side == target_pane:
-                target_row = row
-                break
-            if target_row is None:
-                target_row = row
-
-        if target_row is not None:
-            diff_view._jump_to_row_with_anchor(
-                target_row,
-                pane=target_pane,
-                viewport_offset=2,
-            )
-        else:
-            diff_view.cursor_line = line_index
-            if 0 <= line_index < len(diff_view._line_top_offsets):
-                diff_view.scroll_to(
-                    y=max(0, diff_view._line_top_offsets[line_index] - 2),
-                    animate=False,
-                )
-
-        if focus_diff:
-            diff_view.focus()
+        self.diff_view.jump_to_line_index(line_index, side=side, focus=focus_diff)
 
     def _apply_pending_combined_file_jump(self) -> bool:
-        pending = self._pending_combined_file_jump
+        pending = self._render_session.take_pending_combined_file_jump()
         if pending is None:
             return False
 
-        filename, focus_diff = pending
-        self._pending_combined_file_jump = None
+        filename = pending.filename
+        focus_diff = pending.focus_diff
         self.file_tree.select_file(filename, emit_message=False)
         return self._jump_to_combined_file(filename, focus_diff=focus_diff)
 
     def _apply_pending_location_jump(self, filename: str) -> bool:
-        pending = self._pending_location_jump
+        pending = self._render_session.take_pending_location_jump(filename)
         if pending is None:
             return False
-        target_filename, line, side, focus_diff = pending
-        if filename != COMBINED_DIFF_FILENAME and target_filename != filename:
-            return False
 
-        self._pending_location_jump = None
-        line_index = self._line_index_for_location(target_filename, line, side)
+        line_index = self._line_index_for_location(
+            pending.filename,
+            pending.line,
+            pending.side,
+        )
         if line_index is None:
             return False
-        self._jump_to_diff_line(line_index, side=side, focus_diff=focus_diff)
+        self._jump_to_diff_line(
+            line_index,
+            side=pending.side,
+            focus_diff=pending.focus_diff,
+        )
         return True
 
     def _sync_combined_render_target(self, *, focus_diff: bool) -> None:
@@ -663,7 +521,9 @@ class FileChanges(Horizontal):
             ):
                 continue
 
-            self._showing_combined_files = filename == COMBINED_DIFF_FILENAME
+            self._render_session.set_showing_combined_files(
+                filename == COMBINED_DIFF_FILENAME
+            )
             if diff is None:
                 diff = await self.store.get_file_diff_async(filename)
             if diff is None:
@@ -741,7 +601,7 @@ class FileChanges(Horizontal):
         if event.filename != COMBINED_DIFF_FILENAME:
             return
 
-        self._showing_combined_files = True
+        self._render_session.set_showing_combined_files(True)
         self._sync_combined_selection_for_cursor()
 
     async def _show_full_file_preview(self, filename: str) -> None:
@@ -759,25 +619,22 @@ class FileChanges(Horizontal):
             )
             return
 
-        restore_filename = filename
-        restore_diff = diff
-        if (
-            self._showing_combined_files
-            and self.diff_view.current_file == COMBINED_DIFF_FILENAME
-            and self.diff_view._diff is not None
-        ):
-            restore_filename = COMBINED_DIFF_FILENAME
-            restore_diff = self.diff_view._diff
+        restore_target = self._render_session.full_file_preview_restore_target(
+            filename=filename,
+            file_diff=diff,
+            current_file=self.diff_view.current_file,
+            current_diff=self.diff_view.current_diff,
+        )
 
-        self._showing_combined_files = False
+        self._render_session.set_showing_combined_files(False)
         self.store.state.selected_file = filename
         self.file_tree.select_file(filename, emit_message=False)
         await self.diff_view.show_full_file_preview(
             filename,
             content,
             source_diff=diff,
-            restore_filename=restore_filename,
-            restore_diff=restore_diff,
+            restore_filename=restore_target.filename,
+            restore_diff=restore_target.diff,
         )
 
     @on(DiffView.HunkNavigated)

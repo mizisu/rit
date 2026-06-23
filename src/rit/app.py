@@ -21,6 +21,9 @@ if TYPE_CHECKING:
     from rit.ui.screens.main import MainScreen
 
 
+__all__ = ("RitApp",)
+
+
 configure_terminal_graphics()
 
 
@@ -135,8 +138,9 @@ class RitApp(App):
             self.notify("Failed to open PR in browser", severity="error")
 
     def action_settings(self) -> None:
-        # TODO: Implement settings screen
-        self.notify("Settings coming soon!", title="Settings")
+        from rit.ui.screens.settings import SettingsScreen
+
+        self.push_screen(SettingsScreen(self.settings))
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action in {"quit", "open_pr", "settings"} and isinstance(

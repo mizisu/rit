@@ -11,6 +11,15 @@ from functools import lru_cache
 from textual_image._terminal import TerminalError
 from textual_image.renderable import tgp
 
+__all__ = (
+    "TerminalGraphicsTransport",
+    "configure_terminal_graphics",
+    "detect_terminal_graphics_transport",
+    "terminal_graphics_status_message",
+    "wrap_tmux_passthrough_sequence",
+)
+
+
 _TMUX_PASSTHROUGH_PREFIX = "\x1bPtmux;"
 _TMUX_PASSTHROUGH_SUFFIX = "\x1b\\"
 _ORIGINAL_SEND_TGP_MESSAGE = tgp._send_tgp_message

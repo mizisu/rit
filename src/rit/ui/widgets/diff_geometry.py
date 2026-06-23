@@ -5,8 +5,32 @@ from __future__ import annotations
 from bisect import bisect_right
 from dataclasses import dataclass
 
-from rit.core.types import DiffLine, FileDiff
+from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.ui.widgets.diff_types import RenderedRow
+
+__all__ = (
+    "DiffGeometry",
+    "FILE_DIFF_HEADER_HEIGHT",
+    "ViewportGeometry",
+    "build_diff_geometry",
+    "cursor_viewport_offset",
+    "hunk_lines_for_window",
+    "is_line_rendered",
+    "line_index_at_vertical_offset",
+    "merge_line_ranges",
+    "render_height_for_line",
+    "rendered_line_bounds",
+    "row_is_visible",
+    "row_vertical_bounds",
+    "scroll_target_for_row_bottom",
+    "scroll_target_for_row_viewport_offset",
+    "scroll_target_for_span",
+    "should_render_hunk_header",
+    "viewport_center_line",
+    "virtual_bottom_buffer_height",
+    "virtual_top_buffer_height",
+)
+
 
 FILE_DIFF_HEADER_HEIGHT = 1
 
@@ -169,6 +193,23 @@ def is_line_rendered(
     return start <= line_index <= end
 
 
+def merge_line_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Return sorted, coalesced inclusive line ranges."""
+    if not ranges:
+        return []
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(ranges):
+        if not merged:
+            merged.append((start, end))
+            continue
+        prev_start, prev_end = merged[-1]
+        if start <= prev_end + 1:
+            merged[-1] = (prev_start, max(prev_end, end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
 def should_render_hunk_header(
     *,
     hunk_line_ranges: list[tuple[int, int, int]],
@@ -182,6 +223,27 @@ def should_render_hunk_header(
     if hunk_end < window_start or hunk_start > window_end:
         return False
     return window_start <= hunk_start <= window_end
+
+
+def hunk_lines_for_window(
+    hunk: DiffHunk,
+    window_start: int | None,
+    window_end: int | None,
+) -> list[DiffLine]:
+    """Return hunk lines intersecting an optional inclusive line-index window."""
+    if window_start is None or window_end is None:
+        return hunk.lines
+    if not hunk.lines or window_start > window_end:
+        return []
+
+    hunk_start = hunk.lines[0].line_index
+    hunk_end = hunk.lines[-1].line_index
+    if hunk_end < window_start or hunk_start > window_end:
+        return []
+
+    start_index = max(0, window_start - hunk_start)
+    end_index = min(len(hunk.lines) - 1, window_end - hunk_start)
+    return hunk.lines[start_index : end_index + 1]
 
 
 def virtual_top_buffer_height(

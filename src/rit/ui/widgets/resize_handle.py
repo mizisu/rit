@@ -7,6 +7,8 @@ from textual.message import Message
 from textual.reactive import var
 from textual.widget import Widget
 
+__all__ = ("ResizeHandle",)
+
 
 class ResizeHandle(Widget):
 

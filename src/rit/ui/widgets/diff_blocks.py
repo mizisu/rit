@@ -20,6 +20,9 @@ if TYPE_CHECKING:
     pass
 
 
+__all__ = ()
+
+
 def _invalidate_block_static_row_cache(
     view, line_indices: set[int] | None = None
 ) -> None:

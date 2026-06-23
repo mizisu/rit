@@ -37,6 +37,25 @@ from rit.ui.terminal_graphics import (
     terminal_graphics_status_message,
 )
 
+__all__ = (
+    "AvailableWidthProvider",
+    "ImageFetchError",
+    "ImageFetcher",
+    "ImageViewerScreen",
+    "MarkdownImageBlock",
+    "MarkdownImagePart",
+    "MarkdownImageRef",
+    "MarkdownImageTable",
+    "MarkdownImageTableCell",
+    "MarkdownImageTableData",
+    "MarkdownImageTableRow",
+    "fetch_image_bytes",
+    "fetch_image_bytes_async",
+    "mount_markdown_image_parts",
+    "parse_markdown_image_parts",
+)
+
+
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 IMAGE_FETCH_TIMEOUT_SECONDS = 10
 MAX_INLINE_IMAGE_WIDTH_CELLS = 112
@@ -951,10 +970,7 @@ def _parse_markdown_image_match(match: re.Match[str]) -> MarkdownImageRef | None
 
 def _parse_html_image_match(tag: str) -> MarkdownImageRef | None:
     parser = _ImgTagParser()
-    try:
-        parser.feed(tag)
-    except Exception:
-        return None
+    parser.feed(tag)
 
     src = parser.attrs.get("src", "").strip()
     if not src:

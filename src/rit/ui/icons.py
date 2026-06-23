@@ -1,5 +1,12 @@
 """Nerd Font icons for file types. Reference: https://www.nerdfonts.com/cheat-sheet"""
 
+__all__ = (
+    "DEFAULT_FILE_ICON",
+    "DIR_ICON",
+    "get_file_icon",
+)
+
+
 DEFAULT_FILE_ICON = "\uf15b"  # nf-fa-file
 DIR_ICON = "\uf07b"  # nf-fa-folder
 

@@ -9,45 +9,82 @@ from textual.content import Content
 from rit.ui.messages import Flash
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_search as _search
+from rit.ui.widgets import diff_selection_content as _selection_content
+from rit.ui.widgets import diff_selection_range as _selection_range
+from rit.ui.widgets import diff_selection_text as _selection_text
+from rit.ui.widgets import diff_visual_mode as _visual_mode
 
 if TYPE_CHECKING:
     from rit.core.types import DiffLine
     from rit.ui.widgets.diff_view import DiffView
 
 
+__all__ = ()
+
+
+def _apply_visual_mode_state(
+    view: DiffView,
+    state: _visual_mode.VisualModeState,
+) -> None:
+    view.visual_type = state.visual_type
+    view.visual_mode = state.visual_mode
+    view.visual_anchor_line = state.visual_anchor_line
+    view.visual_anchor_column = state.visual_anchor_column
+
+
 def _enter_visual_mode(view: DiffView, visual_type: Literal["char", "line"]) -> None:
-    view.visual_type = visual_type
-
-    if not view.visual_mode:
-        view.visual_mode = True
-        view.visual_anchor_line = view.cursor_line
-        view.visual_anchor_column = view.cursor_column
-        return
-
-    if view.visual_anchor_line is None:
-        view.visual_anchor_line = view.cursor_line
-    if view.visual_anchor_column is None:
-        view.visual_anchor_column = view.cursor_column
+    state = _visual_mode.enter_visual_mode(
+        visual_type=visual_type,
+        current_visual_mode=view.visual_mode,
+        current_visual_anchor_line=view.visual_anchor_line,
+        current_visual_anchor_column=view.visual_anchor_column,
+        cursor_line=view.cursor_line,
+        cursor_column=view.cursor_column,
+    )
+    _apply_visual_mode_state(view, state)
 
 
 def _exit_visual_mode(view: DiffView) -> None:
-    view.visual_mode = False
-    view.visual_anchor_line = None
-    view.visual_anchor_column = None
+    state = _visual_mode.exit_visual_mode(current_visual_type=view.visual_type)
+    _apply_visual_mode_state(view, state)
 
 
 def _toggle_visual(view: DiffView) -> None:
-    if view.visual_mode and view.visual_type == "char":
-        _exit_visual_mode(view)
-        return
-    _enter_visual_mode(view, "char")
+    state = _visual_mode.toggle_visual_mode(
+        requested_visual_type="char",
+        current_visual_mode=view.visual_mode,
+        current_visual_type=view.visual_type,
+        current_visual_anchor_line=view.visual_anchor_line,
+        current_visual_anchor_column=view.visual_anchor_column,
+        cursor_line=view.cursor_line,
+        cursor_column=view.cursor_column,
+    )
+    _apply_visual_mode_state(view, state)
 
 
 def _toggle_visual_line(view: DiffView) -> None:
-    if view.visual_mode and view.visual_type == "line":
-        _exit_visual_mode(view)
+    state = _visual_mode.toggle_visual_mode(
+        requested_visual_type="line",
+        current_visual_mode=view.visual_mode,
+        current_visual_type=view.visual_type,
+        current_visual_anchor_line=view.visual_anchor_line,
+        current_visual_anchor_column=view.visual_anchor_column,
+        cursor_line=view.cursor_line,
+        cursor_column=view.cursor_column,
+    )
+    _apply_visual_mode_state(view, state)
+
+
+def _copy_yank_to_clipboard(view: DiffView, yank: _selection_text.VisualYank) -> None:
+    try:
+        view._copy_to_clipboard(yank.text)
+    except Exception as e:
+        view.post_message(
+            Flash(f"Failed to copy: {str(e)}", style="error", duration=3.0)
+        )
         return
-    _enter_visual_mode(view, "line")
+
+    view.post_message(Flash(yank.success_message, style="success", duration=2.0))
 
 
 def _yank(view: DiffView) -> None:
@@ -58,101 +95,24 @@ def _yank(view: DiffView) -> None:
         if not (0 <= view.cursor_line < len(view._all_lines)):
             return
 
-        text_to_copy = view._get_cursor_text() + "\n"
-        try:
-            view._copy_to_clipboard(text_to_copy)
-            view.post_message(Flash("Copied 1 line", style="success", duration=2.0))
-        except Exception as e:
-            view.post_message(
-                Flash(f"Failed to copy: {str(e)}", style="error", duration=3.0)
-            )
+        yank = _selection_text.normal_yank_for_line(view._get_cursor_text())
+        _copy_yank_to_clipboard(view, yank)
         return
 
     if view.visual_anchor_line is None:
         return
 
-    start_line = min(view.visual_anchor_line, view.cursor_line)
-    end_line = max(view.visual_anchor_line, view.cursor_line)
-
-    if view.visual_type == "line":
-        selected_lines = [
-            view._get_line_text(view._all_lines[line_idx])
-            for line_idx in range(start_line, end_line + 1)
-        ]
-        text_to_copy = "\n".join(selected_lines)
-        if text_to_copy:
-            text_to_copy += "\n"
-
-        try:
-            view._copy_to_clipboard(text_to_copy)
-            line_count = end_line - start_line + 1
-            view.post_message(
-                Flash(
-                    f"Copied {line_count} line{'s' if line_count != 1 else ''}",
-                    style="success",
-                    duration=2.0,
-                )
-            )
-        except Exception as e:
-            view.post_message(
-                Flash(f"Failed to copy: {str(e)}", style="error", duration=3.0)
-            )
-
-        _exit_visual_mode(view)
-        return
-
-    start_col = (
-        view.visual_anchor_column if view.visual_anchor_column is not None else 0
+    line_texts = [view._get_line_text(line) for line in view._all_lines]
+    yank = _selection_text.visual_yank_for_range(
+        line_texts,
+        visual_anchor_line=view.visual_anchor_line,
+        visual_anchor_column=view.visual_anchor_column,
+        cursor_line=view.cursor_line,
+        cursor_column=view.cursor_column,
+        visual_type=view.visual_type,
     )
-    end_col = view.cursor_column
 
-    if view.visual_anchor_line < view.cursor_line:
-        first_line_col = start_col
-        last_line_col = end_col
-    elif view.visual_anchor_line > view.cursor_line:
-        first_line_col = end_col
-        last_line_col = start_col
-    else:
-        first_line_col = min(start_col, end_col)
-        last_line_col = max(start_col, end_col)
-
-    selected_lines: list[str] = []
-
-    if start_line == end_line:
-        line = view._all_lines[start_line]
-        text = view._get_line_text(line)
-        actual_start = min(start_col, end_col)
-        actual_end = max(start_col, end_col)
-        selected_lines.append(text[actual_start : actual_end + 1])
-    else:
-        for line_idx in range(start_line, end_line + 1):
-            line = view._all_lines[line_idx]
-            text = view._get_line_text(line)
-
-            if line_idx == start_line:
-                selected_lines.append(text[first_line_col:])
-            elif line_idx == end_line:
-                selected_lines.append(text[: last_line_col + 1])
-            else:
-                selected_lines.append(text)
-
-    text_to_copy = "\n".join(selected_lines)
-
-    try:
-        view._copy_to_clipboard(text_to_copy)
-        char_count = len(text_to_copy)
-        view.post_message(
-            Flash(
-                f"Copied {char_count} character{'s' if char_count != 1 else ''}",
-                style="success",
-                duration=2.0,
-            )
-        )
-    except Exception as e:
-        view.post_message(
-            Flash(f"Failed to copy: {str(e)}", style="error", duration=3.0)
-        )
-
+    _copy_yank_to_clipboard(view, yank)
     _exit_visual_mode(view)
 
 
@@ -173,69 +133,35 @@ def _compute_selection_spec_for_line(
     view: DiffView,
     line_idx: int,
 ) -> tuple[int, int | None, Literal["char", "line"]] | None:
-    if not view.visual_mode or view.visual_anchor_line is None:
-        return None
-    if not view._all_lines or not view._is_line_rendered(line_idx):
-        return None
-
-    start_line = min(view.visual_anchor_line, view.cursor_line)
-    end_line = max(view.visual_anchor_line, view.cursor_line)
-    if not (start_line <= line_idx <= end_line):
-        return None
-
-    if view.visual_type == "line":
-        return (0, None, "line")
-
-    start_col = (
-        view.visual_anchor_column if view.visual_anchor_column is not None else 0
+    return _selection_range.visual_selection_spec_for_line(
+        line_idx,
+        visual_mode=view.visual_mode,
+        visual_anchor_line=view.visual_anchor_line,
+        visual_anchor_column=view.visual_anchor_column,
+        cursor_line=view.cursor_line,
+        cursor_column=view.cursor_column,
+        visual_type=view.visual_type,
+        has_lines=bool(view._all_lines),
+        line_is_rendered=view._is_line_rendered(line_idx),
     )
-    end_col = view.cursor_column
-
-    if view.visual_anchor_line < view.cursor_line:
-        first_line_col = start_col
-        last_line_col = end_col
-    elif view.visual_anchor_line > view.cursor_line:
-        first_line_col = end_col
-        last_line_col = start_col
-    else:
-        first_line_col = min(start_col, end_col)
-        last_line_col = max(start_col, end_col)
-
-    if start_line == end_line:
-        return (first_line_col, last_line_col, "char")
-    if line_idx == start_line:
-        return (first_line_col, None, "char")
-    if line_idx == end_line:
-        return (0, last_line_col, "char")
-    return (0, None, "char")
 
 
 def _compute_visible_selection_specs(
     view: DiffView,
 ) -> dict[int, tuple[int, int | None, Literal["char", "line"]]]:
-    if not view.visual_mode or view.visual_anchor_line is None:
-        return {}
-
-    if not view._all_lines:
-        return {}
-
-    start_line = min(view.visual_anchor_line, view.cursor_line)
-    end_line = max(view.visual_anchor_line, view.cursor_line)
-
     rendered_start, rendered_end = view._get_rendered_line_bounds()
-    visible_start = max(start_line, rendered_start)
-    visible_end = min(end_line, rendered_end)
-
-    if visible_start > visible_end:
-        return {}
-
-    specs: dict[int, tuple[int, int | None, Literal["char", "line"]]] = {}
-    for line_idx in range(visible_start, visible_end + 1):
-        spec = _compute_selection_spec_for_line(view, line_idx)
-        if spec is not None:
-            specs[line_idx] = spec
-
-    return specs
+    return _selection_range.visual_selection_specs_for_visible_lines(
+        visual_mode=view.visual_mode,
+        visual_anchor_line=view.visual_anchor_line,
+        visual_anchor_column=view.visual_anchor_column,
+        cursor_line=view.cursor_line,
+        cursor_column=view.cursor_column,
+        visual_type=view.visual_type,
+        has_lines=bool(view._all_lines),
+        rendered_start=rendered_start,
+        rendered_end=rendered_end,
+        line_is_rendered=view._is_line_rendered,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -256,35 +182,27 @@ def _update_selection_highlighting(
 
     incremental = bool(dirty_lines) and bool(old_specs)
     if incremental:
-        new_specs = dict(old_specs)
-        candidate_lines = set(dirty_lines or ())
-        for line_idx in candidate_lines:
-            spec = _compute_selection_spec_for_line(view, line_idx)
-            if spec is None:
-                new_specs.pop(line_idx, None)
-            else:
-                new_specs[line_idx] = spec
+        dirty_specs = {
+            line_idx: _compute_selection_spec_for_line(view, line_idx)
+            for line_idx in set(dirty_lines or ())
+        }
+        new_specs = _selection_range.visual_selection_specs_with_dirty_lines(
+            old_specs,
+            dirty_specs,
+        )
     else:
         new_specs = _compute_visible_selection_specs(view)
 
-    lines_to_clear = set(old_specs) - set(new_specs)
-    lines_to_apply = {
-        line_idx
-        for line_idx, spec in new_specs.items()
-        if old_specs.get(line_idx) != spec
-    }
+    delta = _selection_range.visual_selection_delta(
+        old_specs,
+        new_specs,
+        dirty_lines=dirty_lines,
+    )
 
-    if dirty_lines:
-        for line_idx in dirty_lines:
-            if line_idx in new_specs:
-                lines_to_apply.add(line_idx)
-            elif line_idx in old_specs:
-                lines_to_clear.add(line_idx)
-
-    for line_idx in sorted(lines_to_clear):
+    for line_idx in sorted(delta.lines_to_clear):
         _clear_line_selection(view, line_idx)
 
-    for line_idx in sorted(lines_to_apply):
+    for line_idx in sorted(delta.lines_to_apply):
         sel_start, sel_end, _ = new_specs[line_idx]
         _apply_line_selection(view, line_idx, sel_start, sel_end)
 
@@ -369,9 +287,14 @@ def _apply_line_selection(
         else:
             widget.remove_class("-cursor")
 
-        if view.visual_type == "line":
+        line_role = _visual_mode.visual_line_selection_role(
+            line_index=line_idx,
+            visual_type=view.visual_type,
+            visual_anchor_line=view.visual_anchor_line,
+        )
+        if line_role != "none":
             widget.add_class("-selected")
-            if line_idx == view.visual_anchor_line:
+            if line_role == "anchor":
                 widget.add_class("-anchor")
             else:
                 widget.remove_class("-anchor")
@@ -398,18 +321,11 @@ def _build_code_content_with_selection(
         side,
     )
     text_content = view._get_line_text(line, side)
-    if not text_content:
-        return base_content
-
-    sel_start = max(0, min(sel_start, len(text_content) - 1))
-    sel_end = max(0, min(sel_end, len(text_content) - 1))
-
-    if sel_start > sel_end:
-        sel_start, sel_end = sel_end, sel_start
-
-    result = base_content.stylize("reverse dim", sel_start, sel_end + 1)
-
-    if has_cursor and cursor_col is not None and cursor_col < len(text_content):
-        result = result.stylize("reverse bold", cursor_col, cursor_col + 1)
-
-    return result
+    return _selection_content.apply_selection_to_code_content(
+        base_content,
+        line_text=text_content,
+        selection_start=sel_start,
+        selection_end=sel_end,
+        has_cursor=has_cursor,
+        cursor_col=cursor_col,
+    )

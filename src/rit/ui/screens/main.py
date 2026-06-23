@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Literal, cast
+from typing import Literal
 
 from textual import events, getters, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
+from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widgets import Footer, Input, TabbedContent, TabPane, TextArea, Tree
@@ -27,6 +28,9 @@ from rit.ui.screens.multi_select_picker import (
 from rit.ui.screens.review_submit import ReviewSubmitScreen
 from rit.ui.widgets import DiffView, Header
 from rit.ui.widgets.comment_editor import InlineCommentEditor
+
+__all__ = ("MainScreen",)
+
 
 _NAVIGATION_GROUP = Binding.Group("Navigation", compact=True)
 _COMMENT_GROUP = Binding.Group("Comments", compact=True)
@@ -54,6 +58,43 @@ _COMMON_BINDINGS = [
     ),
     Binding("shift+tab", "prev_tab", "", group=_TAB_GROUP, show=False, priority=True),
 ]
+
+
+def _pr_user_list(value: object) -> list[PRUser] | None:
+    if not isinstance(value, list):
+        return None
+
+    users: list[PRUser] = []
+    for user in value:
+        if not isinstance(user, PRUser):
+            return None
+        users.append(user)
+    return users
+
+
+def _pr_team_list(value: object) -> list[PRTeam] | None:
+    if not isinstance(value, list):
+        return None
+
+    teams: list[PRTeam] = []
+    for team in value:
+        if not isinstance(team, PRTeam):
+            return None
+        teams.append(team)
+    return teams
+
+
+def _reviewer_candidate_result(
+    value: object,
+) -> tuple[list[PRUser], list[PRTeam]] | None:
+    if not isinstance(value, tuple) or len(value) != 2:
+        return None
+
+    users = _pr_user_list(value[0])
+    teams = _pr_team_list(value[1])
+    if users is None or teams is None:
+        return None
+    return users, teams
 
 
 _PR_INFO_BINDINGS = [
@@ -228,7 +269,7 @@ class MainScreen(Screen[None]):
         try:
             tree = self.file_changes.file_tree.query_one("#file-tree", Tree)
             tree.focus()
-        except Exception:
+        except NoMatches:
             pass
 
     def watch_current_tab(self, old_tab: int, new_tab: int) -> None:
@@ -951,9 +992,11 @@ class MainScreen(Screen[None]):
 
         if event.worker.name == "_load_reviewer_candidates":
             if event.state == WorkerState.SUCCESS:
-                users, teams = cast(
-                    tuple[list[PRUser], list[PRTeam]], event.worker.result
-                )
+                candidates = _reviewer_candidate_result(event.worker.result)
+                if candidates is None:
+                    self.notify("Failed to load reviewer candidates", severity="error")
+                    return
+                users, teams = candidates
                 self._show_reviewer_picker(users, teams)
             elif event.state == WorkerState.ERROR:
                 self.notify("Failed to load reviewer candidates", severity="error")
@@ -961,7 +1004,10 @@ class MainScreen(Screen[None]):
 
         if event.worker.name == "_load_assignee_candidates":
             if event.state == WorkerState.SUCCESS:
-                users = cast(list[PRUser], event.worker.result)
+                users = _pr_user_list(event.worker.result)
+                if users is None:
+                    self.notify("Failed to load assignee candidates", severity="error")
+                    return
                 self._show_assignee_picker(users)
             elif event.state == WorkerState.ERROR:
                 self.notify("Failed to load assignee candidates", severity="error")
@@ -1108,7 +1154,7 @@ class MainScreen(Screen[None]):
 
         try:
             self.file_changes.file_tree.query_one("#file-tree", Tree)
-        except Exception:
+        except NoMatches:
             return None
         return "tree" if self.file_changes.file_tree.has_focus_within else None
 
@@ -1315,8 +1361,6 @@ class MainScreen(Screen[None]):
             await self.store.set_file_viewed(
                 filename, viewed=new_state == FileViewedState.VIEWED
             )
-            label = "Viewed" if new_state == FileViewedState.VIEWED else "Unviewed"
-            self.post_message(Flash(f"Marked {label}", style="success", duration=1.5))
         except Exception:
             file = next(
                 (f for f in self.store.state.files if f.filename == filename),
@@ -1332,3 +1376,7 @@ class MainScreen(Screen[None]):
                     duration=3.0,
                 )
             )
+            return
+
+        label = "Viewed" if new_state == FileViewedState.VIEWED else "Unviewed"
+        self.post_message(Flash(f"Marked {label}", style="success", duration=1.5))

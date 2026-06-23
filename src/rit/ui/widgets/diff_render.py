@@ -2,27 +2,32 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING, Literal
 
 from rich.cells import cell_len
-from rich.markup import escape
-from rich.text import Text
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.widget import Widget
 from textual.widgets import Static
 
 from rit.core.types import DiffHunk, DiffLine, FileDiff
-from rit.state.models import FileViewedState, PRFile
+from rit.state.models import PRFile
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_comments as _comments
+from rit.ui.widgets import diff_cursor_content as _cursor_content
+from rit.ui.widgets import diff_full_file_preview as _full_preview
 from rit.ui.widgets import diff_geometry as _geometry
+from rit.ui.widgets import diff_header as _header
 from rit.ui.widgets import diff_highlight as _hl
+from rit.ui.widgets import diff_layout as _layout
+from rit.ui.widgets import diff_location as _location
 from rit.ui.widgets import diff_plan as _plan
+from rit.ui.widgets import diff_prefix as _prefix
 from rit.ui.widgets import diff_search as _search
+from rit.ui.widgets import diff_styles as _styles
 from rit.ui.widgets import diff_virtual as _virtual
 from rit.ui.widgets.diff_visual import (
-    MISSING_SIDE_BACKGROUND_STYLE,
     MISSING_SIDE_HATCH_STYLE,
     SyncedCodeScroll,
     missing_side_hatch_text,
@@ -32,6 +37,9 @@ if TYPE_CHECKING:
     from contextvars import ContextVar
 
     from rit.ui.widgets.diff_view import DiffView
+
+
+__all__ = ("PREVIEW_PREFIX_WIDTH",)
 
 
 def _get_render_request_context() -> ContextVar[int | None]:
@@ -45,75 +53,40 @@ def _get_render_request_context() -> ContextVar[int | None]:
 # ---------------------------------------------------------------------------
 
 
-def _has_only_added_deleted_changes(lines: list[DiffLine]) -> bool:
-    has_change = False
-
-    for line in lines:
-        if line.is_modified:
-            return False
-        if line.is_added or line.is_deleted:
-            has_change = True
-
-    return has_change
-
-
-def _change_stats_are_single_sided(additions: int, deletions: int) -> bool:
-    return (additions > 0 and deletions == 0) or (deletions > 0 and additions == 0)
-
-
 def _should_force_unified_for_current_file(view: DiffView) -> bool:
-    if view._showing_full_file:
-        return True
-    if view._file is not None:
-        if view._file.status in {"added", "removed"}:
-            return True
-        if _change_stats_are_single_sided(view._file.additions, view._file.deletions):
-            return True
-    diff = view._diff
-    if diff is None:
-        return False
-    if diff.is_new or diff.is_deleted:
-        return True
-    return diff.is_fully_refined and _has_only_added_deleted_changes(view._all_lines)
+    file = _file_for_header(view, view.current_file) if view.current_file else None
+    return _layout.should_force_unified_for_file(
+        showing_full_file=view._showing_full_file,
+        file=file,
+        diff=view._diff,
+        lines=view._all_lines,
+    )
 
 
 def _should_force_unified_for_hunk(hunk: DiffHunk) -> bool:
-    if hunk.file_status in {"added", "removed"}:
-        return True
-    return _change_stats_are_single_sided(hunk.file_additions, hunk.file_deletions)
+    return _layout.should_force_unified_for_hunk(hunk)
 
 
 def _split_prefix_width_for_layout(
     view: DiffView,
     side: Literal["old", "new"],
 ) -> int:
-    if not view.show_line_numbers:
-        return 2
     line_width = (
         _old_line_number_width(view) if side == "old" else _new_line_number_width(view)
     )
-    return line_width + 2
+    return _layout.split_prefix_width_for_layout(
+        show_line_numbers=view.show_line_numbers,
+        line_number_width=line_width,
+    )
 
 
 def _can_fit_auto_split_content(view: DiffView) -> bool:
-    if not view._all_lines:
-        return True
-
-    old_prefix_width = _split_prefix_width_for_layout(view, "old")
-    new_prefix_width = _split_prefix_width_for_layout(view, "new")
-    max_old_width = max(
-        (len(line.old_content) for line in view._all_lines if line.old_content),
-        default=0,
+    return _layout.can_fit_auto_split_content(
+        view._all_lines,
+        old_prefix_width=_split_prefix_width_for_layout(view, "old"),
+        new_prefix_width=_split_prefix_width_for_layout(view, "new"),
+        available_width=view.size.width,
     )
-    max_new_width = max(
-        (len(line.new_content) for line in view._all_lines if line.new_content),
-        default=0,
-    )
-    split_gap = 2
-    required_width = old_prefix_width + max_old_width + new_prefix_width + max_new_width
-    required_width += split_gap
-    required_width += split_gap
-    return view.size.width >= required_width
 
 
 def _update_split_state(view: DiffView) -> None:
@@ -265,55 +238,29 @@ def _should_render_hunk_header(
 
 
 def _build_header_text(view: DiffView) -> str:
-    """Build the diff header text including viewed badge."""
-    if not view.current_file:
-        return "Select a file to view diff"
-
-    path = escape(view.current_file)
-    status_parts: list[str] = []
-    if view._file:
-        state_badge, state_style = _viewed_state_badge(view._file)
-        status_parts.extend(
-            [
-                f"[{state_style}]{state_badge}[/]",
-                _change_stats_markup(view._file.additions, view._file.deletions),
-            ]
-        )
-
-    if view._showing_full_file:
-        location = _full_preview_location_label(view)
-        status_parts.append("[dim italic]preview[/]")
-        if location:
-            status_parts.append(f"[dim]{escape(location)}[/]")
-
-    if not status_parts:
-        return f"[bold #cad3f5]{path}[/]"
-
-    return f"[bold #cad3f5]{path}[/]  " + "  [dim]|[/]  ".join(status_parts)
+    """Build the diff header text for the current view state."""
+    showing_full_file = bool(view.current_file and view._showing_full_file)
+    file = _file_for_header(view, view.current_file) if view.current_file else None
+    return _header.build_diff_header_text(
+        current_file=view.current_file,
+        file=file,
+        showing_full_file=showing_full_file,
+        preview_location=_full_preview_location_label(view)
+        if showing_full_file
+        else "",
+    )
 
 
 def _full_preview_location_label(view: DiffView) -> str:
     line = view._current_line()
-    if line is None:
-        return ""
-
-    line_no = line.new_line_no or line.old_line_no or line.line_index + 1
-    total_lines = len(view._all_lines)
-    label = f"line {line_no}/{total_lines}"
-
-    diff = view._diff
-    if diff is None or not diff.hunks:
-        return label
-
-    hunk_index = view._get_hunk_index_for_line(line.line_index)
-    if hunk_index is None or not (0 <= hunk_index < len(diff.hunks)):
-        return label
-
-    hunk = diff.hunks[hunk_index]
-    section = hunk.header.strip()
-    if not section:
-        section = f"section {hunk_index + 1}/{len(diff.hunks)}"
-    return f"{label}  {section}"
+    return _location.full_preview_location_label(
+        line=line,
+        total_lines=len(view._all_lines),
+        diff=view._diff,
+        hunk_index=view._get_hunk_index_for_line(line.line_index)
+        if line is not None
+        else None,
+    )
 
 
 async def _render_diff(view: DiffView) -> None:
@@ -384,116 +331,53 @@ async def _render_diff(view: DiffView) -> None:
 
 
 def _file_for_header(view: DiffView, path: str) -> PRFile | None:
-    if view.store is not None:
+    store = getattr(view, "store", None)
+    state = getattr(store, "state", None)
+    files = getattr(state, "files", None)
+    if isinstance(files, Sequence) and not isinstance(files, (str, bytes)):
         file = next(
             (
                 candidate
-                for candidate in view.store.state.files
-                if candidate.filename == path
+                for candidate in files
+                if isinstance(candidate, PRFile) and candidate.filename == path
             ),
             None,
         )
         if file is not None:
             return file
 
-        file = view.store.state.files_by_filename.get(path)
-        if file is not None:
+    files_by_filename = getattr(state, "files_by_filename", None)
+    if isinstance(files_by_filename, Mapping):
+        file = files_by_filename.get(path)
+        if isinstance(file, PRFile):
             return file
 
-    if view._file is not None and view._file.filename == path:
-        return view._file
+    file = getattr(view, "_file", None)
+    if isinstance(file, PRFile) and file.filename == path:
+        return file
 
     return None
 
 
-def _viewed_state_badge(file: PRFile | None) -> tuple[str, str]:
-    state = file.viewer_viewed_state if file is not None else FileViewedState.UNVIEWED
-    if state == FileViewedState.VIEWED:
-        return "✓ Viewed", "bold #a6da95"
-    if state == FileViewedState.DISMISSED:
-        return "! Changed", "bold #eed49f"
-    return "● Unviewed", "#6e738d"
-
-
-def _change_stats_markup(additions: int, deletions: int) -> str:
-    parts: list[str] = []
-    if deletions:
-        parts.append(f"[bold #ed8796]-{deletions}[/]")
-    if additions:
-        parts.append(f"[bold #a6da95]+{additions}[/]")
-    if not parts:
-        return "[dim]no textual changes[/]"
-    return " ".join(parts)
-
-
 def _change_stats_plain(additions: int, deletions: int) -> str:
-    parts: list[str] = []
-    if deletions:
-        parts.append(f"-{deletions}")
-    if additions:
-        parts.append(f"+{additions}")
-    if not parts:
-        return "no textual changes"
-    return " ".join(parts)
-
-
-def _append_change_stats(text: Text, additions: int, deletions: int) -> None:
-    if deletions:
-        text.append(f"-{deletions}", style="bold #ed8796")
-        if additions:
-            text.append(" ")
-    if additions:
-        text.append(f"+{additions}", style="bold #a6da95")
-    if not additions and not deletions:
-        text.append("no textual changes", style="dim")
+    return _header.change_stats_plain(additions, deletions)
 
 
 def _file_header_width_for_layout(view: DiffView, fallback_width: int) -> int:
-    viewport_width = view.scrollable_content_region.width
-    if viewport_width > 0:
-        return max(fallback_width, viewport_width - 8)
-    if not view.split:
-        return max(fallback_width, _unified_content_width_for_layout(view))
-    split_width = (
-        _split_prefix_width_for_layout(view, "old")
-        + view._split_old_code_width
-        + _split_prefix_width_for_layout(view, "new")
-        + view._split_new_code_width
-        + 4
+    return _layout.file_header_width_for_layout(
+        fallback_width=fallback_width,
+        viewport_width=view.scrollable_content_region.width,
+        split=view.split,
+        unified_content_width=_unified_content_width_for_layout(view),
+        old_split_prefix_width=_split_prefix_width_for_layout(view, "old"),
+        old_split_code_width=view._split_old_code_width,
+        new_split_prefix_width=_split_prefix_width_for_layout(view, "new"),
+        new_split_code_width=view._split_new_code_width,
     )
-    return max(fallback_width, split_width)
-
-
-def _truncate_middle(value: str, max_width: int) -> str:
-    if cell_len(value) <= max_width:
-        return value
-    if max_width <= 3:
-        return value[:max(0, max_width)]
-
-    head_width = max(1, (max_width - 3) // 2)
-    tail_width = max(1, max_width - 3 - head_width)
-    return f"{value[:head_width]}...{value[-tail_width:]}"
 
 
 def _aggregate_file_change_stats(view: DiffView, path: str) -> tuple[int, int]:
-    diff = view._diff
-    if diff is None:
-        return 0, 0
-
-    additions = 0
-    deletions = 0
-    active_path = diff.filename
-    for hunk in diff.hunks:
-        hunk_path = hunk.file_path or active_path
-        for line in hunk.lines:
-            line_path = line.file_path or hunk_path
-            if line_path != path:
-                continue
-            if line.is_added or line.is_modified:
-                additions += 1
-            if line.is_deleted or line.is_modified:
-                deletions += 1
-    return additions, deletions
+    return _header.aggregate_file_change_stats(view._diff, path)
 
 
 def _create_file_header_widget(
@@ -519,27 +403,24 @@ def _create_file_header_widget(
     stats_plain = _change_stats_plain(additions, deletions)
     width = _file_header_width_for_layout(
         view,
-        cell_len(path) + cell_len(stats_plain) + 8,
+        _header.file_header_min_width(
+            path=path,
+            old_path=old_path,
+            stats_plain=stats_plain,
+        ),
     )
     prefix_plain = "▾ "
     path_budget = max(
         4,
         width - cell_len(prefix_plain) - cell_len(stats_plain) - 2,
     )
-    display_path = f"{old_path} -> {path}" if old_path and old_path != path else path
-    display_path = _truncate_middle(display_path, path_budget)
-
-    text = Text()
-    text.append("▾", style="#6e738d")
-    text.append(" ")
-    _append_change_stats(text, additions, deletions)
-    text.append(" ")
-    if old_path and old_path != path and display_path == f"{old_path} -> {path}":
-        text.append(old_path, style="dim")
-        text.append(" -> ", style="dim")
-        text.append(path, style="bold #cad3f5")
-    else:
-        text.append(display_path, style="bold #cad3f5")
+    text = _header.build_file_header_text(
+        path=path,
+        old_path=old_path,
+        additions=additions,
+        deletions=deletions,
+        path_budget=path_budget,
+    )
 
     header_widget = Static(
         text,
@@ -604,19 +485,7 @@ def _hunk_lines_for_window(
     window_start: int | None,
     window_end: int | None,
 ) -> list[DiffLine]:
-    if window_start is None or window_end is None:
-        return hunk.lines
-    if not hunk.lines or window_start > window_end:
-        return []
-
-    hunk_start = hunk.lines[0].line_index
-    hunk_end = hunk.lines[-1].line_index
-    if hunk_end < window_start or hunk_start > window_end:
-        return []
-
-    start_index = max(0, window_start - hunk_start)
-    end_index = min(len(hunk.lines) - 1, window_end - hunk_start)
-    return hunk.lines[start_index : end_index + 1]
+    return _geometry.hunk_lines_for_window(hunk, window_start, window_end)
 
 
 def _render_hunk(
@@ -671,31 +540,34 @@ PREVIEW_PREFIX_WIDTH = 7
 
 
 def _old_line_number_width(view: DiffView) -> int:
-    if not view.show_line_numbers:
-        return 0
-    numbers = view._line_index_by_old_number
-    return max(1, len(str(max(numbers)))) if numbers else 1
+    return _layout.line_number_width_for_layout(
+        show_line_numbers=view.show_line_numbers,
+        numbers=tuple(view._line_index_by_old_number),
+    )
 
 
 def _new_line_number_width(view: DiffView) -> int:
-    if not view.show_line_numbers:
-        return 0
-    numbers = view._line_index_by_new_number
-    return max(1, len(str(max(numbers)))) if numbers else 1
+    return _layout.line_number_width_for_layout(
+        show_line_numbers=view.show_line_numbers,
+        numbers=tuple(view._line_index_by_new_number),
+    )
 
 
 def _unified_prefix_width_for_layout(view: DiffView) -> int:
     if view._showing_full_file:
         return _preview_prefix_width_for_layout(view)
-    if not view.show_line_numbers:
-        return 2
-    return _old_line_number_width(view) + _new_line_number_width(view) + 4
+    return _layout.unified_prefix_width_for_layout(
+        show_line_numbers=view.show_line_numbers,
+        old_line_number_width=_old_line_number_width(view),
+        new_line_number_width=_new_line_number_width(view),
+    )
 
 
 def _preview_prefix_width_for_layout(view: DiffView) -> int:
-    if not view.show_line_numbers:
-        return 3
-    return _new_line_number_width(view) + 4
+    return _layout.preview_prefix_width_for_layout(
+        show_line_numbers=view.show_line_numbers,
+        new_line_number_width=_new_line_number_width(view),
+    )
 
 
 def _split_placeholder_content(
@@ -706,7 +578,10 @@ def _split_placeholder_content(
     side_width = (
         view._split_old_code_width if side == "old" else view._split_new_code_width
     )
-    width = max(1, side_width, view.size.width // 2)
+    width = _layout.split_placeholder_width_for_layout(
+        side_code_width=side_width,
+        viewport_width=view.size.width,
+    )
     return Content.styled(
         missing_side_hatch_text(width),
         MISSING_SIDE_HATCH_STYLE,
@@ -716,52 +591,20 @@ def _split_placeholder_content(
 def _build_unified_prefix_content(view: DiffView, line: DiffLine) -> Content:
     if view._showing_full_file:
         return _build_preview_prefix_content(view, line)
-
-    prefix_parts: list[Content] = []
-    if view.show_line_numbers:
-        old_width = _old_line_number_width(view)
-        new_width = _new_line_number_width(view)
-        old_no = str(line.old_line_no) if line.old_line_no else ""
-        new_no = str(line.new_line_no) if line.new_line_no else ""
-        prefix_parts.append(Content.styled(f"{old_no:>{old_width}} ", "$text-disabled"))
-        prefix_parts.append(Content.styled(f"{new_no:>{new_width}} ", "$text-disabled"))
-
-    prefix = " "
-    if line.is_added:
-        prefix = "+"
-    elif line.is_deleted:
-        prefix = "-"
-    prefix_parts.append(Content(prefix + " "))
-    return Content("").join(prefix_parts)
+    return _prefix.build_unified_prefix_content(
+        line,
+        show_line_numbers=view.show_line_numbers,
+        old_line_number_width=_old_line_number_width(view),
+        new_line_number_width=_new_line_number_width(view),
+    )
 
 
 def _build_preview_prefix_content(view: DiffView, line: DiffLine) -> Content:
-    line_no = str(line.new_line_no) if line.new_line_no else ""
-    delete_marker = (
-        Content.styled("▸", "$error")
-        if line.preview_deleted_before
-        else Content(" ")
+    return _prefix.build_preview_prefix_content(
+        line,
+        show_line_numbers=view.show_line_numbers,
+        new_line_number_width=_new_line_number_width(view),
     )
-    change_marker = _preview_change_marker_content(line)
-    if not view.show_line_numbers:
-        return Content("").join([delete_marker, change_marker, Content(" ")])
-    line_width = _new_line_number_width(view)
-    return Content("").join(
-        [
-            Content.styled(f"{line_no:>{line_width}} ", "$text-disabled"),
-            delete_marker,
-            change_marker,
-            Content(" "),
-        ]
-    )
-
-
-def _preview_change_marker_content(line: DiffLine) -> Content:
-    if line.preview_change == "added":
-        return Content.styled("┃", "$success")
-    if line.preview_change == "modified":
-        return Content.styled("┃", "$warning")
-    return Content(" ")
 
 
 def _unified_line_style(
@@ -770,17 +613,11 @@ def _unified_line_style(
     *,
     side: Literal["old", "new", "auto"] = "auto",
 ) -> str:
-    if view._showing_full_file:
-        return ""
-    if side == "old" and line.is_modified:
-        return "on $error 6%"
-    if side == "new" and line.is_modified:
-        return "on $success 6%"
-    if line.is_added:
-        return "on $success 6%"
-    if line.is_deleted:
-        return "on $error 6%"
-    return ""
+    return _styles.unified_line_style(
+        line,
+        side=side,
+        showing_full_file=view._showing_full_file,
+    )
 
 
 def _split_line_style(
@@ -789,17 +626,11 @@ def _split_line_style(
     *,
     side: Literal["old", "new"],
 ) -> str:
-    if (
-        line.is_modified
-        and line.has_word_diff
-        and getattr(view, "word_diff_enabled", True)
-    ):
-        return ""
-    if side == "old" and (line.is_deleted or line.is_modified):
-        return "on $error 6%"
-    if side == "new" and (line.is_added or line.is_modified):
-        return "on $success 6%"
-    return ""
+    return _styles.split_line_style(
+        line,
+        side=side,
+        word_diff_enabled=getattr(view, "word_diff_enabled", True),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -807,18 +638,8 @@ def _split_line_style(
 # ---------------------------------------------------------------------------
 
 
-def _line_code_width(line: DiffLine, side: Literal["old", "new"]) -> int:
-    text = line.old_content if side == "old" else line.new_content
-    return max(1, cell_len(text)) if text else 1
-
-
 def _code_widths_for_layout(view: DiffView) -> tuple[int, int, int]:
-    old_width = 1
-    new_width = 1
-    for line in view._all_lines:
-        old_width = max(old_width, _line_code_width(line, "old"))
-        new_width = max(new_width, _line_code_width(line, "new"))
-    return max(old_width, new_width), old_width, new_width
+    return _layout.code_widths_for_layout(view._all_lines)
 
 
 def _unified_code_width_for_layout(view: DiffView) -> int:
@@ -1141,14 +962,7 @@ def _unified_code_classes(
     *,
     side: Literal["old", "new", "auto"] = "auto",
 ) -> str:
-    classes = "code-content"
-    if side == "old" or line.is_deleted:
-        if side == "old" or line.is_modified or line.is_deleted:
-            classes += " -removed"
-    elif side == "new" or line.is_added:
-        if side == "new" or line.is_modified or line.is_added:
-            classes += " -added"
-    return classes
+    return _styles.unified_code_classes(line, side=side)
 
 
 def _build_unified_code_content(
@@ -1204,17 +1018,15 @@ def _build_split_prefix(
     side: Literal["old", "new"],
     line_index: int,
 ) -> Content:
-    parts: list[Content] = []
-    if view.show_line_numbers:
-        line_text = str(line_no) if line_no is not None else ""
-        line_width = (
-            _old_line_number_width(view)
-            if side == "old"
-            else _new_line_number_width(view)
-        )
-        parts.append(Content.styled(f"{line_text:>{line_width}} ", "$text-disabled"))
-    parts.append(Content(prefix + " "))
-    return Content("").join(parts)
+    line_width = (
+        _old_line_number_width(view) if side == "old" else _new_line_number_width(view)
+    )
+    return _prefix.build_split_prefix(
+        line_no,
+        prefix,
+        show_line_numbers=view.show_line_numbers,
+        line_number_width=line_width,
+    )
 
 
 def _build_split_prefix_content(
@@ -1223,19 +1035,14 @@ def _build_split_prefix_content(
     *,
     side: Literal["old", "new"],
 ) -> Content:
-    if side == "old":
-        prefix = "-" if line.is_deleted or line.is_modified else " "
-        line_no = line.old_line_no
-    else:
-        prefix = "+" if line.is_added or line.is_modified else " "
-        line_no = line.new_line_no
-
-    return _build_split_prefix(
-        view,
-        line_no,
-        prefix,
+    line_width = (
+        _old_line_number_width(view) if side == "old" else _new_line_number_width(view)
+    )
+    return _prefix.build_split_prefix_content(
+        line,
         side=side,
-        line_index=line.line_index,
+        show_line_numbers=view.show_line_numbers,
+        line_number_width=line_width,
     )
 
 
@@ -1244,7 +1051,7 @@ def _split_side_missing(
     *,
     side: Literal["old", "new"],
 ) -> bool:
-    return not (line.has_old_side if side == "old" else line.has_new_side)
+    return _styles.split_side_missing(line, side=side)
 
 
 def _split_prefix_classes(
@@ -1252,10 +1059,7 @@ def _split_prefix_classes(
     *,
     side: Literal["old", "new"],
 ) -> str:
-    classes = "line-prefix"
-    if _split_side_missing(line, side=side):
-        classes += " -placeholder"
-    return classes
+    return _styles.split_prefix_classes(line, side=side)
 
 
 def _split_annotation_style(
@@ -1264,9 +1068,7 @@ def _split_annotation_style(
     *,
     side: Literal["old", "new"],
 ) -> str:
-    if _split_side_missing(line, side=side):
-        return MISSING_SIDE_BACKGROUND_STYLE
-    return ""
+    return _styles.split_annotation_style(line, side=side)
 
 
 def _split_code_classes(
@@ -1275,21 +1077,11 @@ def _split_code_classes(
     side: Literal["old", "new"],
     word_diff_enabled: bool,
 ) -> str:
-    classes = f"code-content -{side}-side"
-    inline_word_diff = line.is_modified and word_diff_enabled and line.has_word_diff
-
-    if side == "old":
-        if line.is_deleted or (line.is_modified and not inline_word_diff):
-            classes += " -removed"
-        if line.is_added:
-            classes += " -placeholder"
-    else:
-        if line.is_added or (line.is_modified and not inline_word_diff):
-            classes += " -added"
-        if line.is_deleted:
-            classes += " -placeholder"
-
-    return classes
+    return _styles.split_code_classes(
+        line,
+        side=side,
+        word_diff_enabled=word_diff_enabled,
+    )
 
 
 def _build_split_code_content(
@@ -1434,22 +1226,13 @@ def _build_unified_modified_prefix_content(
     *,
     side: Literal["old", "new"],
 ) -> Content:
-    prefix_parts: list[Content] = []
-    if view.show_line_numbers:
-        old_width = _old_line_number_width(view)
-        new_width = _new_line_number_width(view)
-        if side == "old":
-            prefix_parts.append(
-                Content.styled(f"{line.old_line_no:>{old_width}} ", "$text-disabled")
-            )
-            prefix_parts.append(Content.styled(" " * (new_width + 1), "$text-disabled"))
-        else:
-            prefix_parts.append(Content.styled(" " * (old_width + 1), "$text-disabled"))
-            prefix_parts.append(
-                Content.styled(f"{line.new_line_no:>{new_width}} ", "$text-disabled")
-            )
-    prefix_parts.append(Content("- " if side == "old" else "+ "))
-    return Content("").join(prefix_parts)
+    return _prefix.build_unified_modified_prefix_content(
+        line,
+        side=side,
+        show_line_numbers=view.show_line_numbers,
+        old_line_number_width=_old_line_number_width(view),
+        new_line_number_width=_new_line_number_width(view),
+    )
 
 
 def _render_modified_line(view: DiffView, line: DiffLine) -> Vertical:
@@ -1637,14 +1420,12 @@ def _build_code_content_with_cursor(
         line.line_index,
         side,
     )
-    if not has_cursor or cursor_col is None:
-        return base_content
-    text_content = view._get_line_text(line, side)
-    if not text_content:
-        return Content(" ").stylize("reverse", 0, 1)
-    if cursor_col >= len(text_content):
-        return base_content
-    return base_content.stylize("reverse", cursor_col, cursor_col + 1)
+    return _cursor_content.apply_cursor_to_code_content(
+        base_content,
+        line_text=view._get_line_text(line, side),
+        has_cursor=has_cursor,
+        cursor_col=cursor_col,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1658,282 +1439,8 @@ def _build_full_file_diff(
     *,
     source_diff: FileDiff | None = None,
 ) -> FileDiff:
-    raw_lines = content.split("\n")
-    if raw_lines and raw_lines[-1] == "":
-        raw_lines.pop()
-
-    diff_lines = [
-        DiffLine(
-            old_line_no=i + 1,
-            new_line_no=i + 1,
-            old_content=line,
-            new_content=line,
-        )
-        for i, line in enumerate(raw_lines)
-    ]
-
-    if source_diff is not None:
-        _apply_full_preview_change_markers(diff_lines, source_diff)
-
-    hunks = _build_full_file_preview_hunks(
+    return _full_preview.build_full_file_diff(
         filename,
-        diff_lines,
+        content,
         source_diff=source_diff,
-    )
-
-    return FileDiff(filename=filename, hunks=hunks, show_hunk_headers=False)
-
-
-def _apply_full_preview_change_markers(
-    diff_lines: list[DiffLine],
-    source_diff: FileDiff,
-) -> None:
-    if not diff_lines:
-        return
-
-    lines_by_new_number = {
-        line.new_line_no: line for line in diff_lines if line.new_line_no is not None
-    }
-    total_lines = len(diff_lines)
-
-    for hunk in source_diff.hunks:
-        pending_deletion = False
-        last_new_line_no: int | None = None
-
-        for source_line in hunk.lines:
-            if source_line.is_deleted:
-                pending_deletion = True
-                continue
-
-            new_line_no = source_line.new_line_no
-            if new_line_no is None:
-                continue
-
-            if pending_deletion:
-                _mark_full_preview_deleted_before(lines_by_new_number, new_line_no)
-                pending_deletion = False
-
-            target_line = lines_by_new_number.get(new_line_no)
-            if target_line is not None:
-                if source_line.is_modified:
-                    target_line.preview_change = "modified"
-                elif source_line.is_added:
-                    target_line.preview_change = "added"
-
-            last_new_line_no = new_line_no
-
-        if pending_deletion:
-            anchor_line_no = _full_preview_deleted_anchor_line(
-                hunk,
-                total_lines,
-                last_new_line_no,
-            )
-            if anchor_line_no is not None:
-                _mark_full_preview_deleted_before(
-                    lines_by_new_number,
-                    anchor_line_no,
-                )
-
-
-def _mark_full_preview_deleted_before(
-    lines_by_new_number: dict[int, DiffLine],
-    line_no: int,
-) -> None:
-    line = lines_by_new_number.get(line_no)
-    if line is not None:
-        line.preview_deleted_before = True
-
-
-def _full_preview_deleted_anchor_line(
-    hunk: DiffHunk,
-    total_lines: int,
-    last_new_line_no: int | None,
-) -> int | None:
-    if total_lines <= 0:
-        return None
-    if last_new_line_no is not None:
-        return min(total_lines, max(1, last_new_line_no + 1))
-    return min(total_lines, max(1, hunk.new_start))
-
-
-def _build_full_file_preview_hunks(
-    filename: str,
-    diff_lines: list[DiffLine],
-    *,
-    source_diff: FileDiff | None,
-) -> list[DiffHunk]:
-    if not diff_lines:
-        return [
-            DiffHunk(
-                old_start=0,
-                old_count=0,
-                new_start=0,
-                new_count=0,
-                header="empty file",
-                lines=[],
-                starts_file=True,
-                file_path=filename,
-            )
-        ]
-
-    if source_diff is None or not source_diff.hunks:
-        return [
-            DiffHunk(
-                old_start=1,
-                old_count=len(diff_lines),
-                new_start=1,
-                new_count=len(diff_lines),
-                header="full file",
-                lines=diff_lines,
-                starts_file=True,
-                file_path=filename,
-                file_additions=source_diff.total_additions if source_diff else 0,
-                file_deletions=source_diff.total_deletions if source_diff else 0,
-            )
-        ]
-
-    change_ranges = _full_preview_change_ranges(source_diff, len(diff_lines))
-    if not change_ranges:
-        return [
-            DiffHunk(
-                old_start=1,
-                old_count=len(diff_lines),
-                new_start=1,
-                new_count=len(diff_lines),
-                header="full file",
-                lines=diff_lines,
-                starts_file=True,
-                file_path=filename,
-                file_additions=source_diff.total_additions,
-                file_deletions=source_diff.total_deletions,
-            )
-        ]
-
-    hunks: list[DiffHunk] = []
-    cursor = 1
-    total_changes = len(change_ranges)
-
-    for range_index, (start, end, source_hunk) in enumerate(change_ranges, start=1):
-        if cursor < start:
-            hunks.append(
-                _make_full_preview_hunk(
-                    filename,
-                    diff_lines,
-                    start=cursor,
-                    end=start - 1,
-                    header=_full_preview_context_label(range_index, total_changes),
-                    starts_file=not hunks,
-                    source_diff=source_diff,
-                )
-            )
-
-        hunks.append(
-            _make_full_preview_hunk(
-                filename,
-                diff_lines,
-                start=start,
-                end=end,
-                header=_full_preview_change_label(
-                    range_index,
-                    total_changes,
-                    source_hunk.header,
-                ),
-                starts_file=not hunks,
-                source_diff=source_diff,
-                old_start=source_hunk.old_start,
-                old_count=source_hunk.old_count,
-                new_start=source_hunk.new_start,
-                new_count=source_hunk.new_count,
-            )
-        )
-        cursor = end + 1
-
-    if cursor <= len(diff_lines):
-        hunks.append(
-            _make_full_preview_hunk(
-                filename,
-                diff_lines,
-                start=cursor,
-                end=len(diff_lines),
-                header=f"context after hunk {total_changes}",
-                starts_file=not hunks,
-                source_diff=source_diff,
-            )
-        )
-
-    return hunks
-
-
-def _full_preview_change_ranges(
-    source_diff: FileDiff,
-    total_lines: int,
-) -> list[tuple[int, int, DiffHunk]]:
-    ranges: list[tuple[int, int, DiffHunk]] = []
-    next_start = 1
-
-    for hunk in source_diff.hunks:
-        if hunk.new_count <= 0:
-            start = max(1, min(hunk.new_start, total_lines))
-            end = start
-        else:
-            start = max(1, min(hunk.new_start, total_lines))
-            end = max(start, min(hunk.new_start + hunk.new_count - 1, total_lines))
-
-        if start < next_start:
-            start = next_start
-        if start > total_lines:
-            break
-        if end < start:
-            end = start
-
-        ranges.append((start, end, hunk))
-        next_start = end + 1
-
-    return ranges
-
-
-def _full_preview_context_label(range_index: int, total_changes: int) -> str:
-    if range_index == 1:
-        return "context before hunk 1"
-    return f"context between hunks {range_index - 1}-{range_index}"
-
-
-def _full_preview_change_label(
-    range_index: int,
-    total_changes: int,
-    header: str,
-) -> str:
-    label = f"change hunk {range_index}/{total_changes}"
-    header = header.strip()
-    if header:
-        label += f"  {header}"
-    return label
-
-
-def _make_full_preview_hunk(
-    filename: str,
-    diff_lines: list[DiffLine],
-    *,
-    start: int,
-    end: int,
-    header: str,
-    starts_file: bool,
-    source_diff: FileDiff,
-    old_start: int | None = None,
-    old_count: int | None = None,
-    new_start: int | None = None,
-    new_count: int | None = None,
-) -> DiffHunk:
-    count = max(0, end - start + 1)
-    return DiffHunk(
-        old_start=old_start if old_start is not None else start,
-        old_count=old_count if old_count is not None else count,
-        new_start=new_start if new_start is not None else start,
-        new_count=new_count if new_count is not None else count,
-        header=header,
-        lines=diff_lines[start - 1 : end],
-        starts_file=starts_file,
-        file_path=filename if starts_file else None,
-        file_additions=source_diff.total_additions,
-        file_deletions=source_diff.total_deletions,
     )

@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Literal
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal
+from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import reactive, var
 from textual.widgets import Static
@@ -14,6 +15,11 @@ if TYPE_CHECKING:
 
 
 PRStatus = Literal["Open", "Merged", "Closed", "Draft"]
+
+__all__ = (
+    "Header",
+    "PRStatus",
+)
 
 
 class Header(Horizontal):
@@ -109,20 +115,20 @@ class Header(Horizontal):
             )
             status_class = f"status-{new_status.lower()}"
             status_widget.add_class(status_class)
-        except Exception:
-            pass  # Widget not yet mounted
+        except NoMatches:
+            pass
 
     def watch_pr_title(self, new_title: str) -> None:
         try:
             self._update_title_display(new_title)
-        except Exception:
-            pass  # Widget not yet mounted
+        except NoMatches:
+            pass
 
     def update_from_pr(self, pr: PR) -> None:
         self.pr_title = pr.title
-        self.pr_status = pr.state_display  # type: ignore
+        self.pr_status = pr.state_display
 
-        self.post_message(self.PRInfoUpdated(title=pr.title, status=pr.state_display))  # type: ignore
+        self.post_message(self.PRInfoUpdated(title=pr.title, status=pr.state_display))
 
     def update_pr_info(
         self,

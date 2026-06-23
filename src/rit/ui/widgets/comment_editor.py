@@ -3,14 +3,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
-EditorKind = Literal["issue", "inline"]
-SubmitMode = Literal["queue", "post"]
-
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.message import Message
 from textual.widgets import Static, TextArea
+
+EditorKind = Literal["issue", "inline"]
+SubmitMode = Literal["queue", "post"]
+
+__all__ = (
+    "EditorKind",
+    "InlineCommentEditor",
+    "SubmitMode",
+)
 
 
 class InlineCommentEditor(Vertical):

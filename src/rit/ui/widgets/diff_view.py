@@ -23,11 +23,17 @@ from rit.state.models import PendingReviewComment, PRFile, ReviewThread
 from rit.ui.messages import Flash
 from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets import diff_cursor as _cursor
+from rit.ui.widgets import diff_cursor_side as _cursor_side
+from rit.ui.widgets import diff_cursor_update as _cursor_update
+from rit.ui.widgets import diff_full_file_preview as _full_preview
 from rit.ui.widgets import diff_highlight as _hl
+from rit.ui.widgets import diff_location as _location
 from rit.ui.widgets import diff_plan as _plan
 from rit.ui.widgets import diff_render as _render
 from rit.ui.widgets import diff_search as _search
 from rit.ui.widgets import diff_selection as _selection
+from rit.ui.widgets import diff_status as _status
+from rit.ui.widgets import diff_visual_mode as _visual_mode
 from rit.ui.widgets import diff_virtual as _virtual
 from rit.ui.widgets.diff_types import (
     DEFAULT_DIFF_LAYOUT,
@@ -46,13 +52,11 @@ if TYPE_CHECKING:
     from rit.state.store import PRStore
 
 
-@dataclass(frozen=True)
-class _FullFileRestorePosition:
-    line: int
-    column: int
-    cursor_pane: Literal["old", "new"]
-    active_pane: Literal["old", "new"]
-    viewport_offset: int | None
+__all__ = (
+    "DiffView",
+    "SplitDiffBlock",
+    "UnifiedDiffBlock",
+)
 
 
 _RENDER_REQUEST_CONTEXT: ContextVar[int | None] = ContextVar(
@@ -232,7 +236,9 @@ class DiffView(VerticalScroll):
         self._showing_full_file: bool = False
         self._saved_diff: FileDiff | None = None
         self._saved_filename: str | None = None
-        self._saved_restore_position: _FullFileRestorePosition | None = None
+        self._saved_restore_position: (
+            _full_preview.FullFileRestorePosition | None
+        ) = None
 
         self._highlighter_prewarm_started: bool = False
         self._cursor_ui = CursorUIState()
@@ -277,10 +283,7 @@ class DiffView(VerticalScroll):
     def scrollable_content_region(self):
         region = super().scrollable_content_region
         if self._content_widget is not None:
-            try:
-                region = region.shrink(self._content_widget.dock_gutter)
-            except Exception:
-                pass
+            region = region.shrink(self._content_widget.dock_gutter)
         return region
 
     # ------------------------------------------------------------------
@@ -372,13 +375,11 @@ class DiffView(VerticalScroll):
         if not self.visual_mode:
             _cursor._scroll_to_cursor(self)
 
-        _cursor._queue_cursor_ui_flush(
-            self,
-            cursor_lines={self.cursor_line},
-            selection_dirty_lines={self.cursor_line} if self.visual_mode else None,
-            sync_search_match=True,
-            update_status_line=True,
+        update = _cursor_update.active_pane_update(
+            cursor_line=self.cursor_line,
+            visual_mode=self.visual_mode,
         )
+        _cursor._queue_cursor_update(self, update)
 
     def watch_cursor_line(self, old_line: int, new_line: int) -> None:
         if (
@@ -401,13 +402,12 @@ class DiffView(VerticalScroll):
         if not self.visual_mode:
             _cursor._scroll_to_cursor(self)
 
-        _cursor._queue_cursor_ui_flush(
-            self,
-            cursor_lines={old_line, new_line},
-            selection_dirty_lines={old_line, new_line} if self.visual_mode else None,
-            sync_search_match=True,
-            update_status_line=True,
+        update = _cursor_update.cursor_line_update(
+            old_line=old_line,
+            new_line=new_line,
+            visual_mode=self.visual_mode,
         )
+        _cursor._queue_cursor_update(self, update)
         self.post_message(self.CursorLineChanged(line_index=new_line))
 
     def watch_cursor_column(self, old_col: int, new_col: int) -> None:
@@ -420,67 +420,84 @@ class DiffView(VerticalScroll):
 
         if self.cursor_line < len(self._all_lines):
             text = self._get_cursor_text()
-
-            if len(text) == 0:
-                self.cursor_column = 0
-                return
-
-            max_col = len(text) - 1
-            if new_col > max_col:
-                self.cursor_column = max_col
-                return
-
-            _cursor._queue_cursor_ui_flush(
-                self,
-                cursor_lines={self.cursor_line},
-                selection_dirty_lines={self.cursor_line} if self.visual_mode else None,
-                sync_search_match=True,
+            update = _cursor_update.cursor_column_update(
+                cursor_line=self.cursor_line,
+                new_column=new_col,
+                text_length=len(text),
+                visual_mode=self.visual_mode,
             )
-            _cursor._scroll_to_cursor_horizontal(self)
+            if update.corrected_column is not None:
+                self.cursor_column = update.corrected_column
+                return
+
+            _cursor._queue_cursor_update(self, update)
+            if update.scroll_horizontal:
+                _cursor._scroll_to_cursor_horizontal(self)
 
     def watch_visual_mode(self, old_mode: bool, new_mode: bool) -> None:
-        if new_mode:
-            self.app.sub_title = (
-                "-- VISUAL LINE --" if self.visual_type == "line" else "-- VISUAL --"
+        update = _visual_mode.visual_mode_ui_update(
+            visual_mode=new_mode,
+            visual_type=self.visual_type,
+            cursor_line=self.cursor_line,
+        )
+        self.app.sub_title = update.sub_title
+        if update.selection_refresh_lines:
+            _selection._update_selection_highlighting(
+                self, set(update.selection_refresh_lines)
             )
-            _selection._update_selection_highlighting(self, {self.cursor_line})
-        else:
-            self.app.sub_title = ""
+        if update.clear_selection:
             for line_idx in list(self._visual_selection_specs):
                 _selection._clear_line_selection(self, line_idx)
             self._visual_selection_specs = {}
 
-        self._update_status_line()
+        if update.update_status_line:
+            self._update_status_line()
 
     def watch_visual_type(
         self, old_type: Literal["char", "line"], new_type: Literal["char", "line"]
     ) -> None:
-        if self.visual_mode:
-            self.app.sub_title = (
-                "-- VISUAL LINE --" if new_type == "line" else "-- VISUAL --"
-            )
+        update = _visual_mode.visual_type_ui_update(
+            visual_mode=self.visual_mode,
+            visual_type=new_type,
+            cursor_line=self.cursor_line,
+        )
+        if update.sub_title is not None:
+            self.app.sub_title = update.sub_title
+        queue_update = _visual_mode.visual_queue_update(update)
+        if (
+            queue_update.selection_dirty_lines is not None
+            or queue_update.update_status_line
+        ):
             _cursor._queue_cursor_ui_flush(
                 self,
-                selection_dirty_lines={self.cursor_line},
-                update_status_line=True,
+                selection_dirty_lines=queue_update.selection_dirty_lines,
+                update_status_line=queue_update.update_status_line,
             )
-            return
-        _cursor._queue_cursor_ui_flush(self, update_status_line=True)
 
     def watch_visual_anchor_line(
         self, old_anchor: int | None, new_anchor: int | None
     ) -> None:
-        if self.visual_mode:
-            _cursor._queue_cursor_ui_flush(
-                self, selection_dirty_lines={self.cursor_line}
-            )
+        self._queue_visual_anchor_ui_update()
 
     def watch_visual_anchor_column(
         self, old_col: int | None, new_col: int | None
     ) -> None:
-        if self.visual_mode:
+        self._queue_visual_anchor_ui_update()
+
+    def _queue_visual_anchor_ui_update(self) -> None:
+        update = _visual_mode.visual_anchor_ui_update(
+            visual_mode=self.visual_mode,
+            cursor_line=self.cursor_line,
+        )
+        queue_update = _visual_mode.visual_queue_update(update)
+        if (
+            queue_update.selection_dirty_lines is not None
+            or queue_update.update_status_line
+        ):
             _cursor._queue_cursor_ui_flush(
-                self, selection_dirty_lines={self.cursor_line}
+                self,
+                selection_dirty_lines=queue_update.selection_dirty_lines,
+                update_status_line=queue_update.update_status_line,
             )
 
     # ------------------------------------------------------------------
@@ -532,51 +549,24 @@ class DiffView(VerticalScroll):
         return inp is not None and self.screen.focused is inp
 
     def _close_search(self, *, clear_query: bool) -> None:
-        bar = self._search_bar_widget
-        if bar is None or not bar.display:
-            return
-        bar.display = False
-        if clear_query:
-            _search.clear_state(self)
-        _search._refresh_search_display(self)
-        self._update_status_line()
-        self.focus()
+        _search.close_search(self, clear_query=clear_query)
 
     # ------------------------------------------------------------------
     # Search handlers
     # ------------------------------------------------------------------
 
     def action_start_search(self) -> None:
-        bar = self._search_bar_widget
-        inp = self._search_input_widget
-        if bar is None or inp is None:
-            return
-        bar.display = True
-        inp.value = self._search_query
-        inp.focus()
+        _search.start_search(self)
 
     @on(Input.Changed, "#diff-search-input")
     def _on_search_changed(self, event: Input.Changed) -> None:
         event.stop()
-        query = event.value.strip()
-        if query:
-            self._search_query = query
-            _search.refresh_matches(self)
-            self._search_match_index = _search.next_match_index_from_cursor(self)
-        else:
-            _search.clear_state(self)
-        _search._refresh_search_display(self)
-        if self._search_match_index >= 0:
-            _search.reveal_match(self, self._search_match_index)
-        self._update_status_line()
+        _search.handle_changed(self, event.value)
 
     @on(Input.Submitted, "#diff-search-input")
     def _on_search_submitted(self, event: Input.Submitted) -> None:
         event.stop()
-        if self._search_bar_widget is not None:
-            self._search_bar_widget.display = False
-        self.focus()
-        _search.handle_submitted(self, event.value)
+        _search.handle_submitted_input(self, event.value)
 
     def action_next_search_match(self) -> None:
         _search.jump_match(self, 1)
@@ -615,28 +605,21 @@ class DiffView(VerticalScroll):
         line: DiffLine,
         pane: Literal["old", "new"] | None = None,
     ) -> Literal["old", "new"]:
-        active_pane = self.active_pane if pane is None else pane
-        if line.is_added and not line.is_modified:
-            return "new"
-        if line.is_deleted and not line.is_modified:
-            return "old"
-        return active_pane
+        return _cursor_side.resolve_active_pane_for_line(
+            line,
+            self.active_pane if pane is None else pane,
+        )
 
     def _cursor_side_for_line(
         self,
         line: DiffLine,
         pane: Literal["old", "new"] | None = None,
     ) -> Literal["old", "new", "auto"]:
-        pane = self.cursor_pane if pane is None else pane
-        if self.split:
-            return self._resolve_active_pane_for_line(line, pane)
-        if line.is_modified:
-            return self._resolve_active_pane_for_line(line, pane)
-        if line.is_deleted:
-            return "old"
-        if line.is_added:
-            return "new"
-        return "auto"
+        return _cursor_side.cursor_side_for_line(
+            line,
+            split=self.split,
+            cursor_pane=self.cursor_pane if pane is None else pane,
+        )
 
     def _current_cursor_side(self) -> Literal["old", "new", "auto"]:
         line = self._current_line()
@@ -652,6 +635,56 @@ class DiffView(VerticalScroll):
         self,
     ) -> tuple[str, int, Literal["LEFT", "RIGHT"]] | None:
         return self._inline_comment_editor_target
+
+    @property
+    def current_diff(self) -> FileDiff | None:
+        return self._diff
+
+    def line_index_for_location(
+        self,
+        filename: str,
+        line: int,
+        side: Literal["LEFT", "RIGHT"],
+    ) -> int | None:
+        diff = self._diff
+        if diff is None:
+            return None
+
+        return _location.line_index_for_location(
+            diff,
+            filename,
+            line,
+            side,
+            old_line_index=self._line_index_by_old_number,
+            new_line_index=self._line_index_by_new_number,
+        )
+
+    def jump_to_line_index(
+        self,
+        line_index: int,
+        *,
+        side: Literal["LEFT", "RIGHT"],
+        focus: bool = False,
+        viewport_offset: int = 2,
+    ) -> None:
+        target_pane: Literal["old", "new"] = "old" if side == "LEFT" else "new"
+        target_row = self._row_for_line_and_pane(line_index, target_pane)
+        if target_row is not None:
+            self._jump_to_row_with_anchor(
+                target_row,
+                pane=target_pane,
+                viewport_offset=viewport_offset,
+            )
+        else:
+            self.cursor_line = line_index
+            if 0 <= line_index < len(self._line_top_offsets):
+                self.scroll_to(
+                    y=max(0, self._line_top_offsets[line_index] - viewport_offset),
+                    animate=False,
+                )
+
+        if focus:
+            self.focus()
 
     def has_inline_comment_editor_for_line(self, line_index: int) -> bool:
         return (
@@ -948,24 +981,6 @@ class DiffView(VerticalScroll):
                 return widget
         return None
 
-    @staticmethod
-    def _merge_line_ranges(
-        ranges: list[tuple[int, int]],
-    ) -> list[tuple[int, int]]:
-        if not ranges:
-            return []
-        merged: list[tuple[int, int]] = []
-        for start, end in sorted(ranges):
-            if not merged:
-                merged.append((start, end))
-                continue
-            prev_start, prev_end = merged[-1]
-            if start <= prev_end + 1:
-                merged[-1] = (prev_start, max(prev_end, end))
-            else:
-                merged.append((start, end))
-        return merged
-
     # ------------------------------------------------------------------
     # Render orchestration
     # ------------------------------------------------------------------
@@ -1176,51 +1191,45 @@ class DiffView(VerticalScroll):
         if header is None:
             return
 
-        header_text = _render._build_header_text(self)
-        query = self._search_query.strip()
-        if not query:
-            header.update(header_text)
-            return
-
-        total_matches = len(self._search_matches)
-        active_match = (
-            self._search_match_index + 1
-            if 0 <= self._search_match_index < total_matches
-            else 0
+        header.update(
+            _status.build_status_line(
+                _render._build_header_text(self),
+                search_query=self._search_query,
+                search_match_count=len(self._search_matches),
+                search_match_index=self._search_match_index,
+            )
         )
-        if total_matches == 0:
-            suffix = f'[$warning]search "{query}" no matches[/]'
-        else:
-            suffix = f'[dim]search "{query}" {active_match}/{total_matches}[/]'
-        header.update(f"{header_text}  {suffix}")
 
     # ------------------------------------------------------------------
     # Full-file toggle
     # ------------------------------------------------------------------
 
     def action_toggle_full_file(self) -> None:
-        if not self.current_file or self.store is None:
+        action = _full_preview.choose_full_file_preview_action(
+            current_file=self.current_file,
+            selected_file=self._full_file_preview_target(),
+            showing_full_file=self._showing_full_file,
+            has_store=self.store is not None,
+        )
+        if action.kind == "ignore":
             return
-        if self._showing_full_file:
+        if action.kind == "restore":
             self._restore_diff_view()
-        else:
-            target_file = self._full_file_preview_target()
-            if target_file is None:
-                return
-            if target_file != self.current_file:
-                self.post_message(self.FullFilePreviewRequested(target_file))
-                return
-            self.run_worker(
-                self._load_and_show_full_file(),
-                exclusive=True,
-                name="diff-full-file",
-            )
+            return
+        if action.kind == "request_file" and action.filename is not None:
+            self.post_message(self.FullFilePreviewRequested(action.filename))
+            return
+        self.run_worker(
+            self._load_and_show_full_file(),
+            exclusive=True,
+            name="diff-full-file",
+        )
 
     def _full_file_preview_target(self) -> str | None:
-        line = self._current_line()
-        if line is not None and line.file_path:
-            return line.file_path
-        return self.current_file
+        return _full_preview.full_file_preview_target(
+            self.current_file,
+            self._current_line(),
+        )
 
     async def _load_and_show_full_file(self) -> None:
         if self.current_file is None or self.store is None:
@@ -1253,7 +1262,7 @@ class DiffView(VerticalScroll):
             filename,
             source_diff,
         )
-        full_diff = _render._build_full_file_diff(
+        full_diff = _full_preview.build_full_file_diff(
             filename,
             content,
             source_diff=source_diff,
@@ -1272,52 +1281,17 @@ class DiffView(VerticalScroll):
         filename: str,
         source_diff: FileDiff | None,
     ) -> int | None:
-        line = self._current_line()
-        if line is None:
-            return None
-        if line.file_path and line.file_path != filename:
-            return None
-        if line.new_line_no is not None:
-            return line.new_line_no
-        if line.old_line_no is None:
-            return None
-        return self._full_file_preview_deleted_anchor_line_no(
-            line.old_line_no,
+        return _full_preview.selected_full_file_anchor(
+            filename,
+            self._current_line(),
             source_diff,
         )
 
-    def _full_file_preview_deleted_anchor_line_no(
-        self,
-        old_line_no: int,
-        source_diff: FileDiff | None,
-    ) -> int | None:
-        if source_diff is None:
-            return None
-
-        for hunk in source_diff.hunks:
-            for index, line in enumerate(hunk.lines):
-                if line.old_line_no != old_line_no or not line.is_deleted:
-                    continue
-
-                for next_line in hunk.lines[index + 1 :]:
-                    if next_line.new_line_no is not None:
-                        return next_line.new_line_no
-
-                for previous_line in reversed(hunk.lines[:index]):
-                    if previous_line.new_line_no is not None:
-                        return previous_line.new_line_no + 1
-
-                return hunk.new_start
-
-        return None
-
     def _jump_to_full_file_preview_anchor(self, line_no: int | None) -> None:
-        if line_no is None or not self._line_index_by_new_number:
-            return
-
-        available_lines = sorted(self._line_index_by_new_number)
-        target_line_no = min(max(line_no, available_lines[0]), available_lines[-1])
-        line_index = self._line_index_by_new_number.get(target_line_no)
+        line_index = _full_preview.full_file_anchor_line_index(
+            line_no,
+            self._line_index_by_new_number,
+        )
         if line_index is None:
             return
 
@@ -1333,10 +1307,12 @@ class DiffView(VerticalScroll):
 
         self._move_cursor(line=line_index, pane="new", update_active_pane=True)
 
-    def _full_file_restore_position(self) -> _FullFileRestorePosition | None:
+    def _full_file_restore_position(
+        self,
+    ) -> _full_preview.FullFileRestorePosition | None:
         if not self._all_lines:
             return None
-        return _FullFileRestorePosition(
+        return _full_preview.FullFileRestorePosition(
             line=self.cursor_line,
             column=self.cursor_column,
             cursor_pane=self.cursor_pane,
@@ -1366,7 +1342,7 @@ class DiffView(VerticalScroll):
         self,
         filename: str,
         diff: FileDiff,
-        restore_position: _FullFileRestorePosition | None,
+        restore_position: _full_preview.FullFileRestorePosition | None,
     ) -> None:
         await self.show_diff(filename, diff)
         self._restore_full_file_position(restore_position)
@@ -1375,12 +1351,17 @@ class DiffView(VerticalScroll):
 
     def _restore_full_file_position(
         self,
-        restore_position: _FullFileRestorePosition | None,
+        restore_position: _full_preview.FullFileRestorePosition | None,
     ) -> None:
-        if restore_position is None or not self._all_lines:
+        if restore_position is None:
+            return
+        line_index = _full_preview.full_file_restore_line_index(
+            restore_position,
+            line_count=len(self._all_lines),
+        )
+        if line_index is None:
             return
 
-        line_index = max(0, min(restore_position.line, len(self._all_lines) - 1))
         target_row = self._row_for_line_and_pane(line_index, restore_position.cursor_pane)
         if target_row is not None:
             self._jump_to_row_with_anchor(
@@ -1406,15 +1387,11 @@ class DiffView(VerticalScroll):
         line_index: int,
         pane: Literal["old", "new"],
     ) -> RenderedRow | None:
-        fallback = None
-        for row in self._rows_for_current_mode():
-            if row.line_index != line_index:
-                continue
-            if fallback is None:
-                fallback = row
-            if row.side == "auto" or row.side == pane:
-                return row
-        return fallback
+        return _location.row_for_line_and_pane(
+            self._rows_for_current_mode(),
+            line_index,
+            pane,
+        )
 
     _DIFF_MODES: tuple[Literal["auto", "split", "unified"], ...] = (
         "auto",
