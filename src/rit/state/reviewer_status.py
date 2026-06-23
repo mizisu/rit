@@ -17,6 +17,13 @@ ReviewerKind = Literal[
 ]
 
 
+__all__ = (
+    "ReviewerDisplayState",
+    "ReviewerKind",
+    "derive_reviewer_states",
+)
+
+
 @dataclass(frozen=True)
 class ReviewerDisplayState:
     display_name: str

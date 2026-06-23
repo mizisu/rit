@@ -1,11 +1,11 @@
 from rit.state.models import (
+    LoadingState,
     PR,
-    PRFile,
     PRComment,
+    PRFile,
+    PRLabel,
     PRReview,
     PRUser,
-    PRLabel,
-    LoadingState,
 )
 
 
@@ -19,12 +19,12 @@ def __getattr__(name: str):
 
 
 __all__ = [
-    "PR",
-    "PRFile",
-    "PRComment",
-    "PRReview",
-    "PRUser",
-    "PRLabel",
     "LoadingState",
+    "PR",
+    "PRComment",
+    "PRFile",
+    "PRLabel",
+    "PRReview",
     "PRStore",
+    "PRUser",
 ]

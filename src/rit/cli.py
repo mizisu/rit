@@ -4,6 +4,11 @@ import click
 
 from rit.app import RitApp
 
+__all__ = (
+    "main",
+    "parse_pr_reference",
+)
+
 
 def parse_pr_reference(pr_ref: str) -> tuple[str | None, str | None, int]:
     """Parse PR reference in various formats.

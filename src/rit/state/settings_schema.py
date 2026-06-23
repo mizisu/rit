@@ -6,6 +6,14 @@ from typing import Literal
 FieldType = Literal["boolean", "string", "integer", "float", "choices", "object"]
 
 
+__all__ = (
+    "FieldType",
+    "SCHEMA",
+    "get_default_settings",
+    "get_flat_defaults",
+)
+
+
 # Schema definition using TypedDict for type hints
 SCHEMA: list[dict] = [
     {

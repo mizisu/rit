@@ -2,6 +2,8 @@
 
 __version__ = "0.1.0"
 
+__all__ = ("__version__",)
+
 
 def _patch_textual_markdown_css() -> None:
     """Patch Textual 7.x MarkdownTableContent CSS bug.

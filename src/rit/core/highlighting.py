@@ -9,6 +9,16 @@ from textual.highlight import HighlightTheme
 from rit.core.highlight_theme import RitHighlightTheme, RitLightHighlightTheme
 from rit.core.types import DiffLine, FileDiff
 
+__all__ = (
+    "WORD_DIFF_ADDED_STYLE",
+    "WORD_DIFF_DELETED_STYLE",
+    "apply_word_diff_spans",
+    "highlight_diff",
+    "highlight_lines_for_diff",
+    "highlight_lines_for_diff_range",
+    "prewarm_highlighter",
+)
+
 
 _HIGHLIGHTER_PREWARMED = False
 WORD_DIFF_ADDED_STYLE = "on $success 20%"

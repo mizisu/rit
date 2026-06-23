@@ -6,6 +6,15 @@ from typing import Literal
 
 from textual.content import Content
 
+__all__ = (
+    "DiffHunk",
+    "DiffLine",
+    "DiffSide",
+    "FileDiff",
+    "InlineSegment",
+    "SegmentType",
+)
+
 
 class DiffSide(Enum):
     LEFT = "left"  # Old/deleted

@@ -13,6 +13,17 @@ from rit.core.types import (
     SegmentType,
 )
 
+__all__ = (
+    "ParsedFilePatch",
+    "ParsedFilePatchSummary",
+    "compute_line_diff",
+    "compute_word_diff",
+    "parse_file_patch_summary",
+    "parse_multi_file_patch",
+    "parse_patch",
+)
+
+
 WORD_DIFF_THRESHOLD = 0.2
 WORD_DIFF_MAX_LINE_LENGTH = 1000
 TOKEN_REFINEMENT_MAX_LENGTH = 200

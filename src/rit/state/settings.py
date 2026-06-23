@@ -3,6 +3,9 @@ from typing import Callable
 from rit.state.settings_schema import SCHEMA, get_default_settings
 
 
+__all__ = ("Settings",)
+
+
 class Settings:
     """Type-safe settings with dot-notation access (e.g., "ui.theme")."""
 
@@ -37,10 +40,10 @@ class Settings:
             )
         return value
 
-    def get_or[T](self, key: str, default: T) -> T:
+    def get_or(self, key: str, default: object) -> object:
         try:
             value = self._get_nested(key)
-            return value if value is not None else default  # type: ignore
+            return value if value is not None else default
         except KeyError:
             return default
 

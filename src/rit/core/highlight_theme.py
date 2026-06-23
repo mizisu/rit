@@ -3,6 +3,11 @@
 from textual.highlight import HighlightTheme, TokenType
 from pygments.token import Token
 
+__all__ = (
+    "RitHighlightTheme",
+    "RitLightHighlightTheme",
+)
+
 
 def _build_theme_styles(
     *,

@@ -4,6 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+__all__ = (
+    "DATETIME_MIN_UTC",
+    "datetime_min_utc",
+    "datetime_sort_key",
+    "is_min_datetime",
+)
+
+
 DATETIME_MIN_UTC = datetime.min.replace(tzinfo=timezone.utc)
 
 
