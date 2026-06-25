@@ -506,7 +506,7 @@ async def test_markdown_image_block_loads_image_from_in_memory_bytes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_markdown_image_block_wraps_frame_to_preview_width() -> None:
+async def test_markdown_image_block_sizes_frame_with_border() -> None:
     body = "![Wide screenshot](https://example.com/wide.png)"
     png_bytes = _png_bytes(2000, 1125)
 
@@ -530,12 +530,15 @@ async def test_markdown_image_block_wraps_frame_to_preview_width() -> None:
                 break
 
         block = app.query_one(MarkdownImageBlock)
+        body_widget = app.query_one(".markdown-image-body")
         image_widget = app.query_one(".markdown-terminal-image")
         block_width = getattr(block.styles.width, "value", None)
+        body_width = getattr(body_widget.styles.width, "value", None)
         image_width = getattr(image_widget.styles.width, "value", None)
 
         assert image_width is not None
-        assert block_width == image_width + 2
+        assert body_width == image_width + 2
+        assert block_width == image_width + 4
         assert image_width >= 100
         assert len(app.query(".markdown-image-caption")) == 0
 

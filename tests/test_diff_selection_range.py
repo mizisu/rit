@@ -1,4 +1,11 @@
+import builtins
+from collections.abc import Iterator, Mapping
+
+import pytest
+
+from rit.ui.widgets import diff_selection_range
 from rit.ui.widgets.diff_selection_range import (
+    SelectionSpec,
     visible_selection_line_range,
     visual_selection_bounds,
     visual_selection_delta,
@@ -313,6 +320,62 @@ def test_visual_selection_delta_clears_removed_specs_and_applies_changed_specs()
     assert delta.lines_to_apply == frozenset({2, 4})
 
 
+def test_visual_selection_delta_full_refresh_avoids_key_set_copies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    old_specs = {
+        1: (0, None, "line"),
+        2: (0, 3, "char"),
+        3: (0, None, "char"),
+    }
+    new_specs = {
+        2: (0, 4, "char"),
+        3: (0, None, "char"),
+        4: (0, None, "line"),
+    }
+
+    monkeypatch.setattr(
+        diff_selection_range,
+        "set",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("selection delta should use key views for full refresh")
+        ),
+        raising=False,
+    )
+
+    delta = visual_selection_delta(old_specs, new_specs)
+
+    assert delta.lines_to_clear == frozenset({1})
+    assert delta.lines_to_apply == frozenset({2, 4})
+
+
+def test_visual_selection_delta_unchanged_specs_avoids_scanning() -> None:
+    class NoIterSpecs(Mapping[int, SelectionSpec]):
+        def __init__(self, values: dict[int, SelectionSpec]) -> None:
+            self._values = values
+
+        def __getitem__(self, key: int) -> SelectionSpec:
+            return self._values[key]
+
+        def __iter__(self) -> Iterator[int]:
+            raise AssertionError("unchanged selection delta should not scan specs")
+
+        def __len__(self) -> int:
+            return len(self._values)
+
+    specs = NoIterSpecs(
+        {
+            1: (0, None, "line"),
+            2: (0, 3, "char"),
+        }
+    )
+
+    delta = visual_selection_delta(specs, specs)
+
+    assert delta.lines_to_clear == frozenset()
+    assert delta.lines_to_apply == frozenset()
+
+
 def test_visual_selection_delta_reapplies_dirty_lines_with_same_spec() -> None:
     specs = {2: (0, None, "line")}
 
@@ -320,6 +383,30 @@ def test_visual_selection_delta_reapplies_dirty_lines_with_same_spec() -> None:
 
     assert delta.lines_to_clear == frozenset()
     assert delta.lines_to_apply == frozenset({2})
+
+
+def test_visual_selection_delta_dirty_lines_reuses_empty_line_sets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    specs = {2: (0, None, "line")}
+
+    def frozenset_for_non_empty(values: object = ()) -> frozenset[int]:
+        frozen = builtins.frozenset(values)
+        if not frozen:
+            raise AssertionError("dirty selection delta should reuse empty line sets")
+        return frozen
+
+    monkeypatch.setattr(
+        diff_selection_range,
+        "frozenset",
+        frozenset_for_non_empty,
+        raising=False,
+    )
+
+    delta = visual_selection_delta(specs, specs, dirty_lines={2})
+
+    assert delta.lines_to_clear == builtins.frozenset()
+    assert delta.lines_to_apply == builtins.frozenset({2})
 
 
 def test_visual_selection_delta_clears_dirty_lines_that_leave_selection() -> None:
@@ -331,6 +418,41 @@ def test_visual_selection_delta_clears_dirty_lines_that_leave_selection() -> Non
 
     assert delta.lines_to_clear == frozenset({2})
     assert delta.lines_to_apply == frozenset()
+
+
+def test_visual_selection_delta_dirty_lines_avoids_full_key_copies() -> None:
+    class NoIterSpecs(Mapping[int, SelectionSpec]):
+        def __init__(self, values: dict[int, SelectionSpec]) -> None:
+            self._values = values
+
+        def __getitem__(self, key: int) -> SelectionSpec:
+            return self._values[key]
+
+        def __iter__(self) -> Iterator[int]:
+            raise AssertionError("dirty selection delta should not copy all keys")
+
+        def __len__(self) -> int:
+            return len(self._values)
+
+    old_specs = NoIterSpecs(
+        {
+            1: (0, None, "line"),
+            2: (0, 3, "char"),
+            50: (0, None, "line"),
+        }
+    )
+    new_specs = NoIterSpecs(
+        {
+            1: (0, None, "line"),
+            2: (0, 4, "char"),
+            51: (0, None, "line"),
+        }
+    )
+
+    delta = visual_selection_delta(old_specs, new_specs, dirty_lines={1, 2, 50})
+
+    assert delta.lines_to_clear == frozenset({50})
+    assert delta.lines_to_apply == frozenset({1, 2})
 
 
 def test_visual_selection_specs_with_dirty_lines_updates_and_removes_specs() -> None:

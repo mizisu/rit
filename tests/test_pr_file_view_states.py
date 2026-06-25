@@ -1,9 +1,11 @@
 import json
+from collections.abc import Iterator, Mapping
 from typing import get_type_hints
 
 import pytest
 
 from rit.services.graphql_mutations import GraphQLMutationError
+import rit.services.pr_file_view_states as pr_file_view_states
 from rit.services.pr_file_view_states import (
     FileViewMutationError,
     FileViewStatesGraphQLError,
@@ -60,6 +62,98 @@ def test_parse_file_view_states_page_returns_states_and_next_cursor() -> None:
     }
     assert page.has_next_page is True
     assert page.next_cursor == "cursor-2"
+
+
+def test_parse_file_view_states_page_single_node_skips_iteration() -> None:
+    class SingleNodeList(list):
+        def __iter__(self):
+            raise AssertionError("single viewed-state node should not be iterated")
+
+    page = parse_file_view_states_page(
+        {
+            "data": {
+                "repository": {
+                    "pullRequest": {
+                        "files": {
+                            "nodes": SingleNodeList(
+                                [
+                                    {
+                                        "path": "src/app.py",
+                                        "viewerViewedState": "VIEWED",
+                                    }
+                                ]
+                            ),
+                            "pageInfo": {
+                                "hasNextPage": False,
+                                "endCursor": None,
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    )
+
+    assert page.states == {"src/app.py": "VIEWED"}
+    assert page.has_next_page is False
+
+
+def test_parse_file_view_states_page_uses_direct_mapping_lookup() -> None:
+    class NoItemsMapping(Mapping[str, object]):
+        def __init__(self, values: dict[str, object]) -> None:
+            self._values = values
+
+        def __getitem__(self, key: str) -> object:
+            return self._values[key]
+
+        def __iter__(self) -> Iterator[str]:
+            return iter(self._values)
+
+        def __len__(self) -> int:
+            return len(self._values)
+
+        def items(self):
+            raise AssertionError("view state parser should not scan mapping items")
+
+    page = parse_file_view_states_page(
+        NoItemsMapping(
+            {
+                "data": NoItemsMapping(
+                    {
+                        "repository": NoItemsMapping(
+                            {
+                                "pullRequest": NoItemsMapping(
+                                    {
+                                        "files": NoItemsMapping(
+                                            {
+                                                "nodes": [
+                                                    NoItemsMapping(
+                                                        {
+                                                            "path": "src/app.py",
+                                                            "viewerViewedState": "VIEWED",
+                                                        }
+                                                    )
+                                                ],
+                                                "pageInfo": NoItemsMapping(
+                                                    {
+                                                        "hasNextPage": False,
+                                                        "endCursor": None,
+                                                    }
+                                                ),
+                                            }
+                                        )
+                                    }
+                                )
+                            }
+                        )
+                    }
+                )
+            }
+        )
+    )
+
+    assert page.states == {"src/app.py": "VIEWED"}
+    assert page.has_next_page is False
 
 
 def test_parse_file_view_states_result_decodes_json_page() -> None:
@@ -236,6 +330,52 @@ def test_file_view_states_page_request_builds_paginated_graphql_args() -> None:
     assert "number=123" in first_page
     assert not any(arg == "after=cursor-2" for arg in first_page)
     assert "after=cursor-2" in next_page
+
+
+def test_file_view_states_first_page_request_avoids_list_to_tuple_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pr_file_view_states,
+        "tuple",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("first viewed-state page request should not rebuild args")
+        ),
+        raising=False,
+    )
+
+    request = file_view_states_page_request(
+        owner="owner",
+        repo="repo",
+        pr_number=123,
+        cursor=None,
+    )
+
+    assert request[:2] == ("api", "graphql")
+    assert "number=123" in request
+
+
+def test_file_view_states_cursor_page_request_avoids_list_to_tuple_conversion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        pr_file_view_states,
+        "tuple",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cursor viewed-state page request should not rebuild args")
+        ),
+        raising=False,
+    )
+
+    request = file_view_states_page_request(
+        owner="owner",
+        repo="repo",
+        pr_number=123,
+        cursor="cursor-2",
+    )
+
+    assert request[:2] == ("api", "graphql")
+    assert request[-2:] == ("-f", "after=cursor-2")
 
 
 def test_file_view_mutation_request_uses_mark_or_unmark_mutation() -> None:

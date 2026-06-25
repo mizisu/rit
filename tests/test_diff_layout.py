@@ -1,5 +1,6 @@
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.state.models import PRFile
+import rit.ui.widgets.diff_layout as diff_layout_module
 from rit.ui.widgets.diff_layout import (
     can_fit_auto_split_content,
     code_widths_for_layout,
@@ -168,6 +169,31 @@ def test_can_fit_auto_split_content_uses_display_cell_width() -> None:
     )
 
 
+def test_can_fit_auto_split_content_scans_lines_once() -> None:
+    class SinglePassLines(list[DiffLine]):
+        iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            if self.iterations > 1:
+                raise AssertionError("split fit should scan lines only once")
+            return super().__iter__()
+
+    lines = SinglePassLines(
+        [
+            DiffLine(old_line_no=1, new_line_no=1, old_content="old"),
+            DiffLine(old_line_no=2, new_line_no=2, new_content="new"),
+        ]
+    )
+
+    assert can_fit_auto_split_content(
+        lines,
+        old_prefix_width=4,
+        new_prefix_width=4,
+        available_width=20,
+    )
+
+
 def test_can_fit_auto_split_content_allows_empty_diffs() -> None:
     assert can_fit_auto_split_content(
         [],
@@ -239,6 +265,21 @@ def test_line_number_width_for_layout_uses_visible_number_digits() -> None:
     assert line_number_width_for_layout(show_line_numbers=True, numbers=[]) == 1
     assert line_number_width_for_layout(show_line_numbers=True, numbers=[1, 9]) == 1
     assert line_number_width_for_layout(show_line_numbers=True, numbers=[1, 120]) == 3
+
+
+def test_line_number_width_for_layout_single_number_skips_max(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        diff_layout_module,
+        "max",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("single line number width should not call max")
+        ),
+        raising=False,
+    )
+
+    assert line_number_width_for_layout(show_line_numbers=True, numbers=[120]) == 3
 
 
 def test_split_placeholder_width_for_layout_uses_visible_pane_budget() -> None:

@@ -4,6 +4,7 @@ from rit.ui.components.combined_diff import (
     COMBINED_DIFF_FILENAME,
     CombinedDiffDocument,
 )
+from rit.ui.components import files_render_session as files_render_session_module
 from rit.ui.components.files_render_session import (
     CombinedFileJump,
     FilesRenderSession,
@@ -24,6 +25,70 @@ def _document() -> CombinedDiffDocument:
         file_start_names=("one.py", "two.py"),
         line_lookup={("two.py", 12, "RIGHT"): 5},
     )
+
+
+def test_files_signature_avoids_generator_allocation(
+    monkeypatch,
+) -> None:
+    original_tuple = tuple
+
+    def recording_tuple(values=()):
+        assert not hasattr(values, "gi_code")
+        return original_tuple(values)
+
+    monkeypatch.setattr(
+        files_render_session_module,
+        "tuple",
+        recording_tuple,
+        raising=False,
+    )
+
+    assert FilesRenderSession().files_signature(_files("one.py", "two.py")) == (
+        "one.py",
+        "two.py",
+    )
+
+
+def test_files_signature_empty_files_skip_tuple_and_map(monkeypatch) -> None:
+    monkeypatch.setattr(
+        files_render_session_module,
+        "tuple",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("empty file signatures should not build a tuple")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        files_render_session_module,
+        "map",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("empty file signatures should not build a map")
+        ),
+        raising=False,
+    )
+
+    assert FilesRenderSession().files_signature([]) == ()
+
+
+def test_files_signature_single_file_skips_tuple_and_map(monkeypatch) -> None:
+    monkeypatch.setattr(
+        files_render_session_module,
+        "tuple",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("single file signatures should not build a tuple")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        files_render_session_module,
+        "map",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("single file signatures should not build a map")
+        ),
+        raising=False,
+    )
+
+    assert FilesRenderSession().files_signature(_files("one.py")) == ("one.py",)
 
 
 def test_queue_combined_render_skips_current_signature() -> None:

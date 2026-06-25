@@ -1,5 +1,3 @@
-from collections.abc import Callable
-
 import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Static
@@ -10,21 +8,13 @@ from tests.conftest import wait_until
 
 
 @pytest.mark.asyncio
-async def test_comment_card_can_delay_markdown_body_mount(
+async def test_comment_card_mounts_markdown_without_delayed_preview(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    scheduled_callbacks: list[tuple[float, Callable[[], None]]] = []
+    def fail_timer(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("comment body should not use delayed preview swaps")
 
-    def capture_timer(
-        self: CommentCard,
-        delay: float,
-        callback: Callable[[], None],
-        *args: object,
-        **kwargs: object,
-    ) -> None:
-        scheduled_callbacks.append((delay, callback))
-
-    monkeypatch.setattr(CommentCard, "set_timer", capture_timer)
+    monkeypatch.setattr(CommentCard, "set_timer", fail_timer)
 
     class TestApp(App[None]):
         def compose(self) -> ComposeResult:
@@ -38,40 +28,19 @@ async def test_comment_card_can_delay_markdown_body_mount(
     async with app.run_test() as pilot:
         await pilot.pause(0)
 
-        assert len(app.query("MarkdownH1")) == 0
-
-        mount_delay, mount_callback = scheduled_callbacks.pop(0)
-        assert mount_delay == 0.01
-        mount_callback()
-
         await wait_until(lambda: len(app.query("MarkdownH1")) == 1, timeout=2.0)
 
+        assert len(app.query(".comment-body-preview")) == 0
         assert len(app.query("MarkdownH1")) == 1
 
 
 @pytest.mark.asyncio
-async def test_comment_card_shows_plain_preview_while_body_mount_is_delayed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(comment_card_module, "BODY_PREVIEW_RETIRE_DELAY", 0.01)
-    scheduled_callbacks: list[tuple[float, Callable[[], None]]] = []
-
-    def capture_timer(
-        self: CommentCard,
-        delay: float,
-        callback: Callable[[], None],
-        *args: object,
-        **kwargs: object,
-    ) -> None:
-        scheduled_callbacks.append((delay, callback))
-
-    monkeypatch.setattr(CommentCard, "set_timer", capture_timer)
-
+async def test_plain_comment_card_uses_single_static_body() -> None:
     class TestApp(App[None]):
         def compose(self) -> ComposeResult:
             yield CommentCard(
                 "Header",
-                "# Body\n\n- first item",
+                "Plain body() text",
                 body_mount_delay=0.01,
             )
 
@@ -79,29 +48,13 @@ async def test_comment_card_shows_plain_preview_while_body_mount_is_delayed(
     async with app.run_test() as pilot:
         await pilot.pause(0)
 
-        preview = app.query_one(".comment-body-preview", Static)
-        text = str(getattr(preview.content, "plain", preview.content))
+        await wait_until(lambda: len(app.query(".comment-body-plain")) == 1)
+        body = app.query_one(".comment-body-plain", Static)
+        text = str(getattr(body.content, "plain", body.content))
 
-        assert "Body" in text
-        assert "first item" in text
-        assert len(app.query("MarkdownH1")) == 0
-
-        mount_delay, mount_callback = scheduled_callbacks.pop(0)
-        assert mount_delay == 0.01
-        mount_callback()
-
-        await wait_until(lambda: len(app.query("MarkdownH1")) == 1, timeout=2.0)
-
-        assert len(app.query(".comment-body-preview")) == 1
-        assert len(app.query("MarkdownH1")) == 1
-
-        retire_delay, retire_callback = scheduled_callbacks.pop(0)
-        assert retire_delay == 0.01
-        retire_callback()
-
-        await wait_until(lambda: len(app.query(".comment-body-preview")) == 0)
-
+        assert text == "Plain body() text"
         assert len(app.query(".comment-body-preview")) == 0
+        assert len(app.query("Markdown")) == 0
 
 
 def test_comment_card_preview_strips_markdown_links_and_images() -> None:
@@ -119,6 +72,98 @@ def test_comment_card_preview_strips_markdown_links_and_images() -> None:
     assert "](" not in preview
 
 
+def test_comment_card_plain_preview_line_skips_regex_sanitizers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        comment_card_module.re,
+        "sub",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("plain preview lines should not run regex sanitizers")
+        ),
+    )
+
+    card = CommentCard("Header", "Plain preview text")
+
+    assert card._build_preview(card._body) == "Plain preview text"
+
+
+def test_comment_card_plain_preview_marker_check_skips_any(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        comment_card_module,
+        "any",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("preview marker checks should not allocate an any iterator")
+        ),
+        raising=False,
+    )
+
+    card = CommentCard("Header", "Plain preview text")
+
+    assert card._build_preview(card._body) == "Plain preview text"
+
+
+def test_comment_card_preview_streams_body_lines() -> None:
+    class NoSplitLines(str):
+        def splitlines(self, *_args: object, **_kwargs: object) -> list[str]:
+            raise AssertionError("comment previews should stream body lines")
+
+    card = CommentCard("Header", "")
+
+    preview = card._build_preview(
+        NoSplitLines("# First\n\n- second\n\nthird should not be needed")
+    )
+
+    assert preview == "First second …"
+
+
+def test_comment_card_retires_tracked_preview_without_copying_children() -> None:
+    card = CommentCard("Header", "Body")
+    card._body_preview_widget = Static("preview")
+
+    card._retire_body_preview()
+
+    assert card._body_preview_widget is None
+
+
+def test_comment_card_removes_rendered_body_without_copying_children() -> None:
+    class Container:
+        def remove_children(self) -> None:
+            calls.append("removed")
+
+    calls: list[str] = []
+    card = CommentCard("Header", "Body")
+    card._content_container = Container()  # type: ignore[assignment]
+
+    card._remove_rendered_body_widgets()
+
+    assert calls == ["removed"]
+
+
+@pytest.mark.asyncio
+async def test_empty_comment_card_has_no_placeholder_or_body_gap() -> None:
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield CommentCard("Header", "")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        await pilot.pause(0)
+
+        card = app.query_one(CommentCard)
+        assert card.has_class("--empty-body")
+        assert len(app.query(".comment-body-preview")) == 0
+        assert len(app.query("Markdown")) == 0
+
+
+def test_empty_comment_card_preview_is_blank() -> None:
+    card = CommentCard("Header", "")
+
+    assert card._build_preview(card._body) == ""
+
+
 @pytest.mark.asyncio
 async def test_loading_comment_card_does_not_duplicate_plain_body_as_markdown() -> None:
     class TestApp(App[None]):
@@ -133,5 +178,6 @@ async def test_loading_comment_card_does_not_duplicate_plain_body_as_markdown() 
     async with app.run_test() as pilot:
         await pilot.pause(0)
 
-        assert len(app.query(".comment-body-preview")) == 1
+        await wait_until(lambda: len(app.query(".comment-body-plain")) == 1)
+        assert len(app.query(".comment-body-preview")) == 0
         assert len(app.query("Markdown")) == 0

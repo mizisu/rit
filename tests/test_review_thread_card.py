@@ -1,5 +1,6 @@
 """Tests for reusable ReviewThreadCard widget."""
 
+from datetime import datetime, timezone
 from inspect import signature
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from textual.app import App, ComposeResult
 from textual.widgets import Collapsible, Markdown, Static
 
 from rit.state.models import PRComment
+from rit.ui.widgets import review_thread_card as review_thread_card_module
 from rit.ui.widgets.comment_card import CommentCard
 from rit.ui.widgets.review_thread_card import ReviewThreadCard, ReviewThreadItem
 
@@ -47,6 +49,76 @@ def test_sorts_missing_and_aware_comment_dates() -> None:
     )
 
     assert [comment.id for comment in card._comments] == [1, 2]
+
+
+def test_keeps_already_ordered_comments_without_sorting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = make_comment("First", comment_id=1)
+    second = make_comment("Second", comment_id=2)
+
+    monkeypatch.setattr(
+        review_thread_card_module,
+        "sorted",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("already ordered thread comments should not sort")
+        ),
+        raising=False,
+    )
+
+    card = ReviewThreadCard(
+        comments=[first, second],
+        show_diff_hunk=False,
+    )
+
+    assert card._comments == [first, second]
+
+
+def test_swaps_two_out_of_order_comments_without_sorting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = make_comment("First", comment_id=1).model_copy(
+        update={"created_at": datetime(2026, 2, 26, 10, tzinfo=timezone.utc)}
+    )
+    second = make_comment("Second", comment_id=2).model_copy(
+        update={"created_at": datetime(2026, 2, 26, 11, tzinfo=timezone.utc)}
+    )
+
+    monkeypatch.setattr(
+        review_thread_card_module,
+        "sorted",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("two thread comments should not call sorted")
+        ),
+        raising=False,
+    )
+
+    card = ReviewThreadCard(
+        comments=[second, first],
+        show_diff_hunk=False,
+    )
+
+    assert card._comments == [first, second]
+
+
+def test_single_comment_thread_skips_timeline_order_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comment = make_comment("Only comment")
+    monkeypatch.setattr(
+        review_thread_card_module,
+        "datetime_sort_key",
+        lambda _created_at: (_ for _ in ()).throw(
+            AssertionError("single-comment threads should not compute sort keys")
+        ),
+    )
+
+    card = ReviewThreadCard(
+        comments=[comment],
+        show_diff_hunk=False,
+    )
+
+    assert card._comments == [comment]
 
 
 def test_inline_thread_css_keeps_collapsed_card_frame() -> None:
@@ -118,6 +190,33 @@ def test_pr_info_review_threads_are_inset_without_affecting_inline_threads() -> 
 
     assert "margin: 1 0 1 4;" in pr_info_thread_block
     assert "margin: 0;" in inline_block
+
+
+def test_review_thread_diff_hunk_preview_streams_last_lines() -> None:
+    class NoSplitDiffHunk(str):
+        def split(self, *_args: object, **_kwargs: object) -> list[str]:
+            raise AssertionError("diff hunk preview should not split all lines")
+
+    diff_hunk = NoSplitDiffHunk(
+        "\n".join(
+            [
+                "@@ -1,7 +1,7 @@",
+                " line1",
+                "-line2",
+                "+line2 new",
+                " line3",
+                "-line4",
+                "+line4 new",
+            ]
+        )
+    )
+
+    rendered = ReviewThreadCard._render_diff_hunk(diff_hunk)
+
+    assert "@@ -1,7 +1,7 @@" not in rendered.plain
+    assert "line1" not in rendered.plain
+    assert "-line2" in rendered.plain
+    assert "+line4 new" in rendered.plain
 
 
 def test_comment_card_markdown_headings_create_section_breaks() -> None:

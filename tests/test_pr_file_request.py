@@ -1,6 +1,7 @@
 import json
 from typing import get_type_hints
 
+import rit.services.pr_file_request as pr_file_request
 from rit.services.pr_file_request import (
     fetch_file_content,
     fetch_pr_file_pages,
@@ -38,6 +39,48 @@ def test_parse_pr_files_page_accepts_list_response() -> None:
     )
 
     assert [file.filename for file in files] == ["a.py", "b.py"]
+
+
+def test_parse_pr_files_page_empty_list_skips_model_adapter(monkeypatch) -> None:
+    class Adapter:
+        def validate_python(self, _data: object) -> list[object]:
+            raise AssertionError("empty PR file pages should not enter model validation")
+
+    monkeypatch.setattr(pr_file_request, "_PRFileListAdapter", Adapter())
+
+    assert parse_pr_files_page([]) == []
+
+
+def test_parse_pr_files_page_single_object_skips_list_adapter(monkeypatch) -> None:
+    class Adapter:
+        def validate_python(self, _data: object) -> list[object]:
+            raise AssertionError("single PR file page item should not use list adapter")
+
+    monkeypatch.setattr(pr_file_request, "_PRFileListAdapter", Adapter())
+
+    files = parse_pr_files_page(
+        {"filename": "a.py", "status": "removed", "previous_filename": "old.py"}
+    )
+
+    assert len(files) == 1
+    assert files[0].filename == "a.py"
+
+
+def test_parse_pr_files_page_single_item_list_skips_list_adapter(monkeypatch) -> None:
+    class Adapter:
+        def validate_python(self, _data: object) -> list[object]:
+            raise AssertionError(
+                "single-item PR file pages should not use list adapter"
+            )
+
+    monkeypatch.setattr(pr_file_request, "_PRFileListAdapter", Adapter())
+
+    files = parse_pr_files_page(
+        [{"filename": "a.py", "status": "removed", "previous_filename": "old.py"}]
+    )
+
+    assert len(files) == 1
+    assert files[0].filename == "a.py"
 
 
 def test_parse_pr_files_result_decodes_json_page() -> None:
@@ -155,6 +198,79 @@ async def test_fetch_pr_files_fetches_first_page_and_known_remaining_pages() -> 
         ["api", "/repos/owner/repo/pulls/123/files?per_page=100&page=2"],
     ]
     assert all(input_text is None for _, input_text in calls)
+
+
+async def test_fetch_pr_files_returns_short_first_page_without_collecting(
+    monkeypatch,
+) -> None:
+    calls: list[tuple[list[str], str | None]] = []
+
+    async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        calls.append((args, input_text))
+        return json.dumps(
+            [{"filename": "small.py", "status": "modified", "patch": "@@ -1 +1 @@"}]
+        )
+
+    async def fail_collect_all_page_items(*_args, **_kwargs):
+        raise AssertionError("short first PR files page should not enter pagination")
+
+    monkeypatch.setattr(
+        pr_file_request,
+        "collect_all_page_items",
+        fail_collect_all_page_items,
+    )
+
+    files = await fetch_pr_files(
+        "owner/repo",
+        123,
+        runner=runner,
+    )
+
+    assert [file.filename for file in files] == ["small.py"]
+    assert [call[0] for call in calls] == [
+        ["api", "/repos/owner/repo/pulls/123/files?per_page=100&page=1"],
+    ]
+
+
+async def test_fetch_pr_files_returns_known_complete_first_page_without_collecting(
+    monkeypatch,
+) -> None:
+    calls: list[tuple[list[str], str | None]] = []
+
+    async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        calls.append((args, input_text))
+        return json.dumps(
+            [
+                {
+                    "filename": f"file-{index}.py",
+                    "status": "modified",
+                    "patch": "@@ -1 +1 @@",
+                }
+                for index in range(2)
+            ]
+        )
+
+    async def fail_collect_all_page_items(*_args, **_kwargs):
+        raise AssertionError("known complete first page should not enter pagination")
+
+    monkeypatch.setattr(
+        pr_file_request,
+        "collect_all_page_items",
+        fail_collect_all_page_items,
+    )
+
+    files = await fetch_pr_files(
+        "owner/repo",
+        123,
+        total_count=2,
+        per_page=2,
+        runner=runner,
+    )
+
+    assert [file.filename for file in files] == ["file-0.py", "file-1.py"]
+    assert [call[0] for call in calls] == [
+        ["api", "/repos/owner/repo/pulls/123/files?per_page=2&page=1"],
+    ]
 
 
 def test_parse_pr_files_page_wraps_single_object_response() -> None:

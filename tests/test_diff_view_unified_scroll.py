@@ -1,5 +1,7 @@
 """Tests for unified-mode horizontal scrolling behavior."""
 
+import asyncio
+
 import pytest
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
@@ -9,6 +11,16 @@ from rit.ui.widgets.diff_view import DiffView
 
 
 _LONG_LINE = "long_" * 30
+
+
+async def _wait_until_state(predicate, *, timeout: float = 5.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        if predicate():
+            return
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("condition was not met before timeout")
+        await asyncio.sleep(0.01)
 
 
 @pytest.mark.asyncio
@@ -196,9 +208,15 @@ async def test_cursor_reveal_keeps_vim_scrolloff_context() -> None:
         diff = parse_patch(patch, "test.py")
 
         await diff_view.show_diff("test.py", diff)
+        await _wait_until_state(
+            lambda: (
+                (row := diff_view._current_row()) is not None
+                and diff_view._row_vertical_bounds(row) is not None
+            ),
+            timeout=5.0,
+        )
         await pilot.pause()
         diff_view.focus()
-        await pilot.pause()
 
         diff_view.cursor_line = 10
         await pilot.pause()

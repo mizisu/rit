@@ -1,4 +1,5 @@
 from rit.state.models import PR, PRTeam, PRUser, ReviewRequest
+import rit.state.pr_management as pr_management
 from rit.state.pr_management import (
     plan_assignee_selection,
     plan_reviewer_selection,
@@ -69,6 +70,51 @@ def test_reviewer_selection_plan_reports_unchanged_selection() -> None:
     )
 
     assert plan.has_changes is False
+
+
+def test_reviewer_selection_plan_skips_sorting_empty_changes(monkeypatch) -> None:
+    def fail_sorted(_values):
+        raise AssertionError("empty reviewer changes should not be sorted")
+
+    pr = _pr(
+        reviewers=[
+            _request(PRUser(login="alice")),
+            _request(PRTeam(name="Backend", slug="backend")),
+        ],
+    )
+    monkeypatch.setattr(pr_management, "sorted", fail_sorted, raising=False)
+
+    plan = plan_reviewer_selection(
+        pr,
+        users=["alice"],
+        teams=["backend"],
+    )
+
+    assert plan.has_changes is False
+
+
+def test_reviewer_selection_plan_skips_sorting_single_item_changes(monkeypatch) -> None:
+    def fail_sorted(_values):
+        raise AssertionError("single reviewer changes should not be sorted")
+
+    pr = _pr(
+        reviewers=[
+            _request(PRUser(login="alice")),
+            _request(PRTeam(name="Backend", slug="backend")),
+        ],
+    )
+    monkeypatch.setattr(pr_management, "sorted", fail_sorted, raising=False)
+
+    plan = plan_reviewer_selection(
+        pr,
+        users=[" bob ", "author", ""],
+        teams=[" ops ", ""],
+    )
+
+    assert plan.add_users == ("bob",)
+    assert plan.add_teams == ("ops",)
+    assert plan.remove_users == ("alice",)
+    assert plan.remove_teams == ("backend",)
 
 
 def test_assignee_selection_plan_diffs_sanitized_logins() -> None:

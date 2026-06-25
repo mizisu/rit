@@ -1,6 +1,8 @@
+from typing import cast
+
 import pytest
 from textual.app import App
-from textual.widgets import Markdown, OptionList, TextArea
+from textual.widgets import OptionList, Static, TextArea
 
 from rit.state.models import PendingReviewComment
 from rit.ui.screens.review_submit import ReviewSubmitScreen
@@ -63,7 +65,7 @@ async def test_review_submit_screen_shows_pending_draft_details() -> None:
         pending_list = screen.query_one("#review-submit-pending-list")
         first_item = screen.query_one("#review-submit-pending-item-0", CommentCard)
         second_item = screen.query_one("#review-submit-pending-item-1", CommentCard)
-        markdown_widgets = list(screen.query(Markdown))
+        plain_widgets = list(screen.query(".comment-body-plain"))
 
         assert children[3].id == "review-submit-pending"
         assert pending_list.region.height >= 8
@@ -74,10 +76,14 @@ async def test_review_submit_screen_shows_pending_draft_details() -> None:
         assert str(second_item.query_one(".comment-header").render()) == (
             "tests/test_app.py:11 • old side"
         )
-        assert [widget.source for widget in markdown_widgets] == [
-            "first draft line",
-            "second draft line",
-        ]
+        assert [
+            str(
+                getattr(
+                    cast(Static, widget).content, "plain", cast(Static, widget).content
+                )
+            )
+            for widget in plain_widgets
+        ] == ["first draft line", "second draft line"]
 
 
 @pytest.mark.asyncio

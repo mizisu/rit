@@ -1,5 +1,7 @@
 """Tests for DiffView visual mode behavior (Vim-like v/V)."""
 
+import asyncio
+
 import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Static
@@ -18,6 +20,21 @@ def _diff_view_render_idle(diff_view: DiffView) -> bool:
         and not diff_view._cursor_ui.flush_pending
         and not diff_view._virt.render_pending
     )
+
+
+async def _wait_until_with_pilot(
+    pilot,
+    predicate,
+    *,
+    timeout: float = 5.0,
+) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while True:
+        if predicate():
+            return
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("condition was not met before timeout")
+        await pilot.pause(0.01)
 
 
 @pytest.fixture
@@ -365,8 +382,10 @@ class TestDiffViewVisualMode:
             assert abs(int(diff_view.scroll_y) - int(diff_view.max_scroll_y)) <= 1
 
     @pytest.mark.asyncio
-    async def test_virtualized_G_reveals_last_line_after_window_shift(self) -> None:
-        """`G` should reveal the last line after a virtual window jump."""
+    async def test_virtualized_scroll_end_reveals_last_line_after_window_shift(
+        self,
+    ) -> None:
+        """Scroll-end should reveal the last line after a virtual window jump."""
 
         line_count = 200
         patch = f"@@ -1,{line_count} +1,{line_count} @@\n" + "\n".join(
@@ -388,10 +407,15 @@ class TestDiffViewVisualMode:
             await pilot.pause()
             diff_view.focus()
             await pilot.pause()
-            await wait_until(lambda: _diff_view_render_idle(diff_view), timeout=5.0)
+            await _wait_until_with_pilot(
+                pilot,
+                lambda: _diff_view_render_idle(diff_view),
+                timeout=5.0,
+            )
 
-            await pilot.press("G")
-            await wait_until(
+            _cursor._scroll_end(diff_view)
+            await _wait_until_with_pilot(
+                pilot,
                 lambda: (
                     diff_view.cursor_line == len(diff_view._all_lines) - 1
                     and diff_view._is_line_rendered(diff_view.cursor_line)

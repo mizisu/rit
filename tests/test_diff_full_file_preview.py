@@ -1,4 +1,6 @@
 from rit.core.diff import parse_patch
+from rit.core.types import DiffLine
+import rit.ui.widgets.diff_full_file_preview as full_preview_module
 from rit.ui.widgets.diff_full_file_preview import (
     FullFilePreviewAction,
     FullFileRestorePosition,
@@ -61,6 +63,66 @@ def test_deleted_line_anchor_prefers_next_then_previous_new_line() -> None:
 
     assert nearest_full_file_anchor_for_deleted_line(7, middle_delete) == 7
     assert nearest_full_file_anchor_for_deleted_line(7, trailing_delete) == 7
+
+
+def test_deleted_line_anchor_scans_neighbors_without_copying_slices() -> None:
+    diff = parse_patch(
+        """@@ -1,5 +1,4 @@
+ line 1
+-line 2 removed
+-line 3 removed
+ line 4
+ line 5""",
+        "preview.py",
+    )
+
+    class NoSliceLines(list):
+        def __getitem__(self, index):
+            if isinstance(index, slice):
+                raise AssertionError("anchor lookup should not copy hunk slices")
+            return super().__getitem__(index)
+
+    diff.hunks[0].lines = NoSliceLines(diff.hunks[0].lines)
+
+    assert nearest_full_file_anchor_for_deleted_line(3, diff) == 2
+
+
+def test_build_full_file_diff_reuses_single_pass_change_counts() -> None:
+    class SinglePassDiff(type(parse_patch("@@ -1 +1 @@\n-old\n+new", "preview.py"))):
+        @property
+        def total_additions(self) -> int:
+            raise AssertionError("full-file preview should not count additions alone")
+
+        @property
+        def total_deletions(self) -> int:
+            raise AssertionError("full-file preview should not count deletions alone")
+
+    source = parse_patch(
+        """@@ -1,2 +1,2 @@
+ line 1
+-old
++new""",
+        "preview.py",
+    )
+    source_diff = SinglePassDiff(
+        filename=source.filename,
+        hunks=source.hunks,
+        old_filename=source.old_filename,
+        is_new=source.is_new,
+        is_deleted=source.is_deleted,
+        is_binary=source.is_binary,
+        is_fully_refined=source.is_fully_refined,
+        show_hunk_headers=source.show_hunk_headers,
+    )
+
+    full_diff = build_full_file_diff(
+        "preview.py",
+        "line 1\nnew",
+        source_diff=source_diff,
+    )
+
+    assert full_diff.hunks[0].file_additions == 1
+    assert full_diff.hunks[0].file_deletions == 1
 
 
 def test_choose_full_file_preview_action_requires_file_and_store() -> None:
@@ -167,6 +229,23 @@ def test_full_file_anchor_line_index_clamps_to_available_lines() -> None:
     assert full_file_anchor_line_index(99, line_index_by_new_number) == 2
 
 
+def test_full_file_anchor_line_index_reuses_available_line_bounds() -> None:
+    class NoIterLineIndex(dict):
+        def __iter__(self):
+            raise AssertionError("full-file anchor should reuse planned line bounds")
+
+    line_index_by_new_number = NoIterLineIndex({10: 0, 11: 1, 12: 2})
+
+    assert (
+        full_file_anchor_line_index(
+            99,
+            line_index_by_new_number,
+            available_line_bounds=(10, 12),
+        )
+        == 2
+    )
+
+
 def test_build_full_file_diff_handles_empty_file_preview() -> None:
     diff = build_full_file_diff("empty.py", "")
 
@@ -212,3 +291,53 @@ def test_build_full_file_diff_splits_context_around_source_hunks() -> None:
         (6, 3),
         (9, 1),
     ]
+
+
+def test_build_full_file_diff_reuses_clean_source_hunk_header_without_strip() -> None:
+    class CleanHeader(str):
+        def strip(self, *_args: object, **_kwargs: object) -> str:
+            raise AssertionError("clean full-preview hunk headers should not strip")
+
+    source_diff = parse_patch(
+        """@@ -2,2 +2,2 @@ first section
+ line 2
+-old 3
++new 3""",
+        "preview.py",
+    )
+    source_diff.hunks[0].header = CleanHeader("first section")
+
+    diff = build_full_file_diff(
+        "preview.py",
+        _content(4),
+        source_diff=source_diff,
+    )
+
+    assert diff.hunks[1].header == "change hunk 1/1  first section"
+
+
+def test_full_preview_hunk_reuses_full_line_range_without_slice() -> None:
+    class NoSliceLines(list[DiffLine]):
+        def __getitem__(self, index):
+            if isinstance(index, slice):
+                raise AssertionError("full-range preview hunk should reuse lines")
+            return super().__getitem__(index)
+
+    lines = NoSliceLines(
+        [
+            DiffLine(None, 1, new_content="one"),
+            DiffLine(None, 2, new_content="two"),
+        ]
+    )
+
+    hunk = full_preview_module._make_full_preview_hunk(
+        "preview.py",
+        lines,
+        start=1,
+        end=2,
+        header="full file",
+        starts_file=True,
+        file_change_counts=(0, 0),
+    )
+
+    assert hunk.lines is lines

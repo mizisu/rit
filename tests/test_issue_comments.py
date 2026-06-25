@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from rit.core.datetime_utils import datetime_sort_key
 from rit.state.models import PR, PRIssueComment
 
 
@@ -46,6 +47,54 @@ def test_insert_issue_comment_returns_created_at_sorted_list() -> None:
     )
 
     assert inserted == [missing_date, middle, latest]
+
+
+def test_insert_issue_comment_skips_sort_for_first_comment(monkeypatch) -> None:
+    issue_comments = _issue_comments_module()
+    submitted = PRIssueComment(id=1, body="submitted")
+
+    monkeypatch.setattr(
+        issue_comments,
+        "datetime_sort_key",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("first issue comment should not be sorted")
+        ),
+    )
+
+    assert issue_comments.insert_issue_comment([], submitted) == [submitted]
+
+
+def test_insert_issue_comment_appends_latest_without_full_sort(monkeypatch) -> None:
+    issue_comments = _issue_comments_module()
+    first = PRIssueComment(
+        id=1,
+        body="first",
+        created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+    )
+    second = PRIssueComment(
+        id=2,
+        body="second",
+        created_at=datetime(2024, 1, 2, tzinfo=timezone.utc),
+    )
+    submitted = PRIssueComment(
+        id=3,
+        body="submitted",
+        created_at=datetime(2024, 1, 3, tzinfo=timezone.utc),
+    )
+    sort_key_calls: list[datetime | None] = []
+
+    def recording_sort_key(value: datetime | None) -> datetime:
+        sort_key_calls.append(value)
+        return datetime_sort_key(value)
+
+    monkeypatch.setattr(issue_comments, "datetime_sort_key", recording_sort_key)
+
+    assert issue_comments.insert_issue_comment([first, second], submitted) == [
+        first,
+        second,
+        submitted,
+    ]
+    assert sort_key_calls == [second.created_at, submitted.created_at]
 
 
 def test_apply_submitted_issue_comment_updates_list_and_pr_model() -> None:

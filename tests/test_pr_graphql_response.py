@@ -42,6 +42,54 @@ def test_parse_pull_request_graphql_data_returns_pull_request_node() -> None:
     assert parsed == pr_data
 
 
+def test_parse_pull_request_graphql_data_uses_direct_dict_lookup() -> None:
+    class NoItemsDict(dict):
+        def items(self):
+            raise AssertionError("GraphQL parser should not scan mapping items")
+
+    pr_data = NoItemsDict({"number": 123, "title": "Ship it"})
+
+    parsed = parse_pull_request_graphql_data(
+        NoItemsDict(
+            {
+                "data": NoItemsDict(
+                    {
+                        "repository": NoItemsDict(
+                            {
+                                "pullRequest": pr_data,
+                            }
+                        )
+                    }
+                )
+            }
+        ),
+        pr_number=123,
+    )
+
+    assert parsed == {"number": 123, "title": "Ship it"}
+
+
+def test_parse_pull_request_graphql_data_single_key_dict_skips_all(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pr_data = {"number": 123}
+    monkeypatch.setattr(
+        pr_graphql_response_module,
+        "all",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("single-key GraphQL PR dict should not scan all keys")
+        ),
+        raising=False,
+    )
+
+    parsed = parse_pull_request_graphql_data(
+        {"data": {"repository": {"pullRequest": pr_data}}},
+        pr_number=123,
+    )
+
+    assert parsed is pr_data
+
+
 def test_parse_pull_request_graphql_data_raises_graphql_errors() -> None:
     with pytest.raises(PullRequestGraphQLError) as exc_info:
         parse_pull_request_graphql_data(

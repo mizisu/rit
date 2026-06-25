@@ -1,6 +1,6 @@
 import asyncio
-from types import SimpleNamespace
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
 import pytest
 from textual.app import App, ComposeResult
@@ -12,21 +12,36 @@ from rit.state.models import (
     PRIssueComment,
     PRReview,
     PRUser,
-    ReviewThreadInfo,
+    ReviewState,
     ReviewThread,
+    ReviewThreadInfo,
 )
 from rit.state.store import PRStore
 from rit.ui.components import pr_timeline as pr_timeline_module
+from rit.ui.components.collapsible_markdown import CopyableCodeBlock
 from rit.ui.components.pr_timeline import (
     INITIAL_TIMELINE_BODY_COUNT,
-    PRTimeline,
     TIMELINE_BODY_MOUNT_DELAY,
+    PRTimeline,
 )
 from rit.ui.widgets import comment_card as comment_card_module
 from rit.ui.widgets.comment_card import BODY_PREVIEW_RETIRE_DELAY, CommentCard
-from rit.ui.components.collapsible_markdown import CopyableCodeBlock
 from rit.ui.widgets.review_thread_card import ReviewThreadItem
 from tests.conftest import wait_until
+
+
+class _FakeTimelineCard:
+    def __init__(self, header_text: str, body: str, **_kwargs: object) -> None:
+        self.header_text = header_text
+        self.body = body
+
+
+class _FakeTimelineContainer:
+    def __init__(self, mounted: list[_FakeTimelineCard]) -> None:
+        self.mounted = mounted
+
+    def mount(self, card: _FakeTimelineCard) -> None:
+        self.mounted.append(card)
 
 
 def test_initial_timeline_selection_does_not_scroll_viewport() -> None:
@@ -47,6 +62,62 @@ def test_initial_timeline_selection_does_not_scroll_viewport() -> None:
     timeline._select_first_item()
 
     assert calls == [False]
+
+
+def test_timeline_mount_review_uses_shared_review_state_display(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = PRStore()
+    timeline = PRTimeline(store)
+    mounted: list[_FakeTimelineCard] = []
+
+    monkeypatch.setattr(pr_timeline_module, "CommentCard", _FakeTimelineCard)
+    monkeypatch.setattr(
+        pr_timeline_module,
+        "_review_state_display",
+        lambda _state: "approved-from-helper",
+        raising=False,
+    )
+
+    timeline._mount_review(
+        _FakeTimelineContainer(mounted),
+        PRReview(
+            body="LGTM",
+            state=ReviewState.APPROVED,
+            user=PRUser(login="alice"),
+        ),
+        body_mount_delay=0,
+    )
+
+    assert "approved-from-helper" in mounted[0].header_text
+
+
+def test_mount_review_with_threads_checks_review_body_without_allocating_strip(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Body(str):
+        def strip(self, chars: str | None = None) -> str:
+            raise AssertionError("review body presence should not allocate strip text")
+
+    store = PRStore()
+    timeline = PRTimeline(store)
+    mounted: list[_FakeTimelineCard] = []
+    monkeypatch.setattr(pr_timeline_module, "CommentCard", _FakeTimelineCard)
+
+    timeline._mount_review_with_threads(
+        _FakeTimelineContainer(mounted),
+        PRReview.model_construct(
+            body=Body("LGTM"),
+            state=ReviewState.COMMENTED,
+            user=PRUser(login="alice"),
+            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            submitted_at=None,
+        ),
+        [],
+        body_mount_delay=0,
+    )
+
+    assert mounted[0].body == "LGTM"
 
 
 @pytest.mark.asyncio
@@ -87,6 +158,32 @@ async def test_description_starts_as_loading_card_until_summary_loads() -> None:
         await pilot.pause()
 
         assert not description.has_class("timeline-loading")
+
+
+def test_refresh_timeline_skips_unchanged_render_signature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = PRStore()
+    store.state.issue_comments = [
+        PRIssueComment.model_validate(
+            {
+                "id": 1,
+                "body": "Already rendered",
+                "user": {"login": "alice"},
+                "createdAt": datetime(2026, 4, 21, tzinfo=timezone.utc),
+                "updatedAt": datetime(2026, 4, 21, tzinfo=timezone.utc),
+            }
+        )
+    ]
+    timeline = PRTimeline(store)
+    timeline._timeline_render_signature = timeline._current_timeline_render_signature()
+
+    def fail_run_worker(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("unchanged timeline should not rerender")
+
+    monkeypatch.setattr(timeline, "run_worker", fail_run_worker)
+
+    timeline.refresh_timeline()
 
 
 @pytest.mark.asyncio
@@ -255,9 +352,10 @@ async def test_timeline_staggers_body_mount_delay_after_initial_items() -> None:
         cards = list(app.query("CommentCard.comment-box"))
         delays = [card._body_mount_delay for card in cards]
 
-        assert delays[:INITIAL_TIMELINE_BODY_COUNT] == [
-            TIMELINE_BODY_MOUNT_DELAY
-        ] * INITIAL_TIMELINE_BODY_COUNT
+        assert (
+            delays[:INITIAL_TIMELINE_BODY_COUNT]
+            == [TIMELINE_BODY_MOUNT_DELAY] * INITIAL_TIMELINE_BODY_COUNT
+        )
         assert delays[INITIAL_TIMELINE_BODY_COUNT] > TIMELINE_BODY_MOUNT_DELAY
         assert delays[-1] > delays[INITIAL_TIMELINE_BODY_COUNT]
 
@@ -395,12 +493,12 @@ async def test_pr_description_code_block_can_copy_raw_code() -> None:
     store = PRStore()
     store.state.pr = PR(
         number=123,
-        body='''Description.
+        body="""Description.
 
 ```bash
 uv run pytest
 ```
-''',
+""",
         author=PRUser(login="alice"),
     )
 

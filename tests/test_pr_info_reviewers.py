@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from rit.state.models import PR, PRReview, PRTeam, PRUser, ReviewRequest, ReviewState
+import rit.state.reviewer_status as reviewer_status_module
 from rit.state.reviewer_status import derive_reviewer_states
 
 
@@ -37,6 +38,18 @@ def test_requested_only_reviewer_is_kept() -> None:
     assert reviewers[0].is_team is False
 
 
+def test_empty_reviewer_state_skips_author_lookup() -> None:
+    class User:
+        @property
+        def login(self) -> str:
+            raise AssertionError("empty reviewer state should not inspect author")
+
+    pr = _pr()
+    pr.user = User()
+
+    assert derive_reviewer_states(pr, []) == []
+
+
 def test_requested_reviewer_with_pending_review_stays_requested() -> None:
     pr = _pr(
         requested_reviewers=[ReviewRequest(requestedReviewer=PRUser(login="alice"))]
@@ -60,6 +73,31 @@ def test_requested_reviewer_with_approved_review_shows_approved() -> None:
     reviewers = derive_reviewer_states(pr, reviews)
 
     assert len(reviewers) == 1
+    assert reviewers[0].kind == "approved"
+    assert reviewers[0].latest_review_at == datetime(2026, 4, 1, 12)
+
+
+def test_single_review_without_requested_reviewers_skips_sort_key(
+    monkeypatch,
+) -> None:
+    pr = _pr()
+    review = _review(
+        "alice",
+        ReviewState.APPROVED,
+        submitted_at=datetime(2026, 4, 1, 12),
+    )
+    monkeypatch.setattr(
+        reviewer_status_module,
+        "datetime_sort_key",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("single reviewer state should not compute sort keys")
+        ),
+    )
+
+    reviewers = derive_reviewer_states(pr, [review])
+
+    assert len(reviewers) == 1
+    assert reviewers[0].display_name == "alice"
     assert reviewers[0].kind == "approved"
     assert reviewers[0].latest_review_at == datetime(2026, 4, 1, 12)
 
@@ -110,6 +148,39 @@ def test_author_reviews_are_excluded() -> None:
 
     assert [reviewer.display_name for reviewer in reviewers] == ["bob"]
     assert reviewers[0].kind == "commented"
+
+
+def test_review_order_uses_seen_set_for_unique_reviewers() -> None:
+    class ReviewLogin(str):
+        def __eq__(self, other: object) -> bool:
+            if isinstance(other, ReviewLogin) and str(self) != str(other):
+                raise AssertionError("review order should not scan existing logins")
+            return super().__eq__(other)
+
+        def __hash__(self) -> int:
+            return {"alice": 1, "bob": 2}[str(self)]
+
+    alice = PRUser(login="alice")
+    alice.login = ReviewLogin("alice")
+    bob = PRUser(login="bob")
+    bob.login = ReviewLogin("bob")
+    pr = _pr()
+    reviews = [
+        PRReview(
+            author=alice,
+            state=ReviewState.COMMENTED,
+            submittedAt=datetime(2026, 4, 1, 9),
+        ),
+        PRReview(
+            author=bob,
+            state=ReviewState.APPROVED,
+            submittedAt=datetime(2026, 4, 1, 10),
+        ),
+    ]
+
+    reviewers = derive_reviewer_states(pr, reviews)
+
+    assert [str(reviewer.display_name) for reviewer in reviewers] == ["alice", "bob"]
 
 
 def test_team_reviewer_is_marked_as_team() -> None:

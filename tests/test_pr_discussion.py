@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+import rit.services.pr_discussion as pr_discussion
 from rit.services.pr_discussion import (
     discussion_from_pr,
     fast_discussion_from_data,
@@ -103,6 +104,80 @@ def test_fast_discussion_from_data_builds_threads_from_rest_comments() -> None:
     assert [comment.id for comment in thread.comments] == [300, 301]
     assert thread.comments[0].user is not None
     assert thread.comments[0].user.login == "coderabbitai"
+
+
+def test_fast_discussion_from_data_empty_rest_comments_skips_model_adapter(
+    monkeypatch,
+) -> None:
+    class Adapter:
+        def validate_python(self, _data: object) -> list[object]:
+            raise AssertionError("empty REST review comments should skip validation")
+
+    monkeypatch.setattr(pr_discussion, "_PRCommentListAdapter", Adapter())
+
+    discussion = fast_discussion_from_data(
+        {
+            "body": "PR body",
+            "reviews": {"nodes": []},
+            "comments": {"nodes": []},
+        },
+        [],
+    )
+
+    assert discussion.body == "PR body"
+    assert discussion.reviews == []
+    assert discussion.issue_comments == []
+    assert discussion.review_threads == []
+
+
+def test_fast_discussion_from_data_single_rest_comment_skips_model_adapter(
+    monkeypatch,
+) -> None:
+    class Adapter:
+        def validate_python(self, _data: object) -> list[object]:
+            raise AssertionError("single REST review comment should skip list validation")
+
+    monkeypatch.setattr(pr_discussion, "_PRCommentListAdapter", Adapter())
+
+    discussion = fast_discussion_from_data(
+        {
+            "body": "PR body",
+            "reviews": {"nodes": []},
+            "comments": {"nodes": []},
+        },
+        [
+            {
+                "id": 300,
+                "body": "root",
+                "path": "app.py",
+                "line": 12,
+                "side": "RIGHT",
+            }
+        ],
+    )
+
+    assert len(discussion.review_threads) == 1
+    assert discussion.review_threads[0].root_comment_id == 300
+
+
+def test_fast_discussion_from_result_empty_rest_comments_skips_json_decode(
+    monkeypatch,
+) -> None:
+    def loads(_result: str) -> object:
+        raise AssertionError("empty REST review comments should skip JSON decode")
+
+    monkeypatch.setattr(pr_discussion.json, "loads", loads)
+
+    discussion = fast_discussion_from_result(
+        {
+            "body": "PR body",
+            "reviews": {"nodes": []},
+            "comments": {"nodes": []},
+        },
+        "[]",
+    )
+
+    assert discussion.review_threads == []
 
 
 def test_fast_discussion_from_result_decodes_rest_review_comments() -> None:

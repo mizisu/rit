@@ -5,13 +5,26 @@ import threading
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.content import Content
+from textual.geometry import Region
 from textual.widgets import Static
 
 from rit.core.diff import parse_patch
+from rit.core.types import DiffHunk, DiffLine, FileDiff
+from rit.state.models import PendingReviewComment, PRComment, PRFile, ReviewThread
+from rit.state.store import PRStore
 from rit.ui.widgets import diff_search as _search_mod
 from rit.ui.widgets import diff_blocks as _blocks_mod
+from rit.ui.widgets import diff_comments as _comments_mod
+from rit.ui.widgets import diff_cursor as _cursor_mod
 from rit.ui.widgets import diff_highlight as _hl_mod
+from rit.ui.widgets import diff_plan as _plan_mod
+from rit.ui.widgets import diff_render as _render_mod
+from rit.ui.widgets import diff_selection as _selection_mod
+from rit.ui.widgets import diff_types as _diff_types_mod
 from rit.ui.widgets import diff_virtual as _virtual_mod
+from rit.ui.widgets import diff_visual as _visual_mod
+from rit.ui.widgets.diff_types import CursorUIState, RenderedRow
 from rit.ui.widgets.diff_view import DiffView, SplitDiffBlock, UnifiedDiffBlock
 from rit.ui.widgets.diff_visual import LineContent
 from tests.conftest import wait_until
@@ -30,6 +43,1274 @@ def _diff_view_render_idle(diff_view: DiffView) -> bool:
         and not diff_view._cursor_ui.flush_pending
         and not diff_view._virt.render_pending
     )
+
+
+def test_missing_side_hatch_text_uses_default_step_fast_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        _visual_mod,
+        "range",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("default hatch placeholder should not loop by column")
+        ),
+        raising=False,
+    )
+
+    text = _visual_mod.missing_side_hatch_text(8, row_index=5)
+
+    assert text == _visual_mod.MISSING_SIDE_HATCH * 8
+
+
+def test_line_annotations_render_line_reuses_cached_number_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    annotations = _visual_mod.LineAnnotations([Content("1"), Content("1000")])
+    monkeypatch.setattr(
+        _visual_mod,
+        "max",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("render_line should not rescan all annotation widths")
+        ),
+        raising=False,
+    )
+
+    strip = annotations.render_line(0)
+
+    assert strip.text == "1   "
+
+
+def test_line_annotations_single_number_width_avoids_max(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        _visual_mod,
+        "max",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("single annotation width should not call max")
+        ),
+        raising=False,
+    )
+
+    annotations = _visual_mod.LineAnnotations([Content("1000")])
+
+    assert annotations.number_width == 4
+
+
+def test_line_content_get_optimal_width_reuses_cached_width(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    content = LineContent([Content("1"), Content("1000")], ["", ""])
+    monkeypatch.setattr(
+        _visual_mod,
+        "max",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("get_optimal_width should not rescan code lines")
+        ),
+        raising=False,
+    )
+
+    assert content.get_optimal_width({}, 80) == 4
+
+
+def test_line_content_single_line_width_avoids_max(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        _visual_mod,
+        "max",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("single code line width should not call max")
+        ),
+        raising=False,
+    )
+
+    content = LineContent([Content("1000")], [""])
+
+    assert content.get_optimal_width({}, 80) == 4
+
+
+def test_two_cursor_repaint_lines_avoid_sorted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        _cursor_mod,
+        "sorted",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("two-line cursor repaint should not call sorted")
+        ),
+        raising=False,
+    )
+
+    assert tuple(_cursor_mod._cursor_lines_for_repaint({4, 2})) == (2, 4)
+
+
+def test_line_number_width_reuses_number_index_keys_without_tuple_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class View:
+        show_line_numbers = True
+        _line_index_by_old_number = {1: 0, 120: 1}
+        _line_index_by_new_number = {1: 0, 9000: 1}
+
+    monkeypatch.setattr(
+        _render_mod,
+        "tuple",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("line number width should reuse number index keys")
+        ),
+        raising=False,
+    )
+
+    assert _render_mod._old_line_number_width(View()) == 3
+    assert _render_mod._new_line_number_width(View()) == 4
+
+
+def test_line_number_width_uses_planned_values_without_scanning_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class View:
+        show_line_numbers = True
+        _old_line_number_width_value = 3
+        _new_line_number_width_value = 4
+        _line_index_by_old_number = {1: 0, 120: 1}
+        _line_index_by_new_number = {1: 0, 9000: 1}
+
+    monkeypatch.setattr(
+        _render_mod._layout,
+        "line_number_width_for_layout",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("planned line number widths should be reused")
+        ),
+    )
+
+    assert _render_mod._old_line_number_width(View()) == 3
+    assert _render_mod._new_line_number_width(View()) == 4
+
+
+def test_code_content_without_cursor_skips_line_text_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    line = DiffLine(None, "content", line_index=2)
+    base_content = Content("content")
+
+    class View:
+        def _get_line_text(self, *_args: object, **_kwargs: object) -> str:
+            raise AssertionError("non-cursor content should not read line text")
+
+    monkeypatch.setattr(
+        _render_mod,
+        "_base_code_content",
+        lambda *_args, **_kwargs: base_content,
+    )
+    monkeypatch.setattr(
+        _render_mod._search,
+        "apply_search_highlights",
+        lambda _view, content, _line_idx, _side: content,
+    )
+
+    content = _render_mod._build_code_content_with_cursor(
+        View(),
+        line,
+        has_cursor=False,
+        cursor_col=None,
+    )
+
+    assert content is base_content
+
+
+def test_unified_block_row_without_selection_skips_line_text_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    line = DiffLine(1, 1, old_content="content", new_content="content", line_index=2)
+    annotation = Content("1 ")
+    base_content = Content("content")
+
+    class View:
+        cursor_column = 0
+
+        def _diff_line_cursor_active(self, _line_index: int) -> bool:
+            return False
+
+        def _compute_selection_spec_for_line(self, _line_index: int) -> None:
+            return None
+
+        def _get_line_text(self, *_args: object, **_kwargs: object) -> str:
+            raise AssertionError("unselected block rows should not read line text")
+
+        def _build_code_content_with_cursor(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> Content:
+            return base_content
+
+    monkeypatch.setattr(
+        _blocks_mod,
+        "_unified_block_static_rows",
+        lambda _view, _line: (
+            _diff_types_mod.UnifiedBlockRowStaticData(
+                annotation=annotation,
+                line_style="line-style",
+                side="auto",
+            ),
+        ),
+    )
+
+    annotations, code_lines, line_styles = _blocks_mod._build_unified_block_row_data(
+        View(),
+        line,
+    )
+
+    assert annotations == [annotation]
+    assert code_lines == [base_content]
+    assert line_styles == ["line-style"]
+
+
+def test_unified_block_row_skips_selection_spec_when_visual_mode_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    line = DiffLine(1, 1, old_content="content", new_content="content", line_index=2)
+    base_content = Content("content")
+
+    class View:
+        visual_mode = False
+        cursor_column = 0
+
+        def _diff_line_cursor_active(self, _line_index: int) -> bool:
+            return False
+
+        def _compute_selection_spec_for_line(self, _line_index: int) -> None:
+            raise AssertionError("visual-mode-off rows should not compute selection")
+
+        def _build_code_content_with_cursor(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> Content:
+            return base_content
+
+    monkeypatch.setattr(
+        _blocks_mod,
+        "_unified_block_static_rows",
+        lambda _view, _line: (
+            _diff_types_mod.UnifiedBlockRowStaticData(
+                annotation=Content("1 "),
+                line_style="line-style",
+                side="auto",
+            ),
+        ),
+    )
+
+    _blocks_mod._build_unified_block_row_data(View(), line)
+
+
+def test_non_block_refresh_skips_selection_spec_when_visual_mode_off() -> None:
+    line = DiffLine(1, 1, old_content="content", new_content="content", line_index=2)
+    base_content = Content("content")
+
+    class Widget:
+        updated: Content | None = None
+
+        def has_class(self, _class_name: str) -> bool:
+            return False
+
+        def update(self, content: Content) -> None:
+            self.updated = content
+
+        def remove_class(self, _class_name: str) -> None:
+            pass
+
+    widget = Widget()
+
+    class View:
+        visual_mode = False
+        cursor_column = 0
+        _all_lines = [line]
+
+        def _get_code_widgets(self, _line_idx: int) -> tuple[Widget]:
+            return (widget,)
+
+        def _compute_selection_spec_for_line(self, _line_idx: int) -> None:
+            raise AssertionError("visual-mode-off refresh should not compute selection")
+
+        def _diff_line_cursor_active(self, _line_idx: int) -> bool:
+            return False
+
+        def _get_line_side_for_widget(
+            self,
+            _line: DiffLine,
+            _widget: Widget,
+        ) -> str:
+            return "auto"
+
+        def _widget_matches_cursor_side(
+            self,
+            _line: DiffLine,
+            _widget: Widget,
+        ) -> bool:
+            return False
+
+        def _base_code_content(self, *_args: object, **_kwargs: object) -> Content:
+            return base_content
+
+    _blocks_mod._refresh_non_block_line_content(View(), 0)
+
+    assert widget.updated is base_content
+
+
+def test_split_code_content_without_selection_skips_line_content_lookup() -> None:
+    base_content = Content("content")
+
+    class Line:
+        line_index = 2
+        has_old_side = True
+        has_new_side = True
+
+        @property
+        def old_content(self) -> str:
+            raise AssertionError("unselected split rows should not read line text")
+
+    class View:
+        cursor_column = 0
+
+        def _compute_selection_spec_for_line(self, _line_index: int) -> None:
+            return None
+
+        def _diff_line_cursor_active(self, _line_index: int) -> bool:
+            return False
+
+        def _build_code_content_with_cursor(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> Content:
+            return base_content
+
+    content = _render_mod._build_split_code_content(
+        View(),
+        Line(),
+        side="old",
+        placeholder_when_missing=False,
+    )
+
+    assert content is base_content
+
+
+def test_split_code_content_skips_selection_spec_when_visual_mode_off() -> None:
+    base_content = Content("content")
+
+    class Line:
+        line_index = 2
+        has_old_side = True
+        has_new_side = True
+
+    class View:
+        visual_mode = False
+        cursor_column = 0
+
+        def _compute_selection_spec_for_line(self, _line_index: int) -> None:
+            raise AssertionError("visual-mode-off split rows should not compute selection")
+
+        def _diff_line_cursor_active(self, _line_index: int) -> bool:
+            return False
+
+        def _build_code_content_with_cursor(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> Content:
+            return base_content
+
+    content = _render_mod._build_split_code_content(
+        View(),
+        Line(),
+        side="old",
+        placeholder_when_missing=False,
+    )
+
+    assert content is base_content
+
+
+def test_unified_diff_block_reuses_tuple_line_indices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    line_indices = (1, 2)
+    monkeypatch.setattr(
+        _diff_types_mod,
+        "tuple",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("tuple line indices should be reused")
+        ),
+        raising=False,
+    )
+
+    block = UnifiedDiffBlock(line_indices)
+
+    assert block.line_indices is line_indices
+
+
+def test_split_diff_block_reuses_tuple_line_indices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    line_indices = (3, 4)
+    monkeypatch.setattr(
+        _diff_types_mod,
+        "tuple",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("tuple line indices should be reused")
+        ),
+        raising=False,
+    )
+
+    block = SplitDiffBlock(line_indices)
+
+    assert block.line_indices is line_indices
+
+
+def test_cursor_ui_flush_transfers_pending_line_sets_without_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NonCopyablePendingLines:
+        def __bool__(self) -> bool:
+            return False
+
+        def __iter__(self):
+            raise AssertionError("cursor flush should not copy pending line sets")
+
+        def clear(self) -> None:
+            raise AssertionError("cursor flush should transfer pending line sets")
+
+    pending_cursor_lines = NonCopyablePendingLines()
+    pending_selection_lines = NonCopyablePendingLines()
+
+    class View:
+        is_mounted = True
+        visual_mode = False
+        _unified_blocks_by_line = {}
+        _split_blocks_by_line = {}
+
+        def __init__(self) -> None:
+            self._cursor_ui = CursorUIState()
+            self._cursor_ui.flush_pending = True
+            self._cursor_ui.dirty_lines = pending_cursor_lines  # type: ignore[assignment]
+            self._cursor_ui.selection_dirty = pending_selection_lines  # type: ignore[assignment]
+
+        def _update_line_cursor(self, _line_idx: int) -> None:
+            raise AssertionError("no line repaint expected")
+
+        def _update_selection_highlighting(self, _dirty_lines=None) -> None:
+            raise AssertionError("no selection repaint expected")
+
+        def _update_status_line(self) -> None:
+            raise AssertionError("no status repaint expected")
+
+    seen: dict[str, object] = {}
+
+    def cursor_lines_for_flush(**kwargs):
+        seen.update(kwargs)
+        return set()
+
+    monkeypatch.setattr(
+        _cursor_mod._cursor_update,
+        "cursor_lines_for_flush",
+        cursor_lines_for_flush,
+    )
+
+    view = View()
+
+    _cursor_mod._flush_queued_cursor_ui_updates(view)
+
+    assert seen["cursor_lines"] is pending_cursor_lines
+    assert seen["selection_dirty_lines"] is pending_selection_lines
+    assert view._cursor_ui.flush_pending is False
+    assert view._cursor_ui.dirty_lines == set()
+    assert view._cursor_ui.selection_dirty == set()
+
+
+def test_cursor_ui_flush_skips_sort_for_single_dirty_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class View:
+        is_mounted = True
+        visual_mode = False
+        _unified_blocks_by_line = {}
+        _split_blocks_by_line = {}
+
+        def __init__(self) -> None:
+            self._cursor_ui = CursorUIState()
+            self._cursor_ui.flush_pending = True
+            self._cursor_ui.dirty_lines = {4}
+            self._cursor_ui.selection_dirty = set()
+            self.updated_lines: list[int] = []
+
+        def _update_line_cursor(self, line_idx: int) -> None:
+            self.updated_lines.append(line_idx)
+
+        def _update_selection_highlighting(self, _dirty_lines=None) -> None:
+            raise AssertionError("no selection repaint expected")
+
+        def _update_status_line(self) -> None:
+            raise AssertionError("no status repaint expected")
+
+    monkeypatch.setattr(
+        _cursor_mod._blocks,
+        "_refresh_grouped_blocks_for_lines",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        _cursor_mod,
+        "sorted",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("single dirty line should not sort")
+        ),
+        raising=False,
+    )
+
+    view = View()
+
+    _cursor_mod._flush_queued_cursor_ui_updates(view)
+
+    assert view.updated_lines == [4]
+
+
+def test_mounted_block_row_bounds_does_not_copy_line_indices() -> None:
+    class NoListLineIndices:
+        def __init__(self, values: tuple[int, ...]) -> None:
+            self._values = values
+
+        def __iter__(self):
+            return iter(self._values)
+
+        def __len__(self) -> int:
+            raise AssertionError("block row bounds should not copy line indices")
+
+        def index(self, value: int) -> int:
+            return self._values.index(value)
+
+    class Block:
+        is_mounted = True
+        line_indices = NoListLineIndices((3, 4, 5))
+        region = Region(0, 20, 20, 3)
+
+    class ScrollableContentRegion:
+        y = 5
+
+    class View:
+        split = False
+        scroll_y = 10
+        scrollable_content_region = ScrollableContentRegion()
+        _unified_blocks_by_line = {5: Block()}
+        _split_blocks_by_line = {}
+        _all_lines = [
+            DiffLine(None, None, line_index=index, is_modified=index == 4)
+            for index in range(6)
+        ]
+
+    row = RenderedRow(
+        mode="unified",
+        row_index=5,
+        line_index=5,
+        hunk_index=0,
+        kind="context",
+        side="auto",
+        anchor_id="line-5",
+        old_line_no=5,
+        new_line_no=5,
+    )
+
+    assert _cursor_mod._mounted_block_row_vertical_bounds(View(), row) == (28, 29)
+
+
+def test_mounted_block_row_bounds_finds_row_in_single_pass() -> None:
+    class NoIndexLineIndices:
+        def __init__(self, values: tuple[int, ...]) -> None:
+            self._values = values
+
+        def __iter__(self):
+            return iter(self._values)
+
+        def index(self, _value: int) -> int:
+            raise AssertionError("block row bounds should not rescan line indices")
+
+    class Block:
+        is_mounted = True
+        line_indices = NoIndexLineIndices((3, 4, 5))
+        region = Region(0, 20, 20, 3)
+
+    class ScrollableContentRegion:
+        y = 5
+
+    class View:
+        split = False
+        scroll_y = 10
+        scrollable_content_region = ScrollableContentRegion()
+        _unified_blocks_by_line = {5: Block()}
+        _split_blocks_by_line = {}
+        _all_lines = [
+            DiffLine(None, None, line_index=index, is_modified=index == 4)
+            for index in range(6)
+        ]
+
+    row = RenderedRow(
+        mode="unified",
+        row_index=5,
+        line_index=5,
+        hunk_index=0,
+        kind="context",
+        side="auto",
+        anchor_id="line-5",
+        old_line_no=5,
+        new_line_no=5,
+    )
+
+    assert _cursor_mod._mounted_block_row_vertical_bounds(View(), row) == (28, 29)
+
+
+def test_build_comment_map_reuses_planned_file_paths_without_line_scan() -> None:
+    """Comment mapping should not rescan all diff lines to rediscover file paths."""
+
+    class NoIterLines(list):
+        def __iter__(self):
+            raise AssertionError("comment map should reuse planned file paths")
+
+    diff_view = DiffView(store=PRStore())
+    diff_view.current_file = "large.py"
+    diff_view._diff_file_paths = {"large.py"}
+    diff_view._all_lines = NoIterLines()
+
+    _comments_mod.build_comment_map(diff_view)
+
+    assert diff_view._comment_line_indices == []
+
+
+def test_file_path_lookup_reuses_planned_container_without_copy() -> None:
+    """Comment mapping should use planned file path membership without copying."""
+
+    class NoIterFilePaths:
+        def __bool__(self) -> bool:
+            return True
+
+        def __iter__(self):
+            raise AssertionError("planned file paths should not be copied")
+
+    diff_view = DiffView(store=PRStore())
+    diff_view.current_file = "large.py"
+    diff_view._diff_file_paths = NoIterFilePaths()
+
+    assert _comments_mod._file_paths_for_current_diff(
+        diff_view
+    ) is diff_view._diff_file_paths
+
+
+@pytest.mark.asyncio
+async def test_show_diff_reuses_filename_index_without_store_file_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoIterFiles(list[PRFile]):
+        def __iter__(self):
+            raise AssertionError("show_diff should reuse the filename index")
+
+    file = PRFile(filename="large.py", additions=1)
+    store = PRStore()
+    store.state.files = NoIterFiles([file])
+    store.state.files_by_filename = {"large.py": file}
+    diff_view = DiffView(store=store)
+    diff = parse_patch("@@ -1 +1 @@\n-old\n+new", "large.py")
+
+    monkeypatch.setattr(diff_view, "watch_visual_mode", lambda *_args: None)
+    monkeypatch.setattr(diff_view, "watch_visual_type", lambda *_args: None)
+    monkeypatch.setattr(_selection_mod, "_exit_visual_mode", lambda _view: None)
+    monkeypatch.setattr(_comments_mod, "build_comment_map", lambda _view: None)
+    monkeypatch.setattr(_render_mod, "_update_split_state", lambda _view: None)
+    monkeypatch.setattr(
+        _render_mod,
+        "_ensure_rendered_rows_for_mode",
+        lambda _view, *, split: None,
+    )
+    monkeypatch.setattr(_virtual_mod, "_rebuild_virtual_layout", lambda _view: None)
+    monkeypatch.setattr(_virtual_mod, "_configure_virtual_window", lambda _view: None)
+    monkeypatch.setattr(_hl_mod, "_has_highlighted_diff", lambda _view, _diff: True)
+    monkeypatch.setattr(_hl_mod, "_highlight_diff_sync", lambda _view, _diff: None)
+
+    async def skip_render(_request_token: int) -> None:
+        return None
+
+    monkeypatch.setattr(diff_view, "_run_render_diff_for_request", skip_render)
+
+    await diff_view.show_diff("large.py", diff)
+
+    assert diff_view._file is file
+
+
+def test_build_comment_map_merges_line_indices_without_temporary_sets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    diff_view = DiffView(store=PRStore())
+    diff_view.current_file = "large.py"
+    diff_view._diff_file_paths = {"large.py"}
+    diff_view._line_index_by_new_number = {1: 4, 2: 9}
+    diff_view.store.state.pending_review_comments = [
+        PendingReviewComment(
+            path="large.py",
+            line=1,
+            side="RIGHT",
+            body="draft",
+        )
+    ]
+    diff_view.store.state.review_threads = [
+        ReviewThread.model_validate(
+            {
+                "id": "thread-1",
+                "path": "large.py",
+                "line": 2,
+                "comments": {
+                    "nodes": [
+                        PRComment.model_validate(
+                            {
+                                "databaseId": 1,
+                                "path": "large.py",
+                                "line": 2,
+                                "body": "comment",
+                                "side": "RIGHT",
+                            }
+                        )
+                    ]
+                },
+            }
+        )
+    ]
+
+    monkeypatch.setattr(
+        _comments_mod,
+        "set",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("comment line index merge should not build temporary sets")
+        ),
+        raising=False,
+    )
+
+    _comments_mod.build_comment_map(diff_view)
+
+    assert diff_view._comment_line_indices == [4, 9]
+
+
+def test_active_comment_widget_indexes_groups_without_combining() -> None:
+    """Selecting one comment widget should not materialize all widgets first."""
+
+    class IndexedWidgets:
+        def __init__(self, *widgets: Static) -> None:
+            self._widgets = widgets
+
+        def __len__(self) -> int:
+            return len(self._widgets)
+
+        def __getitem__(self, index: int) -> Static:
+            return self._widgets[index]
+
+        def __iter__(self):
+            raise AssertionError("active comment lookup should index widget groups")
+
+    draft = Static("draft")
+    thread = Static("thread")
+
+    class View:
+        _comment_cursor_index = 2
+        _pending_comment_widgets_by_line = {4: IndexedWidgets(draft)}
+        _comment_widgets_by_line = {4: IndexedWidgets(thread)}
+
+    assert _comments_mod.active_comment_widget(View(), 4) is thread
+
+
+def test_clear_cursor_highlight_iterates_widget_groups_without_copy() -> None:
+    """Clearing comment highlight should not build a combined widget list."""
+
+    class NoLengthWidgets:
+        def __init__(self, *widgets: Static) -> None:
+            self._widgets = widgets
+
+        def __iter__(self):
+            return iter(self._widgets)
+
+        def __len__(self) -> int:
+            raise AssertionError("highlight clearing should not copy widget groups")
+
+    draft = Static("draft")
+    thread = Static("thread")
+    draft.add_class("--cursor-line")
+    thread.add_class("--cursor-line")
+
+    class View:
+        _pending_comment_widgets_by_line = {9: NoLengthWidgets(draft)}
+        _comment_widgets_by_line = {9: NoLengthWidgets(thread)}
+
+    _comments_mod._clear_cursor_line_class(View(), 9)
+
+    assert "--cursor-line" not in draft.classes
+    assert "--cursor-line" not in thread.classes
+
+
+def test_exiting_visual_mode_clears_selection_without_copying_specs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NoListSelectionSpecs:
+        def __iter__(self):
+            return iter((2, 4, 6))
+
+        def __len__(self) -> int:
+            raise AssertionError("visual mode exit should not copy selection specs")
+
+    class AppState:
+        sub_title = "-- VISUAL --"
+
+    class View:
+        app = AppState()
+        visual_type = "char"
+        cursor_line = 4
+        _visual_selection_specs = NoListSelectionSpecs()
+        status_updates = 0
+
+        def _update_status_line(self) -> None:
+            self.status_updates += 1
+
+    cleared: list[int] = []
+    monkeypatch.setattr(
+        _selection_mod,
+        "_clear_line_selection",
+        lambda _view, line_idx: cleared.append(line_idx),
+    )
+
+    view = View()
+
+    DiffView.watch_visual_mode(view, True, False)
+
+    assert cleared == [2, 4, 6]
+    assert view._visual_selection_specs == {}
+    assert view.app.sub_title == ""
+    assert view.status_updates == 1
+
+
+def test_highlight_refresh_reuses_range_order_without_sort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class View:
+        is_mounted = True
+        _unified_blocks_by_line: dict[int, object] = {}
+        _split_blocks_by_line: dict[int, object] = {}
+        invalidated: set[int] | None = None
+
+        def _is_line_rendered(self, line_idx: int) -> bool:
+            return line_idx != 3
+
+        def _invalidate_base_code_content_cache(self, line_indices: set[int]) -> None:
+            self.invalidated = line_indices
+
+    refreshed: list[int] = []
+    monkeypatch.setattr(
+        _hl_mod,
+        "sorted",
+        lambda _values: (_ for _ in ()).throw(
+            AssertionError("highlight refresh should preserve range order")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        _blocks_mod,
+        "_refresh_grouped_blocks_for_lines",
+        lambda _view, _dirty_lines: None,
+    )
+    monkeypatch.setattr(
+        _blocks_mod,
+        "_refresh_non_block_line_content",
+        lambda _view, line_idx: refreshed.append(line_idx),
+    )
+
+    view = View()
+
+    _hl_mod._refresh_rendered_highlight_range(view, 1, 5)
+
+    assert view.invalidated == {1, 2, 4, 5}
+    assert refreshed == [1, 2, 4, 5]
+
+
+def test_unified_block_render_passes_lazy_line_indices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeAnnotations:
+        class Styles:
+            width = 0
+
+        styles = Styles()
+
+    class FakeUnifiedBlock:
+        _annotations = FakeAnnotations()
+
+        def __init__(self, line_indices, *, classes: str) -> None:
+            assert not isinstance(line_indices, list)
+            self.line_indices = tuple(line_indices)
+
+        def update_block(self, **_kwargs: object) -> None:
+            pass
+
+    class Container:
+        mounted: list[object] = []
+
+        def mount(self, widget: object, **_kwargs: object) -> None:
+            self.mounted.append(widget)
+
+    class View:
+        _showing_full_file = False
+        _unified_code_width = 80
+        _unified_blocks_by_line: dict[int, object] = {}
+
+        def _register_line_widget(self, _line_index: int, _widget: object) -> None:
+            pass
+
+    monkeypatch.setattr(_blocks_mod, "UnifiedDiffBlock", FakeUnifiedBlock)
+    monkeypatch.setattr(
+        _blocks_mod,
+        "_build_unified_block_row_data",
+        lambda _view, _line: ([], [], []),
+    )
+    lines = [
+        DiffLine(None, None, line_index=10),
+        DiffLine(None, None, line_index=11),
+    ]
+
+    _blocks_mod._render_unified_line_block(View(), Container(), lines)
+
+    assert View._unified_blocks_by_line[10].line_indices == (10, 11)
+
+
+def test_split_block_render_passes_lazy_line_indices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeScroll:
+        def set_on_scroll_x(self, _callback: object) -> None:
+            pass
+
+    class FakeSplitBlock:
+        _left_scroll = FakeScroll()
+        _right_scroll = FakeScroll()
+
+        def __init__(self, line_indices, *, classes: str) -> None:
+            assert not isinstance(line_indices, list)
+            self.line_indices = tuple(line_indices)
+
+        def update_block(self, **_kwargs: object) -> None:
+            pass
+
+    class Container:
+        mounted: list[object] = []
+
+        def mount(self, widget: object, **_kwargs: object) -> None:
+            self.mounted.append(widget)
+
+    class View:
+        _split_blocks_by_line: dict[int, object] = {}
+        _split_old_code_width = 40
+        _split_new_code_width = 40
+
+        def _sync_split_horizontal_scroll(self, _scroll_x: int) -> None:
+            pass
+
+        def _register_line_widget(self, _line_index: int, _widget: object) -> None:
+            pass
+
+        def _register_split_scroll_widgets(
+            self,
+            _line_index: int,
+            *_widgets: object,
+        ) -> None:
+            pass
+
+    monkeypatch.setattr(_blocks_mod, "SplitDiffBlock", FakeSplitBlock)
+    monkeypatch.setattr(
+        _blocks_mod,
+        "_build_split_block_row_data",
+        lambda _view, _line: (None, "", None, "", None, "", None, ""),
+    )
+    lines = [
+        DiffLine(None, None, line_index=20),
+        DiffLine(None, None, line_index=21),
+    ]
+
+    _blocks_mod._render_split_line_block(View(), Container(), lines)
+
+    assert View._split_blocks_by_line[20].line_indices == (20, 21)
+
+
+def test_split_horizontal_scroll_noop_source_event_skips_widget_scan() -> None:
+    class NoValuesRegistry:
+        def values(self):
+            raise AssertionError("unchanged source scroll should not scan widgets")
+
+    class View:
+        _split_horizontal_scroll_x = 8.0
+        _syncing_split_scroll = False
+        _split_scroll_widgets_by_line = NoValuesRegistry()
+        _hunk_header_widgets = NoValuesRegistry()
+
+    view = View()
+
+    DiffView._sync_split_horizontal_scroll(view, 8.0, source=object())
+
+    assert view._split_horizontal_scroll_x == 8.0
+    assert view._syncing_split_scroll is False
+
+
+def test_unified_block_refresh_streams_block_lines_without_materializing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, int]] = []
+
+    class Lines:
+        def __getitem__(self, index: int) -> DiffLine:
+            events.append(("get", index))
+            return DiffLine(None, None, line_index=index)
+
+    class Block:
+        is_mounted = True
+        line_indices = (0, 1)
+
+        def update_block(self, **_kwargs: object) -> None:
+            pass
+
+    class View:
+        _all_lines = Lines()
+        _unified_blocks_by_line = {0: Block(), 1: Block()}
+        _unified_code_width = 80
+
+    def build_row_data(_view: View, line: DiffLine):
+        events.append(("build", line.line_index))
+        return ([], [], [])
+
+    monkeypatch.setattr(_blocks_mod, "_build_unified_block_row_data", build_row_data)
+
+    assert _blocks_mod._refresh_unified_blocks_for_lines(View(), {0}) is True
+    assert events == [("get", 0), ("build", 0), ("get", 1), ("build", 1)]
+
+
+def test_unified_block_refresh_updates_blocks_as_they_are_discovered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, int]] = []
+
+    class Lines:
+        def __getitem__(self, index: int) -> DiffLine:
+            events.append(("get", index))
+            return DiffLine(None, None, line_index=index)
+
+    class BlocksByLine(dict[int, object]):
+        def get(self, key: int, default: object = None) -> object:
+            events.append(("lookup", key))
+            return super().get(key, default)
+
+    class Block:
+        is_mounted = True
+
+        def __init__(self, block_id: int, line_index: int) -> None:
+            self.block_id = block_id
+            self.line_indices = (line_index,)
+
+        def update_block(self, **_kwargs: object) -> None:
+            events.append(("update", self.block_id))
+
+    block_one = Block(1, 0)
+    block_two = Block(2, 10)
+
+    class View:
+        _all_lines = Lines()
+        _unified_blocks_by_line = BlocksByLine({0: block_one, 10: block_two})
+        _unified_code_width = 80
+
+    monkeypatch.setattr(
+        _blocks_mod,
+        "_build_unified_block_row_data",
+        lambda _view, _line: ([], [], []),
+    )
+
+    assert _blocks_mod._refresh_unified_blocks_for_lines(View(), (0, 10)) is True
+    assert events == [
+        ("lookup", 0),
+        ("get", 0),
+        ("update", 1),
+        ("lookup", 10),
+        ("get", 10),
+        ("update", 2),
+    ]
+
+
+def test_single_unified_block_refresh_avoids_seen_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Block:
+        pass
+
+    block = Block()
+
+    class View:
+        _unified_blocks_by_line = {4: block}
+
+    refreshed: list[Block] = []
+
+    monkeypatch.setattr(
+        _blocks_mod,
+        "set",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("single-line unified refresh should not allocate seen set")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        _blocks_mod,
+        "_refresh_unified_block",
+        lambda _view, refreshed_block: refreshed.append(refreshed_block),
+    )
+
+    assert _blocks_mod._refresh_unified_blocks_for_lines(View(), (4,)) is True
+    assert refreshed == [block]
+
+
+def test_single_split_block_refresh_avoids_seen_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Block:
+        pass
+
+    block = Block()
+
+    class View:
+        _split_blocks_by_line = {6: block}
+
+    refreshed: list[Block] = []
+
+    monkeypatch.setattr(
+        _blocks_mod,
+        "set",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("single-line split refresh should not allocate seen set")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        _blocks_mod,
+        "_refresh_split_block",
+        lambda _view, refreshed_block: refreshed.append(refreshed_block),
+    )
+
+    assert _blocks_mod._refresh_split_blocks_for_lines(View(), (6,)) is True
+    assert refreshed == [block]
+
+
+def test_grouped_block_refresh_skips_empty_unified_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class View:
+        _unified_blocks_by_line: dict[int, object] = {}
+        _split_blocks_by_line = {4: object()}
+
+    def refresh_unified(_view: View, _line_indices) -> bool:
+        raise AssertionError("empty unified block map should not be refreshed")
+
+    split_calls: list[tuple[int, ...]] = []
+
+    def refresh_split(_view: View, line_indices) -> bool:
+        split_calls.append(tuple(line_indices))
+        return True
+
+    monkeypatch.setattr(
+        _blocks_mod,
+        "_refresh_unified_blocks_for_lines",
+        refresh_unified,
+    )
+    monkeypatch.setattr(
+        _blocks_mod,
+        "_refresh_split_blocks_for_lines",
+        refresh_split,
+    )
+
+    assert _blocks_mod._refresh_grouped_blocks_for_lines(View(), (4,)) is True
+    assert split_calls == [(4,)]
+
+
+def test_grouped_block_refresh_skips_empty_split_map(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class View:
+        _unified_blocks_by_line = {7: object()}
+        _split_blocks_by_line: dict[int, object] = {}
+
+    unified_calls: list[tuple[int, ...]] = []
+
+    def refresh_unified(_view: View, line_indices) -> bool:
+        unified_calls.append(tuple(line_indices))
+        return True
+
+    def refresh_split(_view: View, _line_indices) -> bool:
+        raise AssertionError("empty split block map should not be refreshed")
+
+    monkeypatch.setattr(
+        _blocks_mod,
+        "_refresh_unified_blocks_for_lines",
+        refresh_unified,
+    )
+    monkeypatch.setattr(
+        _blocks_mod,
+        "_refresh_split_blocks_for_lines",
+        refresh_split,
+    )
+
+    assert _blocks_mod._refresh_grouped_blocks_for_lines(View(), (7,)) is True
+    assert unified_calls == [(7,)]
+
+
+def test_grouped_block_refresh_skips_when_no_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class View:
+        _unified_blocks_by_line = {1: object()}
+        _split_blocks_by_line = {1: object()}
+
+    def refresh_blocks(_view: View, _line_indices) -> bool:
+        raise AssertionError("empty grouped refresh should not dispatch")
+
+    monkeypatch.setattr(
+        _blocks_mod,
+        "_refresh_unified_blocks_for_lines",
+        refresh_blocks,
+    )
+    monkeypatch.setattr(
+        _blocks_mod,
+        "_refresh_split_blocks_for_lines",
+        refresh_blocks,
+    )
+
+    assert _blocks_mod._refresh_grouped_blocks_for_lines(View(), ()) is False
+
+
+def test_grouped_block_refresh_skips_when_no_block_maps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class View:
+        _unified_blocks_by_line: dict[int, object] = {}
+        _split_blocks_by_line: dict[int, object] = {}
+
+    def refresh_blocks(_view: View, _line_indices) -> bool:
+        raise AssertionError("grouped refresh without block maps should not dispatch")
+
+    monkeypatch.setattr(
+        _blocks_mod,
+        "_refresh_unified_blocks_for_lines",
+        refresh_blocks,
+    )
+    monkeypatch.setattr(
+        _blocks_mod,
+        "_refresh_split_blocks_for_lines",
+        refresh_blocks,
+    )
+
+    assert _blocks_mod._refresh_grouped_blocks_for_lines(View(), (1,)) is False
 
 
 @pytest.mark.asyncio
@@ -103,6 +1384,43 @@ async def test_show_diff_reuses_highlight_cache_for_same_diff(
 
 
 @pytest.mark.asyncio
+async def test_comment_line_jump_uses_row_lookup_without_row_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Comment navigation should jump by row lookup instead of scanning all rows."""
+
+    patch = "@@ -1,4 +1,4 @@\n line1\n line2\n line3\n line4"
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    class NoIterRows(list):
+        def __iter__(self):
+            raise AssertionError("comment jump should not scan rendered rows")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff = parse_patch(patch, "test.py")
+
+        await diff_view.show_diff("test.py", diff)
+        await pilot.pause()
+
+        diff_view._rows_unified = NoIterRows(diff_view._rows_unified)
+        jumped_rows = []
+        monkeypatch.setattr(
+            diff_view,
+            "_jump_to_row_with_anchor",
+            lambda row, **_kwargs: jumped_rows.append(row),
+        )
+
+        _comments_mod._jump_to_comment_line(diff_view, 2)
+
+        assert [row.line_index for row in jumped_rows] == [2]
+
+
+@pytest.mark.asyncio
 async def test_show_diff_renders_plain_first_then_applies_highlight(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -162,12 +1480,16 @@ async def test_show_diff_renders_plain_first_then_applies_highlight(
         assert "new_value" in _as_plain(new_code)
 
         unblock.set()
-        await pilot.pause()
-        await pilot.pause()
+        await wait_until(
+            lambda: (
+                not diff_view._hl_state.full_worker_active
+                and modified.highlighted_old_content is not None
+                and modified.highlighted_new_content is not None
+            ),
+            timeout=5.0,
+        )
 
         assert render_calls["count"] == baseline_calls
-        assert modified.highlighted_old_content is not None
-        assert modified.highlighted_new_content is not None
         assert any(
             cache_key[:2] == (id(diff), diff_view.word_diff_enabled)
             for cache_key in diff_view._hl_state.cache
@@ -668,6 +1990,46 @@ async def test_next_word_cross_line_uses_single_batched_cursor_pipeline() -> Non
         assert diff_view.cursor_line == 1
         assert diff_view.cursor_column == 0
         assert updates["count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_next_word_cross_line_does_not_copy_row_slices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`w` should scan following rows without copying the rendered row list."""
+
+    patch = """@@ -1,2 +1,2 @@
+ alpha
+ beta"""
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    class NoSliceRows(list):
+        def __getitem__(self, index):
+            if isinstance(index, slice):
+                raise AssertionError("word motion should not copy row slices")
+            return super().__getitem__(index)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff = parse_patch(patch, "test.py")
+
+        await diff_view.show_diff("test.py", diff)
+        await pilot.pause()
+        diff_view.focus()
+        await pilot.pause()
+
+        rows = NoSliceRows(diff_view._rows_unified)
+        monkeypatch.setattr(diff_view, "_rows_for_current_mode", lambda: rows)
+        diff_view.cursor_column = len("alpha") - 1
+
+        _cursor_mod._next_word_once(diff_view)
+
+        assert diff_view.cursor_line == 1
+        assert diff_view.cursor_column == 0
 
 
 @pytest.mark.asyncio
@@ -1933,6 +3295,53 @@ async def test_grouped_virtual_large_jump_mounts_without_scanning_all_hunk_lines
 
 
 @pytest.mark.asyncio
+async def test_virtual_window_render_uses_visible_hunk_range() -> None:
+    """Virtual renders should not scan every hunk to find the visible window."""
+
+    hunks: list[str] = []
+    for hunk_index in range(500):
+        start = hunk_index * 20 + 1
+        lines = "\n".join(f" line{line_no}" for line_no in range(start, start + 20))
+        hunks.append(f"@@ -{start},20 +{start},20 @@\n{lines}")
+    patch = "\n".join(hunks)
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    class CountingHunks(list):
+        def __iter__(self):
+            iterated["count"] += len(self)
+            return super().__iter__()
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+
+        diff_view.VIRTUALIZE_LINE_THRESHOLD = 10
+        diff_view.VIRTUAL_WINDOW_RADIUS = 3
+        diff_view.VIRTUAL_WINDOW_SHIFT_MARGIN = 1
+
+        diff = parse_patch(patch, "big.py")
+        await diff_view.show_diff("big.py", diff)
+        await pilot.pause()
+
+        iterated = {"count": 0}
+        diff.hunks = CountingHunks(diff.hunks)
+
+        diff_view.cursor_line = 5000
+        await wait_until(
+            lambda: (
+                not diff_view._virt.render_pending
+                and diff_view._virt.window_start <= 5000 <= diff_view._virt.window_end
+            ),
+            timeout=5.0,
+        )
+
+        assert iterated["count"] < len(diff.hunks) // 10
+
+
+@pytest.mark.asyncio
 async def test_grouped_virtual_large_jump_uses_full_window_rerender() -> None:
     """No-overlap grouped jumps should use the cheaper full window rerender path."""
 
@@ -2007,3 +3416,197 @@ async def test_virtualized_show_diff_does_not_build_content_for_layout_width(
         await pilot.pause()
 
         assert base_calls["count"] < 100
+
+
+@pytest.mark.asyncio
+async def test_virtualized_show_diff_builds_only_active_row_projection() -> None:
+    """Large diffs should not build row metadata for an inactive layout mode."""
+
+    context_lines = "\n".join(f" line{i}" for i in range(1, 5001))
+    patch = f"@@ -1,5000 +1,5000 @@\n{context_lines}"
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff_view.VIRTUALIZE_LINE_THRESHOLD = 10
+        diff_view.VIRTUAL_WINDOW_RADIUS = 3
+        diff_view.VIRTUAL_WINDOW_SHIFT_MARGIN = 1
+
+        diff = parse_patch(patch, "big.py")
+        await diff_view.show_diff("big.py", diff)
+        await pilot.pause()
+
+        assert diff_view._rows_unified
+        assert diff_view._row_lookup_unified
+        assert diff_view._rows_split == []
+        assert diff_view._row_lookup_split == {}
+
+        diff_view.mode = "split"
+        await pilot.pause()
+
+        assert diff_view._rows_split
+        assert diff_view._row_lookup_split
+
+
+def test_active_row_projection_reuses_planned_lines_without_hunk_rescan() -> None:
+    """Active row metadata should be built from the existing diff plan lines."""
+
+    class NoIterHunks(list[DiffHunk]):
+        def __iter__(self):
+            raise AssertionError("row projection should reuse planned lines")
+
+    diff = FileDiff(
+        filename="test.py",
+        hunks=[
+            DiffHunk(
+                old_start=1,
+                old_count=2,
+                new_start=1,
+                new_count=2,
+                lines=[
+                    DiffLine(1, 1, old_content="same", new_content="same"),
+                    DiffLine(
+                        2,
+                        2,
+                        old_content="old",
+                        new_content="new",
+                        is_modified=True,
+                    ),
+                ],
+            )
+        ],
+    )
+    plan = _plan_mod.build_diff_plan(diff, include_rendered_rows=False)
+    diff.hunks = NoIterHunks(diff.hunks)
+
+    diff_view = DiffView(mode="unified")
+    diff_view._diff = diff
+    diff_view._all_lines = plan.all_lines
+    diff_view._hunk_index_by_line = plan.hunk_index_by_line
+
+    _render_mod._ensure_rendered_rows_for_mode(diff_view, split=False)
+
+    assert [row.anchor_id for row in diff_view._rows_unified] == [
+        "line-0",
+        "line-1-old",
+        "line-1-new",
+    ]
+    assert diff_view._rows_split == []
+
+
+@pytest.mark.asyncio
+async def test_show_diff_reuses_planned_width_metrics_for_initial_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Initial layout should not rescan all lines after the diff plan is built."""
+
+    context_lines = "\n".join(f" line{i}" for i in range(1, 5001))
+    patch = f"@@ -1,5000 +1,5000 @@\n{context_lines}"
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="auto", id="diff-view")
+
+    import rit.ui.widgets.diff_layout as diff_layout_module
+
+    def fail_width_scan(*args, **kwargs):
+        raise AssertionError("show_diff should use planned width metrics")
+
+    monkeypatch.setattr(diff_layout_module, "code_widths_for_layout", fail_width_scan)
+    monkeypatch.setattr(
+        diff_layout_module,
+        "can_fit_auto_split_content",
+        fail_width_scan,
+    )
+
+    app = TestApp()
+    async with app.run_test(size=(120, 20)) as pilot:
+        diff_view = app.query_one(DiffView)
+        diff_view.VIRTUALIZE_LINE_THRESHOLD = 10
+        diff_view.VIRTUAL_WINDOW_RADIUS = 3
+        diff_view.VIRTUAL_WINDOW_SHIFT_MARGIN = 1
+
+        diff = parse_patch(patch, "big.py")
+        await diff_view.show_diff("big.py", diff)
+        await pilot.pause()
+
+        assert diff_view.current_file == "big.py"
+
+
+@pytest.mark.asyncio
+async def test_hunk_navigation_uses_line_range_lookup_without_row_scan() -> None:
+    """Jumping hunks in huge diffs should not scan every rendered row."""
+
+    hunks: list[str] = []
+    for hunk_index in range(120):
+        start = hunk_index * 20 + 1
+        lines = "\n".join(f" line{line_no}" for line_no in range(start, start + 20))
+        hunks.append(f"@@ -{start},20 +{start},20 @@\n{lines}")
+    patch = "\n".join(hunks)
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    class CountingRows(list):
+        def __iter__(self):
+            iterated["count"] += len(self)
+            return super().__iter__()
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff = parse_patch(patch, "big.py")
+        await diff_view.show_diff("big.py", diff)
+        await pilot.pause()
+
+        iterated = {"count": 0}
+        diff_view._rows_unified = CountingRows(diff_view._rows_unified)
+
+        diff_view.next_hunk()
+        await pilot.pause()
+
+        assert iterated["count"] == 0
+
+
+def test_scroll_to_hunk_uses_direct_hunk_range_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Virtual hunk jumps should index the planned hunk range directly."""
+
+    class NoIterHunkRanges(list):
+        def __iter__(self):
+            raise AssertionError("hunk jump should not scan planned hunk ranges")
+
+    class VirtualState:
+        active = True
+        window_start = 20
+        window_end = 35
+
+    class HunkJumpView:
+        _diff = FileDiff(
+            filename="big.py",
+            hunks=[
+                DiffHunk(1, 1, 1, 1),
+                DiffHunk(20, 1, 20, 1),
+                DiffHunk(40, 1, 40, 1),
+            ],
+        )
+        _virt = VirtualState()
+        _hunk_line_ranges = NoIterHunkRanges([(0, 0, 0), (1, 20, 25), (2, 40, 45)])
+        _hunk_header_top_offsets = [0, 20, 40]
+
+    scrolled: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        _cursor_mod,
+        "_scroll_to_vertical_span",
+        lambda _view, top, bottom, **_kwargs: scrolled.append((top, bottom)),
+    )
+
+    _cursor_mod._scroll_to_hunk(HunkJumpView(), 1)
+
+    assert scrolled == [(20, 21)]

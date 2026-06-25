@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.content import Content
 from textual.geometry import Region
 from textual.widget import Widget
 from textual.widgets import Static
@@ -15,6 +16,7 @@ from rit.core.types import DiffLine, FileDiff
 from rit.state.models import PRFile
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_render as _render
+from rit.ui.widgets import diff_view as _diff_view
 from rit.ui.widgets.diff_view import DiffView
 from rit.ui.widgets.diff_visual import MISSING_SIDE_HATCH_STYLE, MISSING_SIDE_STYLE
 
@@ -47,6 +49,26 @@ def test_status_line_escapes_search_query_markup(
     view._update_status_line()
 
     assert header.text == 'base  [$warning]search "\\[red]needle\\[/]" no matches[/]'
+
+
+def test_cycle_diff_mode_uses_shared_mode_label_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = DiffView()
+    view.mode = "auto"
+    messages: list[object] = []
+    monkeypatch.setattr(view, "post_message", messages.append)
+    monkeypatch.setattr(
+        _diff_view,
+        "_DIFF_MODE_LABELS",
+        {"split": "Split from map"},
+        raising=False,
+    )
+
+    view.action_cycle_diff_mode()
+
+    assert view.mode == "split"
+    assert getattr(messages[0], "content") == "Diff mode: Split from map"
 
 
 def test_change_background_styles_remain_subtle() -> None:
@@ -113,6 +135,31 @@ def test_split_forcing_ignores_stale_file_metadata_from_previous_file() -> None:
     assert _render._should_force_unified_for_current_file(view) is False
 
 
+def test_cursor_line_refresh_uses_singleton_tuple_for_grouped_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class View:
+        is_mounted = True
+        _all_lines = [DiffLine(old_line_no=1, new_line_no=1)]
+
+    calls: list[tuple[int, ...]] = []
+
+    def refresh_grouped_blocks(_view: View, line_indices) -> bool:
+        assert not isinstance(line_indices, set)
+        calls.append(tuple(line_indices))
+        return True
+
+    monkeypatch.setattr(
+        _render._blocks,
+        "_refresh_grouped_blocks_for_lines",
+        refresh_grouped_blocks,
+    )
+
+    _render._update_line_cursor(View(), 0)
+
+    assert calls == [(0,)]
+
+
 def test_scrollable_content_region_tolerates_unmounted_content_widget() -> None:
     view = DiffView()
     view._content_widget = Widget()
@@ -131,6 +178,28 @@ def test_scrollable_content_region_reraises_unexpected_dock_gutter_errors() -> N
 
     with pytest.raises(RuntimeError, match="dock gutter failed"):
         _ = view.scrollable_content_region
+
+
+def test_base_content_cache_invalidation_pops_indexed_line_keys_only() -> None:
+    class RecordingCache(dict):
+        def __init__(self) -> None:
+            super().__init__({(7, "new", ""): Content("cached")})
+            self.popped: list[tuple[int, str, str]] = []
+
+        def pop(self, key, default=None):
+            self.popped.append(key)
+            return super().pop(key, default)
+
+    view = DiffView()
+    cache = RecordingCache()
+    view._base_code_content_cache = cache
+    view._base_code_content_cache_keys_by_line = {7: {(7, "new", "")}}
+
+    _render._invalidate_base_code_content_cache(view, {7})
+
+    assert cache.popped == [(7, "new", "")]
+    assert cache == {}
+    assert view._base_code_content_cache_keys_by_line == {}
 
 
 @pytest.mark.asyncio

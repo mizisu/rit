@@ -200,6 +200,70 @@ def test_visual_mode_ui_update_clears_selection_when_exiting() -> None:
     )
 
 
+def test_visual_ui_updates_reuse_empty_line_set_without_allocation(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        visual_mode,
+        "frozenset",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("empty visual line sets should be reused")
+        ),
+        raising=False,
+    )
+
+    assert visual_mode_ui_update(
+        visual_mode=False,
+        visual_type="char",
+        cursor_line=4,
+    ).selection_refresh_lines == frozenset()
+    assert visual_type_ui_update(
+        visual_mode=False,
+        visual_type="line",
+        cursor_line=5,
+    ).selection_dirty_lines == frozenset()
+    assert visual_anchor_ui_update(
+        visual_mode=False,
+        cursor_line=6,
+    ).selection_dirty_lines == frozenset()
+
+
+def test_visual_ui_updates_build_singleton_line_sets_without_intermediate_sets(
+    monkeypatch,
+) -> None:
+    original_frozenset = frozenset
+    calls: list[tuple[int, ...]] = []
+
+    def recording_frozenset(values=()):
+        assert not isinstance(values, set)
+        calls.append(tuple(values))
+        return original_frozenset(values)
+
+    monkeypatch.setattr(
+        visual_mode,
+        "frozenset",
+        recording_frozenset,
+        raising=False,
+    )
+
+    assert visual_mode_ui_update(
+        visual_mode=True,
+        visual_type="char",
+        cursor_line=4,
+    ).selection_refresh_lines == original_frozenset({4})
+    assert visual_type_ui_update(
+        visual_mode=True,
+        visual_type="line",
+        cursor_line=5,
+    ).selection_dirty_lines == original_frozenset({5})
+    assert visual_anchor_ui_update(
+        visual_mode=True,
+        cursor_line=6,
+    ).selection_dirty_lines == original_frozenset({6})
+
+    assert calls == [(4,), (5,), (6,)]
+
+
 def test_visual_type_ui_update_marks_line_dirty_in_visual_mode() -> None:
     assert visual_type_ui_update(
         visual_mode=True,

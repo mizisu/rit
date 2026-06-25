@@ -5,6 +5,7 @@ import pytest
 from rit.core.diff import parse_patch
 from rit.core.types import FileDiff
 from rit.state.models import PRFile
+import rit.ui.components.combined_diff as combined_diff
 from rit.ui.components.combined_diff import (
     build_combined_diff_document,
     load_missing_combined_file_diffs,
@@ -33,6 +34,61 @@ def test_combined_diff_document_records_file_starts_and_line_lookup() -> None:
     assert document.line_index_for_location("two.py", 1, "RIGHT") == 3
     assert document.file_for_line(0) == "one.py"
     assert document.file_for_line(3) == "two.py"
+
+
+def test_combined_diff_document_single_file_lookup_skips_bisect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document = combined_diff.CombinedDiffDocument(
+        diff=FileDiff(filename="All files"),
+        file_line_starts={"one.py": 0},
+        file_start_lines=(0,),
+        file_start_names=("one.py",),
+        line_lookup={},
+    )
+    monkeypatch.setattr(
+        combined_diff,
+        "bisect_right",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("single-file lookup should not use binary search")
+        ),
+    )
+
+    assert document.file_for_line(42) == "one.py"
+    assert document.file_for_line(-1) is None
+
+
+def test_combined_diff_document_reads_each_filename_once_when_loaded() -> None:
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+
+    class FakeFile:
+        status = "modified"
+        previous_filename = None
+        additions = 1
+        deletions = 1
+
+        def __init__(self, filename: str) -> None:
+            self._filename = filename
+            self.filename_reads = 0
+
+        @property
+        def filename(self) -> str:
+            self.filename_reads += 1
+            if self.filename_reads > 1:
+                raise AssertionError(
+                    "combined diff build should read each filename once"
+                )
+            return self._filename
+
+    files = [FakeFile("one.py"), FakeFile("two.py")]
+    file_diffs = {
+        filename: parse_patch(patch, filename) for filename in ["one.py", "two.py"]
+    }
+
+    document = build_combined_diff_document(files, file_diffs)  # type: ignore[arg-type]
+
+    assert document is not None
+    assert document.file_line_starts == {"one.py": 0, "two.py": 2}
 
 
 def test_combined_diff_document_preserves_file_metadata_on_start_hunks() -> None:
@@ -120,6 +176,35 @@ async def test_load_missing_combined_file_diffs_skips_cached_files() -> None:
     )
 
     assert calls == ["two.py", "three.py"]
+
+
+@pytest.mark.asyncio
+async def test_load_missing_combined_file_diffs_skips_scheduler_for_single_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded_diffs = {"one.py": FileDiff(filename="one.py")}
+    calls: list[str] = []
+
+    async def load_diff(filename: str) -> FileDiff:
+        calls.append(filename)
+        return FileDiff(filename=filename)
+
+    monkeypatch.setattr(
+        combined_diff.asyncio,
+        "Semaphore",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("single missing combined diff should not create a scheduler")
+        ),
+    )
+
+    await load_missing_combined_file_diffs(
+        ("one.py", "two.py"),
+        loaded_diffs,
+        load_diff,
+        concurrency=2,
+    )
+
+    assert calls == ["two.py"]
 
 
 @pytest.mark.asyncio

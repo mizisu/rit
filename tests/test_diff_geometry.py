@@ -1,7 +1,8 @@
 """Tests for DiffView geometry helpers."""
 
 from rit.core.diff import parse_patch
-from rit.core.types import DiffHunk, DiffLine
+from rit.core.types import DiffHunk, DiffLine, FileDiff
+from rit.ui.widgets import diff_geometry
 from rit.ui.widgets.diff_geometry import (
     FILE_DIFF_HEADER_HEIGHT,
     ViewportGeometry,
@@ -87,6 +88,44 @@ def test_build_diff_geometry_accounts_for_large_file_headers() -> None:
     assert geometry.hunk_header_top_offsets == [0]
     assert geometry.line_top_offsets == [1, 2]
     assert geometry.virtual_content_height == 3
+
+
+def test_build_diff_geometry_uses_known_line_count_without_discovery_scan() -> None:
+    patch = """@@ -1,3 +1,3 @@
+ line1
+ line2
+ line3"""
+    diff = _planned_diff(patch)
+    iterated = {"count": 0}
+
+    class CountingLines(list[DiffLine]):
+        def __iter__(self):
+            iterated["count"] += 1
+            return super().__iter__()
+
+    diff.hunks[0].lines = CountingLines(diff.hunks[0].lines)
+
+    geometry = build_diff_geometry(diff, split=True, line_count=3)
+
+    assert iterated["count"] == 1
+    assert geometry.line_top_offsets == [1, 2, 3]
+
+
+def test_build_diff_geometry_empty_diff_avoids_line_count_scan(monkeypatch) -> None:
+    diff = FileDiff(filename="image.png", hunks=[])
+    monkeypatch.setattr(
+        diff_geometry,
+        "max",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("empty diff geometry should not discover line count")
+        ),
+        raising=False,
+    )
+
+    geometry = build_diff_geometry(diff, split=True)
+
+    assert geometry.line_top_offsets == []
+    assert geometry.virtual_content_height == 0
 
 
 def test_virtual_buffer_geometry_respects_visible_hunk_headers() -> None:
@@ -220,6 +259,33 @@ def test_merge_line_ranges_sorts_and_coalesces_overlapping_ranges() -> None:
     assert merge_line_ranges([]) == []
 
 
+def test_merge_line_ranges_skips_sort_for_empty_or_single_sequence(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        diff_geometry,
+        "sorted",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("tiny range sequences should not be sorted")
+        ),
+        raising=False,
+    )
+
+    assert merge_line_ranges([]) == []
+    assert merge_line_ranges([(4, 8)]) == [(4, 8)]
+
+
+def test_merge_line_ranges_skips_sort_for_known_sorted_ranges() -> None:
+    class SortedRanges:
+        def __iter__(self):
+            return iter([(1, 2), (3, 5), (8, 9)])
+
+        def __len__(self) -> int:
+            raise AssertionError("known sorted ranges should not be materialized")
+
+    assert merge_line_ranges(SortedRanges(), already_sorted=True) == [(1, 5), (8, 9)]
+
+
 def test_hunk_lines_for_window_slices_by_global_line_index() -> None:
     lines = [
         DiffLine(old_line_no=1, new_line_no=1, line_index=10),
@@ -228,16 +294,47 @@ def test_hunk_lines_for_window_slices_by_global_line_index() -> None:
     ]
     hunk = DiffHunk(old_start=1, old_count=3, new_start=1, new_count=3, lines=lines)
 
-    assert hunk_lines_for_window(hunk, None, None) == lines
-    assert hunk_lines_for_window(hunk, 11, 20) == lines[1:]
-    assert hunk_lines_for_window(hunk, 0, 10) == lines[:1]
-    assert hunk_lines_for_window(hunk, 20, 30) == []
-    assert hunk_lines_for_window(hunk, 12, 11) == []
+    assert list(hunk_lines_for_window(hunk, None, None)) == lines
+    assert list(hunk_lines_for_window(hunk, 11, 20)) == lines[1:]
+    assert list(hunk_lines_for_window(hunk, 0, 10)) == lines[:1]
+    assert list(hunk_lines_for_window(hunk, 20, 30)) == []
+    assert list(hunk_lines_for_window(hunk, 12, 11)) == []
     assert (
-        hunk_lines_for_window(
-            DiffHunk(old_start=1, old_count=0, new_start=1, new_count=0),
-            0,
-            1,
+        list(
+            hunk_lines_for_window(
+                DiffHunk(old_start=1, old_count=0, new_start=1, new_count=0),
+                0,
+                1,
+            )
         )
         == []
     )
+
+
+def test_hunk_lines_for_window_reuses_full_hunk_lines() -> None:
+    lines = [
+        DiffLine(old_line_no=1, new_line_no=1, line_index=10),
+        DiffLine(old_line_no=2, new_line_no=2, line_index=11),
+    ]
+    hunk = DiffHunk(old_start=1, old_count=2, new_start=1, new_count=2, lines=lines)
+
+    assert hunk_lines_for_window(hunk, 0, 20) is lines
+
+
+def test_hunk_lines_for_window_does_not_copy_visible_slice() -> None:
+    class NoSliceLines(list[DiffLine]):
+        def __getitem__(self, index):
+            if isinstance(index, slice):
+                raise AssertionError("visible hunk window should not copy line slices")
+            return super().__getitem__(index)
+
+    lines = NoSliceLines(
+        [
+            DiffLine(old_line_no=1, new_line_no=1, line_index=10),
+            DiffLine(old_line_no=2, new_line_no=2, line_index=11),
+            DiffLine(old_line_no=3, new_line_no=3, line_index=12),
+        ]
+    )
+    hunk = DiffHunk(old_start=1, old_count=3, new_start=1, new_count=3, lines=lines)
+
+    assert list(hunk_lines_for_window(hunk, 11, 20)) == [lines[1], lines[2]]

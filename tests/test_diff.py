@@ -1,8 +1,12 @@
 """Tests for diff algorithm."""
 
+from rit.core import diff as diff_module
+from rit.core import highlighting as highlighting_module
+from rit.core import types as types_module
 from rit.core.diff import (
     compute_line_diff,
     compute_word_diff,
+    parse_file_patch_summary,
     parse_multi_file_patch,
     parse_patch,
 )
@@ -13,11 +17,242 @@ from rit.core.highlighting import (
     highlight_lines_for_diff,
     highlight_lines_for_diff_range,
 )
-from rit.core.types import FileDiff, SegmentType
+from rit.core.types import DiffHunk, DiffLine, FileDiff, InlineSegment, SegmentType
 
 
 class TestParsePatch:
     """Tests for parse_patch function."""
+
+    def test_parse_patch_does_not_materialize_line_list(self):
+        class NoSplitLines(str):
+            def splitlines(self, *_args, **_kwargs):
+                raise AssertionError("parse_patch should stream patch lines")
+
+        patch = NoSplitLines("""@@ -1 +1 @@
+-old
++new""")
+
+        diff = parse_patch(patch, "test.py")
+
+        assert len(diff.hunks) == 1
+        assert diff.total_additions == 1
+        assert diff.total_deletions == 1
+
+    def test_empty_file_diff_additions_skip_sum(self, monkeypatch):
+        monkeypatch.setattr(
+            types_module,
+            "sum",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("empty diff additions should not build a sum iterator")
+            ),
+            raising=False,
+        )
+
+        assert FileDiff(filename="image.png").total_additions == 0
+
+    def test_empty_file_diff_deletions_skip_sum(self, monkeypatch):
+        monkeypatch.setattr(
+            types_module,
+            "sum",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("empty diff deletions should not build a sum iterator")
+            ),
+            raising=False,
+        )
+
+        assert FileDiff(filename="image.png").total_deletions == 0
+
+    def test_single_line_file_diff_additions_skip_sum(self, monkeypatch):
+        monkeypatch.setattr(
+            types_module,
+            "sum",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("single-line diff additions should not build a sum")
+            ),
+            raising=False,
+        )
+        diff = FileDiff(
+            filename="test.py",
+            hunks=[
+                DiffHunk(
+                    old_start=1,
+                    old_count=0,
+                    new_start=1,
+                    new_count=1,
+                    lines=[DiffLine(old_line_no=None, new_line_no=1, is_added=True)],
+                )
+            ],
+        )
+
+        assert diff.total_additions == 1
+
+    def test_single_line_file_diff_deletions_skip_sum(self, monkeypatch):
+        monkeypatch.setattr(
+            types_module,
+            "sum",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("single-line diff deletions should not build a sum")
+            ),
+            raising=False,
+        )
+        diff = FileDiff(
+            filename="test.py",
+            hunks=[
+                DiffHunk(
+                    old_start=1,
+                    old_count=1,
+                    new_start=1,
+                    new_count=0,
+                    lines=[
+                        DiffLine(old_line_no=1, new_line_no=None, is_deleted=True)
+                    ],
+                )
+            ],
+        )
+
+        assert diff.total_deletions == 1
+
+    def test_single_hunk_file_diff_additions_skip_sum(self, monkeypatch):
+        monkeypatch.setattr(
+            types_module,
+            "sum",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("single-hunk diff additions should not build a sum")
+            ),
+            raising=False,
+        )
+        diff = FileDiff(
+            filename="test.py",
+            hunks=[
+                DiffHunk(
+                    old_start=1,
+                    old_count=1,
+                    new_start=1,
+                    new_count=2,
+                    lines=[
+                        DiffLine(old_line_no=1, new_line_no=1, old_content="same"),
+                        DiffLine(
+                            old_line_no=None,
+                            new_line_no=2,
+                            new_content="added",
+                            is_added=True,
+                        ),
+                    ],
+                )
+            ],
+        )
+
+        assert diff.total_additions == 1
+
+    def test_single_hunk_file_diff_deletions_skip_sum(self, monkeypatch):
+        monkeypatch.setattr(
+            types_module,
+            "sum",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("single-hunk diff deletions should not build a sum")
+            ),
+            raising=False,
+        )
+        diff = FileDiff(
+            filename="test.py",
+            hunks=[
+                DiffHunk(
+                    old_start=1,
+                    old_count=2,
+                    new_start=1,
+                    new_count=1,
+                    lines=[
+                        DiffLine(old_line_no=1, new_line_no=1, old_content="same"),
+                        DiffLine(
+                            old_line_no=2,
+                            new_line_no=None,
+                            old_content="deleted",
+                            is_deleted=True,
+                        ),
+                    ],
+                )
+            ],
+        )
+
+        assert diff.total_deletions == 1
+
+    def test_empty_hunk_has_changes_skips_any(self, monkeypatch):
+        monkeypatch.setattr(
+            types_module,
+            "any",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("empty hunk change check should not build an any iterator")
+            ),
+            raising=False,
+        )
+
+        assert (
+            DiffHunk(old_start=1, old_count=0, new_start=1, new_count=0).has_changes
+            is False
+        )
+
+    def test_single_line_hunk_has_changes_skips_any(self, monkeypatch):
+        monkeypatch.setattr(
+            types_module,
+            "any",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError(
+                    "single-line hunk change check should not build an any iterator"
+                )
+            ),
+            raising=False,
+        )
+
+        assert DiffHunk(
+            old_start=1,
+            old_count=0,
+            new_start=1,
+            new_count=1,
+            lines=[DiffLine(old_line_no=None, new_line_no=1, is_added=True)],
+        ).has_changes is True
+
+    def test_parse_file_patch_summary_does_not_materialize_line_list(self):
+        class NoSplitLines(str):
+            def splitlines(self, *_args, **_kwargs):
+                raise AssertionError("file patch summaries should stream patch lines")
+
+        section = NoSplitLines("""diff --git a/test.py b/test.py
+--- a/test.py
++++ b/test.py
+@@ -1 +1 @@
+-old
++new""")
+
+        summary = parse_file_patch_summary(section)
+
+        assert summary is not None
+        assert summary.filename == "test.py"
+        assert summary.additions == 1
+        assert summary.deletions == 1
+
+    def test_parse_file_patch_summary_scans_section_once(self, monkeypatch):
+        section = """diff --git a/test.py b/test.py
+--- a/test.py
++++ b/test.py
+@@ -1 +1 @@
+-old
++new"""
+        real_iter_patch_lines = diff_module._iter_patch_lines
+        calls = 0
+
+        def counting_iter_patch_lines(text: str):
+            nonlocal calls
+            calls += 1
+            return real_iter_patch_lines(text)
+
+        monkeypatch.setattr(diff_module, "_iter_patch_lines", counting_iter_patch_lines)
+
+        summary = parse_file_patch_summary(section)
+
+        assert summary is not None
+        assert summary.additions == 1
+        assert summary.deletions == 1
+        assert calls == 1
 
     def test_parse_multi_file_patch_preserves_file_metadata(self):
         patch = """diff --git a/old.py b/new.py
@@ -45,6 +280,36 @@ new file mode 100644
         assert files[0].diff.total_deletions == 1
         assert files[1].diff.is_new is True
         assert files[1].diff.total_additions == 1
+
+    def test_parse_multi_file_patch_streams_sections_without_split_list(
+        self,
+        monkeypatch,
+    ):
+        patch = """diff --git a/one.py b/one.py
+--- a/one.py
++++ b/one.py
+@@ -1 +1 @@
+-old
++new
+diff --git a/two.py b/two.py
+--- a/two.py
++++ b/two.py
+@@ -1 +1 @@
+-before
++after"""
+
+        monkeypatch.setattr(
+            diff_module,
+            "_split_multi_file_patch",
+            lambda _patch: (_ for _ in ()).throw(
+                AssertionError("multi-file parsing should stream sections")
+            ),
+        )
+
+        files = parse_multi_file_patch(patch)
+
+        assert [file.diff.filename for file in files] == ["one.py", "two.py"]
+        assert [file.diff.total_additions for file in files] == [1, 1]
 
     def test_simple_add(self):
         """Test parsing a simple addition."""
@@ -375,6 +640,58 @@ new file mode 100644
         assert diff.is_fully_refined is True
         assert any(line.is_modified for line in diff.hunks[0].lines)
 
+    def test_modified_line_identification_does_not_slice_hunk_lines(self):
+        class NoSliceLines(list):
+            def __getitem__(self, index):
+                if isinstance(index, slice):
+                    raise AssertionError("modified-line detection should not copy hunk slices")
+                return super().__getitem__(index)
+
+        hunk = DiffHunk(
+            old_start=1,
+            old_count=1,
+            new_start=1,
+            new_count=1,
+            lines=NoSliceLines(
+                [
+                    DiffLine(1, None, old_content="old value", is_deleted=True),
+                    DiffLine(None, 1, new_content="new value", is_added=True),
+                ]
+            ),
+        )
+
+        assert diff_module._identify_modified_lines(hunk, block_cell_budget=16) is True
+        assert len(hunk.lines) == 1
+        assert hunk.lines[0].is_modified
+
+    def test_modified_line_realignment_passes_lazy_content_windows(self, monkeypatch):
+        seen: dict[str, str] = {}
+
+        def inspected_compute_line_diff(old_lines, new_lines):
+            assert not isinstance(old_lines, list)
+            assert not isinstance(new_lines, list)
+            seen["old"] = old_lines[0]
+            seen["new"] = new_lines[0]
+            return compute_line_diff(old_lines, new_lines)
+
+        monkeypatch.setattr(
+            diff_module, "compute_line_diff", inspected_compute_line_diff
+        )
+        hunk = DiffHunk(
+            old_start=1,
+            old_count=1,
+            new_start=1,
+            new_count=1,
+            lines=[
+                DiffLine(1, None, old_content="old value", is_deleted=True),
+                DiffLine(None, 1, new_content="new value", is_added=True),
+            ],
+        )
+
+        assert diff_module._identify_modified_lines(hunk, block_cell_budget=16) is True
+        assert seen == {"old": "old value", "new": "new value"}
+        assert hunk.lines[0].is_modified
+
 
 class TestComputeWordDiff:
     """Tests for word-level diff."""
@@ -386,6 +703,17 @@ class TestComputeWordDiff:
         assert len(old_segments) == 1
         assert old_segments[0].type == SegmentType.UNCHANGED
         assert old_segments[0].text == "hello world"
+
+    def test_empty_old_text_word_diff_skips_tokenization(self, monkeypatch):
+        def tokenize(_text: str):
+            raise AssertionError("empty old text word diff should not tokenize")
+
+        monkeypatch.setattr(diff_module, "_tokenize", tokenize)
+
+        old_segments, new_segments = compute_word_diff("", "added")
+
+        assert old_segments == []
+        assert new_segments == [InlineSegment(text="added", type=SegmentType.ADDED)]
 
     def test_single_word_change(self):
         """Test changing a single word."""
@@ -446,6 +774,74 @@ class TestComputeWordDiff:
             (" -> str:", SegmentType.UNCHANGED),
         ]
 
+    def test_compute_word_diff_joins_token_ranges_without_slicing(
+        self,
+        monkeypatch,
+    ):
+        class NoSliceTokens(list):
+            def __getitem__(self, index):
+                if isinstance(index, slice):
+                    raise AssertionError("word diff should not copy token slices")
+                return super().__getitem__(index)
+
+        tokenized = {
+            "old": NoSliceTokens(["alpha", " ", "beta"]),
+            "new": NoSliceTokens(["alpha", " ", "gamma"]),
+        }
+        monkeypatch.setattr(diff_module, "_tokenize", lambda text: tokenized[text])
+
+        old_segments, new_segments = compute_word_diff("old", "new")
+
+        assert any(
+            segment.type == SegmentType.DELETED and segment.text
+            for segment in old_segments
+        )
+        assert any(
+            segment.type == SegmentType.ADDED and segment.text
+            for segment in new_segments
+        )
+
+    def test_join_range_single_token_skips_range_iteration(self, monkeypatch):
+        def fail_range(*_args, **_kwargs):
+            raise AssertionError("single-token join should not build a range")
+
+        monkeypatch.setattr(diff_module, "range", fail_range, raising=False)
+
+        assert diff_module._join_range(["alpha"], 0, 1) == "alpha"
+
+    def test_merge_segments_absorbs_whitespace_without_copying_input(self):
+        class NoIterSegments(list):
+            def __iter__(self):
+                raise AssertionError("segment merge should not copy segment lists")
+
+            def __getitem__(self, index):
+                if isinstance(index, slice):
+                    raise AssertionError("segment merge should not slice segment lists")
+                return super().__getitem__(index)
+
+        segments = NoIterSegments(
+            [
+                InlineSegment("old", SegmentType.DELETED),
+                InlineSegment(" ", SegmentType.UNCHANGED),
+                InlineSegment("new", SegmentType.DELETED),
+            ]
+        )
+
+        merged = diff_module._merge_segments(segments)
+
+        assert [(segment.text, segment.type) for segment in merged] == [
+            ("old new", SegmentType.DELETED)
+        ]
+
+    def test_single_segment_merge_skips_range_iteration(self, monkeypatch):
+        def fail_range(*_args, **_kwargs):
+            raise AssertionError("single segment merge should not build a range")
+
+        monkeypatch.setattr(diff_module, "range", fail_range, raising=False)
+        segment = InlineSegment("old", SegmentType.DELETED)
+
+        assert diff_module._merge_segments([segment]) == [segment]
+
     def test_insertion(self):
         """Test insertion."""
         old_segments, new_segments = compute_word_diff("abc", "abXc")
@@ -473,6 +869,21 @@ class TestComputeLineDiff:
 
         assert all(line.is_context for line in result)
         assert len(result) == 3
+
+    def test_same_line_sequence_skips_sequence_matcher(self, monkeypatch):
+        def sequence_matcher(*_args, **_kwargs):
+            raise AssertionError("same line sequence should not build SequenceMatcher")
+
+        monkeypatch.setattr(diff_module, "SequenceMatcher", sequence_matcher)
+        lines = ["line1", "line2"]
+
+        result = compute_line_diff(lines, lines)
+
+        assert [(line.old_content, line.new_content) for line in result] == [
+            ("line1", "line1"),
+            ("line2", "line2"),
+        ]
+        assert all(line.is_context for line in result)
 
     def test_added_line(self):
         """Test adding a line."""
@@ -505,6 +916,33 @@ class TestComputeLineDiff:
         assert len(modified) == 1
         assert modified[0].old_content == "hello world"
         assert modified[0].new_content == "hello universe"
+
+    def test_single_line_replace_alignment_skips_matrix_setup(self, monkeypatch):
+        def fail_range(*_args, **_kwargs):
+            raise AssertionError("single-line replace alignment should not build a matrix")
+
+        monkeypatch.setattr(diff_module, "range", fail_range, raising=False)
+
+        result = diff_module._align_replace_lines(["hello world"], ["hello universe"])
+
+        assert result == [("hello world", "hello universe")]
+
+    def test_compute_line_diff_realigns_replace_chunks_without_slicing_inputs(self):
+        class NoSliceLines(list):
+            def __getitem__(self, index):
+                if isinstance(index, slice):
+                    raise AssertionError("line diff replace chunks should not copy slices")
+                return super().__getitem__(index)
+
+        result = compute_line_diff(
+            NoSliceLines(["old one", "shared"]),
+            NoSliceLines(["new one", "shared"]),
+        )
+
+        assert [(line.old_content, line.new_content) for line in result] == [
+            ("old one", "new one"),
+            ("shared", "shared"),
+        ]
 
     def test_long_modified_line_in_compute_line_diff_skips_word_segments(self):
         """compute_line_diff should skip word-segment calculation for long lines."""
@@ -579,6 +1017,63 @@ class TestDiffHighlighting:
             if span.start == start and span.end == end:
                 return str(span.style)
         return None
+
+    def test_single_line_highlighting_avoids_content_split(self, monkeypatch):
+        """Single-line highlight windows should reuse the highlighted content directly."""
+
+        class SingleLineContent(Content):
+            def split(self, *_args, **_kwargs):
+                raise AssertionError("single-line highlighting should not split content")
+
+        def fake_highlight(text, **_kwargs):
+            return SingleLineContent(text)
+
+        monkeypatch.setattr(highlighting_module.highlight, "highlight", fake_highlight)
+        monkeypatch.setattr(
+            highlighting_module.highlight,
+            "guess_language",
+            lambda *_args, **_kwargs: "python",
+        )
+
+        diff = parse_patch("@@ -0,0 +1 @@\n+value = 1", "test.py")
+        self._assign_line_indexes(diff)
+
+        highlight_lines_for_diff(diff, include_word_diff=False)
+
+        assert diff.hunks[0].lines[0].highlighted_new_content == Content("value = 1")
+
+    def test_range_highlighting_starts_at_hunk_head_without_counting_empty_prefix(
+        self,
+        monkeypatch,
+    ):
+        """Highlighting from a hunk start should use zero offsets directly."""
+
+        monkeypatch.setattr(
+            highlighting_module,
+            "_count_side_lines",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("hunk-start highlighting should not count empty prefix")
+            ),
+        )
+        monkeypatch.setattr(
+            highlighting_module.highlight,
+            "highlight",
+            lambda text, **_kwargs: Content(text),
+        )
+        monkeypatch.setattr(
+            highlighting_module.highlight,
+            "guess_language",
+            lambda *_args, **_kwargs: "python",
+        )
+
+        diff = parse_patch("@@ -1 +1 @@\n-line 1\n+line 1", "test.py")
+        self._assign_line_indexes(diff)
+
+        highlight_lines_for_diff_range(diff, 0, 0, include_word_diff=False)
+
+        line = diff.hunks[0].lines[0]
+        assert line.highlighted_old_content == Content("line 1")
+        assert line.highlighted_new_content == Content("line 1")
 
     def _combined_diff_with_python_class_hunk(self):
         patch = '''@@ -30,3 +30,17 @@
@@ -745,6 +1240,59 @@ class TestDiffHighlighting:
         assert changed_line.highlighted_new_content is not None
         assert last_line.highlighted_old_content is not None
         assert last_line.highlighted_new_content is not None
+
+    def test_highlight_lines_for_diff_range_does_not_slice_hunk_lines(self):
+        class NoSliceLines(list):
+            def __getitem__(self, index):
+                if isinstance(index, slice):
+                    raise AssertionError("range highlighting should not copy hunk slices")
+                return super().__getitem__(index)
+
+        patch = """@@ -1,4 +1,4 @@
+ line1
+-old line
++new line
+ line3"""
+        diff = parse_patch(patch, "test.py")
+        self._assign_line_indexes(diff)
+        diff.hunks[0].lines = NoSliceLines(diff.hunks[0].lines)
+
+        highlight_lines_for_diff_range(diff, 1, 2, include_word_diff=False)
+
+        assert diff.hunks[0].lines[1].highlighted_old_content is not None
+        assert diff.hunks[0].lines[2].highlighted_new_content is not None
+
+    def test_highlight_lines_for_diff_range_uses_cached_hunk_indices(self):
+        """Cached hunk ranges should avoid scanning every hunk for late windows."""
+        hunks = []
+        for hunk_index in range(200):
+            line_no = hunk_index + 1
+            hunks.append(f"@@ -{line_no},1 +{line_no},1 @@\n line{line_no}")
+        diff = parse_patch("\n".join(hunks), "test.py")
+        self._assign_line_indexes(diff)
+        hunk_start_line_indices = [hunk.lines[0].line_index for hunk in diff.hunks]
+        hunk_end_line_indices = [hunk.lines[-1].line_index for hunk in diff.hunks]
+        iterated = {"count": 0}
+
+        class CountingHunks(list):
+            def __iter__(self):
+                iterated["count"] += len(self)
+                return super().__iter__()
+
+        target_line = 180
+        diff.hunks = CountingHunks(diff.hunks)
+
+        highlight_lines_for_diff_range(
+            diff,
+            target_line,
+            target_line,
+            include_word_diff=False,
+            hunk_start_line_indices=hunk_start_line_indices,
+            hunk_end_line_indices=hunk_end_line_indices,
+        )
+
+        assert iterated["count"] == 0
+        assert diff.hunks[target_line].lines[0].highlighted_new_content is not None
 
     def test_highlight_lines_for_diff_range_uses_hunk_context_for_python_docstrings(
         self,

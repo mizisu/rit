@@ -5,6 +5,7 @@ from rit.state import pending_review
 from rit.state.models import PendingReviewComment, PRComment, PRReview, ReviewState
 from rit.state.pending_review import (
     UnsupportedInlineCommentTarget,
+    count_pending_file_comments,
     first_unsupported_comment,
     get_pending_file_comments,
     get_pending_inline_comment,
@@ -79,6 +80,97 @@ def test_upsert_pending_comment_replaces_target_and_sorts_by_anchor() -> None:
     ]
 
 
+def test_upsert_pending_comment_skips_sort_for_first_draft(monkeypatch) -> None:
+    monkeypatch.setattr(
+        pending_review,
+        "_sort_key",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("first pending draft should not be sorted")
+        ),
+    )
+
+    comments, draft = upsert_pending_comment(
+        [],
+        body="first",
+        path="a.py",
+        line=7,
+        side="RIGHT",
+        is_diff_line=True,
+    )
+
+    assert comments == [draft]
+    assert draft.body == "first"
+
+
+def test_upsert_pending_comment_replaces_only_draft_without_sort(monkeypatch) -> None:
+    existing = PendingReviewComment(
+        body="old",
+        path="a.py",
+        line=7,
+        side="RIGHT",
+    )
+    monkeypatch.setattr(
+        pending_review,
+        "_sort_key",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("single pending draft replacement should not be sorted")
+        ),
+    )
+
+    comments, draft = upsert_pending_comment(
+        [existing],
+        body="new",
+        path="a.py",
+        line=7,
+        side="RIGHT",
+        is_diff_line=True,
+    )
+
+    assert comments == [draft]
+    assert draft.body == "new"
+
+
+def test_upsert_pending_comment_appends_latest_without_full_sort(monkeypatch) -> None:
+    first = PendingReviewComment(
+        body="old",
+        path="a.py",
+        line=7,
+        side="RIGHT",
+    )
+    second = PendingReviewComment(
+        body="old",
+        path="b.py",
+        line=2,
+        side="RIGHT",
+    )
+    sort_key_calls: list[tuple[str, int, str]] = []
+    original_sort_key = pending_review._sort_key
+
+    def recording_sort_key(
+        comment: PendingReviewComment,
+    ) -> tuple[str, int, str]:
+        key = original_sort_key(comment)
+        sort_key_calls.append(key)
+        return key
+
+    monkeypatch.setattr(pending_review, "_sort_key", recording_sort_key)
+
+    comments, draft = upsert_pending_comment(
+        [first, second],
+        body="new",
+        path="c.py",
+        line=1,
+        side="RIGHT",
+        is_diff_line=True,
+    )
+
+    assert comments == [first, second, draft]
+    assert sort_key_calls == [
+        ("b.py", 2, "RIGHT"),
+        ("c.py", 1, "RIGHT"),
+    ]
+
+
 def test_pending_comment_lookup_and_file_filter_are_targeted() -> None:
     comments = [
         PendingReviewComment(body="old", path="a.py", line=7, side="LEFT"),
@@ -96,6 +188,27 @@ def test_pending_comment_lookup_and_file_filter_are_targeted() -> None:
         == comments[0]
     )
     assert get_pending_file_comments(comments, "a.py") == comments[:2]
+    assert count_pending_file_comments(comments, "a.py") == 2
+
+
+def test_count_pending_file_comments_empty_and_single_skip_sum(monkeypatch) -> None:
+    monkeypatch.setattr(
+        pending_review,
+        "sum",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("empty and single pending comment counts should not sum")
+        ),
+        raising=False,
+    )
+
+    assert count_pending_file_comments([], "a.py") == 0
+    assert (
+        count_pending_file_comments(
+            [PendingReviewComment(body="note", path="a.py", line=1, side="RIGHT")],
+            "a.py",
+        )
+        == 1
+    )
 
 
 def test_remove_pending_comment_returns_new_list_and_status() -> None:
@@ -121,6 +234,41 @@ def test_remove_pending_comment_returns_new_list_and_status() -> None:
     assert remaining == [comments[0]]
     assert missing_removed is False
     assert unchanged == remaining
+
+
+def test_remove_pending_comment_reuses_list_when_target_is_missing() -> None:
+    comments = [
+        PendingReviewComment(body="keep", path="a.py", line=1, side="RIGHT"),
+    ]
+
+    unchanged, removed = remove_pending_comment(
+        comments,
+        path="missing.py",
+        line=2,
+        side="RIGHT",
+    )
+
+    assert removed is False
+    assert unchanged is comments
+
+
+def test_remove_pending_comment_empty_comments_skips_scan() -> None:
+    class EmptyComments:
+        def __len__(self) -> int:
+            return 0
+
+        def __getitem__(self, _index: int) -> PendingReviewComment:
+            raise AssertionError("empty pending comments should not be scanned")
+
+    unchanged, removed = remove_pending_comment(
+        EmptyComments(),
+        path="missing.py",
+        line=2,
+        side="RIGHT",
+    )  # type: ignore[arg-type]
+
+    assert unchanged == []
+    assert removed is False
 
 
 def test_delete_pending_comment_advances_version_when_removed() -> None:
@@ -440,6 +588,29 @@ def test_review_submission_plan_rejects_unsupported_draft_targets() -> None:
         raise AssertionError("unsupported draft target should be rejected")
 
 
+def test_review_submission_plan_stops_at_first_unsupported_draft() -> None:
+    unsupported = PendingReviewComment(
+        body="full file",
+        path="a.py",
+        line=9,
+        side="RIGHT",
+        is_diff_line=False,
+    )
+
+    class Drafts:
+        def __iter__(self):
+            yield unsupported
+            raise AssertionError("unsupported draft should stop validation")
+
+    with pytest.raises(UnsupportedInlineCommentTarget, match="a.py:9"):
+        plan_review_submission(
+            "COMMENT",
+            "summary",
+            Drafts(),  # type: ignore[arg-type]
+            pending_review_id=None,
+        )
+
+
 def test_pending_review_sync_plan_deletes_existing_and_keeps_syncable_comments() -> (
     None
 ):
@@ -665,6 +836,36 @@ def test_inline_comment_diff_line_matches_side_specific_line_numbers() -> None:
     assert pending_review.is_inline_comment_diff_line(diff, line=4, side="LEFT")
     assert not pending_review.is_inline_comment_diff_line(diff, line=7, side="LEFT")
     assert not pending_review.is_inline_comment_diff_line(diff, line=4, side="RIGHT")
+
+
+def test_inline_comment_diff_line_skips_hunk_lines_outside_anchor_range() -> None:
+    class UnreachableLines(list[DiffLine]):
+        def __iter__(self):
+            raise AssertionError("outside-range hunk lines should not be scanned")
+
+    diff = FileDiff(
+        filename="a.py",
+        hunks=[
+            DiffHunk(
+                old_start=10,
+                old_count=2,
+                new_start=20,
+                new_count=2,
+                lines=UnreachableLines(
+                    [
+                        DiffLine(
+                            old_line_no=10,
+                            new_line_no=20,
+                            old_content="same",
+                            new_content="same",
+                        )
+                    ]
+                ),
+            )
+        ],
+    )
+
+    assert not pending_review.is_inline_comment_diff_line(diff, line=99, side="RIGHT")
 
 
 def test_require_inline_comment_diff_line_rejects_outside_diff_targets() -> None:

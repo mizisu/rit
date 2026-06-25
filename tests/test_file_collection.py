@@ -71,6 +71,41 @@ def test_append_file_indexes_comments_and_count_floor() -> None:
     assert file.comments == [comment]
 
 
+def test_append_file_reads_filename_once_while_indexing_comments() -> None:
+    file_collection = _file_collection_module()
+
+    class File:
+        comments: list[PRComment] = []
+
+        def __init__(self, filename: str) -> None:
+            self._filename = filename
+            self.filename_reads = 0
+
+        @property
+        def filename(self) -> str:
+            self.filename_reads += 1
+            if self.filename_reads > 1:
+                raise AssertionError("append_file should reuse the filename")
+            return self._filename
+
+    file = File("src/app.py")
+    comment = PRComment(id=101, body="note", path="src/app.py")
+    files: list[File] = []
+    files_by_filename: dict[str, File] = {}
+
+    result = file_collection.append_file(
+        files,  # type: ignore[arg-type]
+        files_by_filename,  # type: ignore[arg-type]
+        {"src/app.py": [comment]},
+        file,  # type: ignore[arg-type]
+        total_count=0,
+    )
+
+    assert result.added is True
+    assert files_by_filename["src/app.py"] is file
+    assert file.comments == [comment]
+
+
 def test_append_file_ignores_duplicate_filenames() -> None:
     file_collection = _file_collection_module()
     original = PRFile(filename="src/app.py", additions=1)
@@ -93,6 +128,30 @@ def test_append_file_ignores_duplicate_filenames() -> None:
     assert files_by_filename["src/app.py"] is original
 
 
+def test_append_file_preserves_known_total_without_max(monkeypatch) -> None:
+    file_collection = _file_collection_module()
+    file = PRFile(filename="src/app.py")
+
+    monkeypatch.setattr(
+        file_collection,
+        "max",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("known file total should not call max")
+        ),
+        raising=False,
+    )
+
+    result = file_collection.append_file(
+        [],
+        {},
+        {},
+        file,
+        total_count=5,
+    )
+
+    assert result.total_count == 5
+
+
 def test_find_file_backfills_missing_filename_index() -> None:
     file_collection = _file_collection_module()
     file = PRFile(filename="src/app.py")
@@ -102,6 +161,43 @@ def test_find_file_backfills_missing_filename_index() -> None:
 
     assert found is file
     assert files_by_filename["src/app.py"] is file
+
+
+def test_find_file_single_file_skips_iteration() -> None:
+    file_collection = _file_collection_module()
+
+    class SingleFileList(list):
+        def __iter__(self):
+            raise AssertionError("single loaded file lookup should not iterate")
+
+    file = PRFile(filename="src/app.py")
+    files_by_filename: dict[str, PRFile] = {}
+
+    found = file_collection.find_file(
+        "src/app.py",
+        SingleFileList([file]),
+        files_by_filename,
+    )
+
+    assert found is file
+    assert files_by_filename["src/app.py"] is file
+
+
+def test_find_file_backfills_scanned_prefix() -> None:
+    file_collection = _file_collection_module()
+    first = PRFile(filename="src/first.py")
+    second = PRFile(filename="src/second.py")
+    files_by_filename: dict[str, PRFile] = {}
+
+    found = file_collection.find_file(
+        "src/second.py",
+        [first, second],
+        files_by_filename,
+    )
+
+    assert found is second
+    assert files_by_filename["src/first.py"] is first
+    assert files_by_filename["src/second.py"] is second
 
 
 def test_select_file_result_backfills_index_and_returns_cached_diff() -> None:
@@ -265,6 +361,50 @@ def test_apply_parsed_file_appends_new_file_and_caches_diff() -> None:
     assert file_diffs["src/app.py"].filename == "src/app.py"
 
 
+def test_apply_parsed_file_reads_diff_filename_once(monkeypatch) -> None:
+    file_collection = _file_collection_module()
+
+    class Diff(FileDiff):
+        def __init__(self, filename: str) -> None:
+            super().__init__(filename=filename)
+            self.filename_reads = 0
+
+        @property
+        def filename(self) -> str:
+            self.filename_reads += 1
+            if self.filename_reads > 1:
+                raise AssertionError("parsed file apply should reuse diff filename")
+            return self.__dict__["filename"]
+
+        @filename.setter
+        def filename(self, value: str) -> None:
+            self.__dict__["filename"] = value
+
+    diff = Diff("src/app.py")
+    parsed = ParsedFilePatch(diff=diff, patch="@@ -1 +1 @@\n-old\n+new")
+    files: list[PRFile] = []
+    files_by_filename: dict[str, PRFile] = {}
+    file_diffs: dict[str, FileDiff] = {}
+
+    monkeypatch.setattr(
+        file_collection,
+        "file_from_diff",
+        lambda _diff: PRFile(filename="src/app.py"),
+    )
+
+    result = file_collection.apply_parsed_file(
+        files,
+        files_by_filename,
+        file_diffs,
+        {},
+        parsed,
+        total_count=0,
+    )
+
+    assert result.added is True
+    assert file_diffs["src/app.py"] is diff
+
+
 def test_apply_parsed_file_updates_existing_summary_file() -> None:
     file_collection = _file_collection_module()
     existing = PRFile(filename="src/app.py", additions=0, patch="summary")
@@ -392,6 +532,19 @@ def test_apply_file_view_states_updates_valid_states() -> None:
 
     assert viewed.viewer_viewed_state == FileViewedState.VIEWED
     assert dismissed.viewer_viewed_state == FileViewedState.DISMISSED
+
+
+def test_apply_file_view_states_skips_files_when_states_are_empty() -> None:
+    file_collection = _file_collection_module()
+
+    class Files(list[PRFile]):
+        def __iter__(self):
+            raise AssertionError("empty viewed states should not scan files")
+
+    file_collection.apply_file_view_states(
+        Files([PRFile(filename="src/app.py")]),
+        {},
+    )
 
 
 def test_apply_file_view_states_ignores_missing_and_unknown_states() -> None:

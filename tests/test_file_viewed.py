@@ -6,6 +6,7 @@ from textual.app import App, ComposeResult
 from textual.widgets import Tree
 
 from rit.state.models import FileViewedState, PRFile
+from rit.ui.widgets import file_tree as file_tree_module
 from rit.ui.widgets.file_tree import FileTree
 
 
@@ -59,6 +60,67 @@ def test_file_label_dismissed_has_bang_badge(sample_files: list[PRFile]) -> None
     tree = FileTree()
     label = tree._file_label(f)
     assert label.plain.startswith("! ")
+
+
+def test_file_label_uses_shared_status_color_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        file_tree_module,
+        "_FILE_STATUS_COLORS",
+        {"added": "magenta"},
+        raising=False,
+    )
+
+    label = FileTree()._file_label(PRFile(filename="new.py", status="added"))
+    status_icon_span = next(
+        span for span in label.spans if span.start == 2 and span.end == 4
+    )
+
+    assert str(status_icon_span.style) == "magenta"
+
+
+def test_update_view_state_uses_filename_lookup_without_file_scan() -> None:
+    class NoIterFiles(list):
+        def __iter__(self):
+            raise AssertionError("single file updates should use filename lookup")
+
+    class LabelNode:
+        def __init__(self) -> None:
+            self.label: Text | None = None
+
+        def set_label(self, label: Text) -> None:
+            self.label = label
+
+    file = PRFile(filename="README.md", viewer_viewed_state=FileViewedState.VIEWED)
+    node = LabelNode()
+    tree = FileTree()
+    tree._all_files = NoIterFiles([file])
+    tree._files_by_filename = {"README.md": file}
+    tree._file_nodes = {"README.md": node}  # type: ignore[dict-item]
+
+    tree.update_view_state("README.md")
+
+    assert node.label is not None
+    assert node.label.plain.startswith("✓ ")
+
+
+def test_get_current_index_uses_filename_index_lookup_without_store_scan() -> None:
+    class NoIterFiles(list):
+        def __iter__(self):
+            raise AssertionError("current index lookup should use filename index")
+
+    class State:
+        files = NoIterFiles([PRFile(filename="README.md")])
+
+    class Store:
+        state = State()
+
+    tree = FileTree(store=Store())  # type: ignore[arg-type]
+    tree.selected_file = "README.md"
+    tree._file_index_by_filename = {"README.md": 0}
+
+    assert tree.get_current_index() == 0
 
 
 @pytest.mark.asyncio

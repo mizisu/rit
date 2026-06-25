@@ -1,5 +1,6 @@
 import json
 
+import rit.services.pr_review_request as pr_review_request
 from rit.services.pr_review_request import (
     create_pending_review,
     create_issue_comment,
@@ -424,6 +425,45 @@ def test_parse_review_comments_response_flattens_paginated_json() -> None:
     )
 
     assert [comment.id for comment in comments] == [300, 301]
+
+
+def test_parse_review_comments_response_empty_output_skips_model_adapter(
+    monkeypatch,
+) -> None:
+    class Adapter:
+        def validate_python(self, _data: object) -> list[object]:
+            raise AssertionError("empty review comments should not validate")
+
+    monkeypatch.setattr(pr_review_request, "_PRCommentListAdapter", Adapter())
+
+    assert parse_review_comments_response("") == []
+
+
+def test_parse_review_comments_response_single_item_skips_model_adapter(
+    monkeypatch,
+) -> None:
+    class Adapter:
+        def validate_python(self, _data: object) -> list[object]:
+            raise AssertionError("single review comment should not validate as a list")
+
+    monkeypatch.setattr(pr_review_request, "_PRCommentListAdapter", Adapter())
+
+    comments = parse_review_comments_response(
+        json.dumps(
+            [
+                {
+                    "id": 300,
+                    "body": "first",
+                    "path": "a.py",
+                    "line": 1,
+                    "side": "RIGHT",
+                }
+            ]
+        )
+    )
+
+    assert len(comments) == 1
+    assert comments[0].id == 300
 
 
 async def test_list_review_comments_runs_request_and_parses_paginated_response() -> None:

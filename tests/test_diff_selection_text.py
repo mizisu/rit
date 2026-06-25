@@ -19,6 +19,26 @@ def test_selected_text_for_visual_range_copies_line_mode_with_trailing_newline()
     )
 
 
+def test_selected_text_for_visual_range_line_mode_does_not_slice_sequence() -> None:
+    class NoSliceLineTexts(list):
+        def __getitem__(self, index):
+            if isinstance(index, slice):
+                raise AssertionError("line-mode selection should not copy line slices")
+            return super().__getitem__(index)
+
+    assert (
+        selected_text_for_visual_range(
+            NoSliceLineTexts(["line1", "line2", "line3"]),
+            visual_anchor_line=0,
+            visual_anchor_column=0,
+            cursor_line=1,
+            cursor_column=0,
+            visual_type="line",
+        )
+        == "line1\nline2\n"
+    )
+
+
 def test_selected_text_for_visual_range_copies_same_line_char_range() -> None:
     assert (
         selected_text_for_visual_range(

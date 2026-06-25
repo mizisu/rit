@@ -12,8 +12,10 @@ from textual.widgets import Static
 from rit.core.diff import parse_patch
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.services.github import PRDiscussion
-from rit.state.models import LoadingState, PR, PRFile
+from rit.state.models import PR, LoadingState, PRFile
 from rit.state.store import PRStore
+from rit.ui.components import file_changes as file_changes_module
+from rit.ui.components.combined_diff import CombinedDiffDocument
 from rit.ui.components.file_changes import FileChanges
 from rit.ui.widgets.diff_render import _create_file_header_widget
 from rit.ui.widgets.diff_view import DiffView
@@ -117,6 +119,32 @@ class FakeEmptyFileSourcesService(FakeFilesService):
     async def get_pr_diff_text(self, pr_number: int) -> str:
         self.raw_diff_calls.append(pr_number)
         return ""
+
+
+def test_combined_file_line_starts_reuses_document_map_without_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    line_starts = {"one.py": 0}
+    document = CombinedDiffDocument(
+        diff=FileDiff(filename="All files"),
+        file_line_starts=line_starts,
+        file_start_lines=(0,),
+        file_start_names=("one.py",),
+        line_lookup={},
+    )
+    file_changes = FileChanges(PRStore())
+    file_changes._render_session.record_combined_document(("one.py",), document)
+
+    monkeypatch.setattr(
+        file_changes_module,
+        "dict",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("combined line starts should not be copied per access")
+        ),
+        raising=False,
+    )
+
+    assert file_changes._combined_file_line_starts is line_starts
 
 
 def test_store_get_file_diff_parses_lazily_and_caches_status_metadata() -> None:
@@ -604,6 +632,40 @@ async def test_file_changes_renders_loaded_file_diffs_as_combined_scroll() -> No
 
 
 @pytest.mark.asyncio
+async def test_file_changes_waits_for_files_to_finish_before_combined_diff() -> None:
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    store = PRStore()
+    store.state.files_loading = LoadingState.LOADING
+    store.state.files = [
+        PRFile(filename="one.py", status="modified", patch=patch),
+        PRFile(filename="two.py", status="modified", patch=patch),
+    ]
+    store.state.file_diffs = {
+        filename: parse_patch(patch, filename) for filename in ["one.py", "two.py"]
+    }
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert file_changes.diff_view.current_file == "one.py"
+
+        store.state.files_loading = LoadingState.LOADED
+        file_changes.refresh_files()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert file_changes.diff_view.current_file == "All files"
+
+
+@pytest.mark.asyncio
 async def test_combined_diff_uses_prominent_file_headers_without_hunk_headers() -> None:
     patch = "@@ -1,1 +1,1 @@\n-old\n+new"
     store = PRStore()
@@ -728,6 +790,73 @@ def test_file_header_prefers_visible_file_list_over_stale_lookup_cache() -> None
     header_text = str(getattr(header.content, "plain", header.content))
     assert "+12" in header_text
     assert "-3" in header_text
+
+
+def test_file_header_reuses_current_view_file_without_store_scan() -> None:
+    class NoIterFiles(list[PRFile]):
+        def __iter__(self):
+            raise AssertionError("file header should reuse the current view file")
+
+    store = PRStore()
+    store.state.files = NoIterFiles()
+    file = PRFile(
+        filename="one.py",
+        status="modified",
+        additions=12,
+        deletions=3,
+    )
+    view = DiffView(store=store)
+    view.split = False
+    view._file = file
+
+    header = _create_file_header_widget(
+        view,
+        hunk_index=0,
+        hunk=DiffHunk(
+            old_start=1,
+            old_count=1,
+            new_start=1,
+            new_count=1,
+            starts_file=True,
+            file_path="one.py",
+            file_additions=0,
+            file_deletions=0,
+        ),
+    )
+
+    assert isinstance(header, Static)
+    header_text = str(getattr(header.content, "plain", header.content))
+    assert "+12" in header_text
+    assert "-3" in header_text
+
+
+def test_file_header_uses_planned_change_stats_without_diff_scan() -> None:
+    class NoIterHunks(list):
+        def __iter__(self):
+            raise AssertionError("file header should reuse planned change stats")
+
+    view = DiffView(store=PRStore())
+    view.split = False
+    view._diff = FileDiff(filename="All files", hunks=NoIterHunks())
+    view._file_change_stats = {"one.py": (2, 1)}
+
+    header = _create_file_header_widget(
+        view,
+        hunk_index=0,
+        hunk=DiffHunk(
+            old_start=1,
+            old_count=1,
+            new_start=1,
+            new_count=1,
+            starts_file=True,
+            file_path="one.py",
+        ),
+    )
+
+    assert isinstance(header, Static)
+    header_text = str(getattr(header.content, "plain", header.content))
+    assert "+2" in header_text
+    assert "-1" in header_text
 
 
 def test_file_header_width_accounts_for_rename_display_path_without_viewport() -> None:
@@ -1026,8 +1155,11 @@ async def test_combined_full_preview_uses_current_line_file(
         assert file_changes._showing_combined_files is False
         assert store.state.selected_file == "one.py"
         prefix_texts = [
-            str(getattr(node.content, "plain", node.content))
-            for node in file_changes.diff_view.query(".line-prefix")
+            str(getattr(prefix.content, "plain", prefix.content))
+            for prefix in (
+                cast(Static, node)
+                for node in file_changes.diff_view.query(".line-prefix")
+            )
         ]
         assert len(file_changes.diff_view.query(".preview-hunk-boundary")) == 0
         assert any("┃" in text for text in prefix_texts)

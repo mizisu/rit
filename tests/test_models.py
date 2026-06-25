@@ -1,16 +1,19 @@
 """Tests for data models."""
 
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from typing import Literal, get_args, get_origin, get_type_hints
 
+import rit.state.models as models_module
 from rit.state.models import (
+    PR,
     CommentThread,
     NodeList,
-    PR,
     PRComment,
+    PRFile,
     PRReview,
-    ReviewRequest,
     PRUser,
+    ReviewRequest,
     ReviewThread,
     ReviewThreadInfo,
     group_comments_into_threads,
@@ -55,6 +58,23 @@ def test_review_thread_info_is_state_model() -> None:
     assert info.root_comment_id == 501
 
 
+def test_models_accept_app_and_github_data_names() -> None:
+    app_pr = PR(number=1, head_sha="deadbeef", reviews_connection=NodeList())
+    github_pr = PR.model_validate(
+        {"number": 1, "headRefOid": "cafebabe", "reviews": {"nodes": []}}
+    )
+    app_comment = PRComment(id=7, user=PRUser(login="alice"), original_line=3)
+    github_comment = PRComment.model_validate(
+        {"databaseId": 8, "author": {"login": "bob"}, "originalLine": 4}
+    )
+
+    assert app_pr.head_sha == "deadbeef"
+    assert github_pr.head_sha == "cafebabe"
+    assert app_comment.id == 7
+    assert github_comment.user is not None
+    assert github_comment.user.login == "bob"
+
+
 def test_model_validators_accept_unknown_json_values_without_any_contract() -> None:
     validators = [
         PRComment.parse_reply_to,
@@ -78,6 +98,37 @@ class TestNodeList:
         users = NodeList.from_nodes(PRUser(login=login) for login in ["alice", "bob"])
 
         assert [user.login for user in users.nodes] == ["alice", "bob"]
+
+    def test_from_nodes_reuses_list_inputs_without_copying(self, monkeypatch) -> None:
+        nodes = [PRUser(login="alice")]
+        monkeypatch.setattr(
+            models_module,
+            "list",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("NodeList.from_nodes should reuse list inputs")
+            ),
+            raising=False,
+        )
+
+        users = NodeList.from_nodes(nodes)
+
+        assert users.nodes is nodes
+
+    def test_from_nodes_single_model_list_reuses_without_iteration(self) -> None:
+        class SingleUseList(list):
+            def __iter__(self):
+                raise AssertionError("single BaseModel list should not be iterated")
+
+        nodes = SingleUseList([PRUser(login="alice")])
+
+        users = NodeList.from_nodes(nodes)
+
+        assert users.nodes is nodes
+
+    def test_from_nodes_validates_mapping_list_inputs(self) -> None:
+        users = NodeList[PRUser].model_validate({"nodes": [{"login": "alice"}]})
+
+        assert users.nodes == [PRUser(login="alice")]
 
 
 class TestPRComment:
@@ -145,6 +196,22 @@ class TestPRComment:
         assert comment.anchor_side == "new"
         assert comment.anchor_line == 20
 
+    def test_anchor_line_does_not_recompute_anchor_side(self) -> None:
+        class Comment(PRComment):
+            @property
+            def anchor_side(self):
+                raise AssertionError("anchor_line should use local fields directly")
+
+        comment = Comment(
+            id=1,
+            body="test",
+            path="test.py",
+            line=None,
+            original_line=15,
+        )
+
+        assert comment.anchor_line == 15
+
     def test_rest_subject_type_is_preserved(self) -> None:
         comment = PRComment.model_validate(
             {
@@ -156,6 +223,21 @@ class TestPRComment:
         )
 
         assert comment.subject_type == "file"
+
+    def test_reply_to_parser_uses_direct_dict_lookup(self) -> None:
+        class NoItemsDict(dict):
+            def items(self):
+                raise AssertionError("model parser should not scan mapping items")
+
+        comment = PRComment.model_validate(
+            {
+                "id": 1,
+                "body": "reply",
+                "replyTo": NoItemsDict({"databaseId": 99}),
+            }
+        )
+
+        assert comment.in_reply_to_id == 99
 
 
 class TestPRReview:
@@ -197,6 +279,20 @@ class TestPR:
         assert get_args(return_type) == ("Open", "Merged", "Closed", "Draft")
 
 
+class TestPRFile:
+    """Tests for PR file helpers."""
+
+    def test_status_icon_uses_shared_status_icon_mapping(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            models_module,
+            "_FILE_STATUS_ICONS",
+            {"added": "A"},
+            raising=False,
+        )
+
+        assert PRFile(status="added").status_icon == "A"
+
+
 class TestReviewThread:
     """Tests for GraphQL review thread anchor helpers."""
 
@@ -234,6 +330,21 @@ class TestReviewThread:
         )
 
         assert thread.anchor_side == "old"
+        assert thread.anchor_line == 10
+
+    def test_anchor_line_does_not_recompute_anchor_side(self) -> None:
+        class Thread(ReviewThread):
+            @property
+            def anchor_side(self):
+                raise AssertionError("anchor_line should use local fields directly")
+
+        thread = Thread(
+            path="test.py",
+            line=None,
+            original_line=10,
+            comments_connection=NodeList(nodes=[]),
+        )
+
         assert thread.anchor_line == 10
 
     def test_nullable_graphql_start_diff_side_is_allowed(self) -> None:
@@ -303,6 +414,93 @@ class TestCommentThread:
 
         assert [comment.id for comment in thread.all_comments] == [1, 2, 3]
 
+    def test_single_reply_thread_does_not_sort_replies(self, monkeypatch) -> None:
+        root = make_comment(1, "Root comment")
+        reply = make_comment(
+            2,
+            "Reply",
+            in_reply_to_id=1,
+            created_at=datetime(2024, 1, 1, 13, tzinfo=timezone.utc),
+        )
+
+        monkeypatch.setattr(
+            models_module,
+            "sorted",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("single-reply threads should not sort replies")
+            ),
+            raising=False,
+        )
+
+        thread = CommentThread(root_comment=root, replies=[reply])
+
+        assert thread.replies == [reply]
+
+    def test_sorted_reply_thread_reuses_replies_without_sorting(
+        self,
+        monkeypatch,
+    ) -> None:
+        class Replies(list[PRComment]):
+            def __getitem__(self, index):
+                if isinstance(index, slice):
+                    raise AssertionError(
+                        "already-sorted replies should be scanned without slicing"
+                    )
+                return super().__getitem__(index)
+
+        reply1 = make_comment(
+            2,
+            "Reply 1",
+            in_reply_to_id=1,
+            created_at=datetime(2024, 1, 1, 13, tzinfo=timezone.utc),
+        )
+        reply2 = make_comment(
+            3,
+            "Reply 2",
+            in_reply_to_id=1,
+            created_at=datetime(2024, 1, 1, 14, tzinfo=timezone.utc),
+        )
+        replies = Replies([reply1, reply2])
+
+        monkeypatch.setattr(
+            models_module,
+            "sorted",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("already-sorted replies should not be sorted again")
+            ),
+            raising=False,
+        )
+
+        sorted_replies = CommentThread.sort_replies(replies)
+
+        assert sorted_replies == replies
+
+    def test_all_comments_uses_replies_sorted_at_construction(
+        self,
+        monkeypatch,
+    ) -> None:
+        root = make_comment(1, "Root comment")
+        reply1 = make_comment(
+            2,
+            "Reply 1",
+            in_reply_to_id=1,
+            created_at=datetime(2024, 1, 1, 13, tzinfo=timezone.utc),
+        )
+        reply2 = make_comment(
+            3,
+            "Reply 2",
+            in_reply_to_id=1,
+            created_at=datetime(2024, 1, 1, 14, tzinfo=timezone.utc),
+        )
+        thread = CommentThread(root_comment=root, replies=[reply2, reply1])
+
+        def fail_sort_key(_value: datetime) -> datetime:
+            raise AssertionError("all_comments should not sort replies on access")
+
+        monkeypatch.setattr(models_module, "datetime_sort_key", fail_sort_key)
+
+        assert [comment.id for comment in thread.all_comments] == [1, 2, 3]
+
     def test_file_path_property(self) -> None:
         """Test file_path property returns root comment's path."""
         root = make_comment(1, "Root", path="src/main.py")
@@ -353,6 +551,21 @@ class TestGroupCommentsIntoThreads:
         threads = group_comments_into_threads([])
         assert threads == []
 
+    def test_empty_sequence_does_not_iterate(self) -> None:
+        class EmptyComments(Sequence[PRComment]):
+            def __len__(self) -> int:
+                return 0
+
+            def __getitem__(self, index: int) -> PRComment:
+                raise IndexError(index)
+
+            def __iter__(self):
+                raise AssertionError("empty comment sequence should not be iterated")
+
+        threads = group_comments_into_threads(EmptyComments())
+
+        assert threads == []
+
     def test_single_root_comment(self) -> None:
         """Test with single root comment (no replies)."""
         comment = make_comment(1, "Single comment")
@@ -361,6 +574,41 @@ class TestGroupCommentsIntoThreads:
         assert len(threads) == 1
         assert threads[0].root_comment.id == 1
         assert threads[0].replies == []
+
+    def test_single_comment_sequence_does_not_build_comment_map(self) -> None:
+        comment = make_comment(1, "Single comment")
+
+        class SingleComment(Sequence[PRComment]):
+            def __len__(self) -> int:
+                return 1
+
+            def __getitem__(self, index: int) -> PRComment:
+                if index == 0:
+                    return comment
+                raise IndexError(index)
+
+            def __iter__(self):
+                raise AssertionError("single comment sequence should not be iterated")
+
+        threads = group_comments_into_threads(SingleComment())
+
+        assert len(threads) == 1
+        assert threads[0].root_comment is comment
+        assert threads[0].replies == []
+
+    def test_single_root_comment_does_not_sort_threads(self, monkeypatch) -> None:
+        comment = make_comment(1, "Single comment")
+        monkeypatch.setattr(
+            models_module,
+            "datetime_sort_key",
+            lambda _created_at: (_ for _ in ()).throw(
+                AssertionError("single-thread groups should not sort")
+            ),
+        )
+
+        threads = group_comments_into_threads([comment])
+
+        assert threads[0].root_comment is comment
 
     def test_multiple_root_comments(self) -> None:
         """Test with multiple independent root comments."""

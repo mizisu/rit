@@ -43,6 +43,36 @@ def test_parse_thread_resolution_result_returns_true_when_state_matches() -> Non
     assert result is True
 
 
+def test_parse_thread_resolution_result_uses_direct_mapping_lookup() -> None:
+    class NoItemsDict(dict):
+        def items(self):
+            raise AssertionError("GraphQL mutation parser should not copy mappings")
+
+    result = parse_thread_resolution_result(
+        NoItemsDict(
+            {
+                "data": NoItemsDict(
+                    {
+                        "resolveReviewThread": NoItemsDict(
+                            {
+                                "thread": NoItemsDict(
+                                    {
+                                        "isResolved": True,
+                                    }
+                                )
+                            }
+                        )
+                    }
+                )
+            }
+        ),
+        mutation_name="resolveReviewThread",
+        expected_resolved=True,
+    )
+
+    assert result is True
+
+
 def test_parse_thread_resolution_mutation_result_decodes_request_result() -> None:
     request = thread_resolution_mutation_request("thread-1", resolve=True)
 

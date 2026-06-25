@@ -103,6 +103,66 @@ def test_append_file_batch_updates_counts_and_indexes_comments() -> None:
     assert state.files[0].comments == [comment]
 
 
+def test_append_file_batch_preserves_known_total_without_max(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = IngestState(files_total_count=4)
+
+    monkeypatch.setattr(
+        file_ingest_module,
+        "max",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("known file total should not call max")
+        ),
+        raising=False,
+    )
+
+    append_file_batch(state, [PRFile(filename="src/app.py")])
+
+    assert state.files_loaded_count == 1
+    assert state.files_total_count == 4
+
+
+def test_append_file_batch_indexes_files_without_single_file_append_helper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    comment = PRComment(id=101, body="note", path="src/app.py")
+    state = IngestState(
+        comments_by_file={"src/app.py": [comment]},
+        files_total_count=1,
+    )
+
+    def append_file_forbidden(*args: object, **kwargs: object) -> None:
+        raise AssertionError("batch append should not allocate per-file results")
+
+    monkeypatch.setattr(
+        file_ingest_module,
+        "append_file",
+        append_file_forbidden,
+        raising=False,
+    )
+
+    added = append_file_batch(
+        state,
+        [
+            PRFile(filename="src/app.py"),
+            PRFile(filename="src/lib.py"),
+            PRFile(filename="src/app.py"),
+        ],
+    )
+
+    assert added == 2
+    assert state.files_loaded_count == 2
+    assert state.files_total_count == 2
+    assert [file.filename for file in state.files] == ["src/app.py", "src/lib.py"]
+    assert state.files_by_filename == {
+        "src/app.py": state.files[0],
+        "src/lib.py": state.files[1],
+    }
+    assert state.files[0].comments == [comment]
+    assert state.files[1].comments == []
+
+
 def test_append_parsed_files_caches_diff_and_counts_added_files() -> None:
     state = IngestState()
 
@@ -403,6 +463,55 @@ async def test_load_rest_file_pages_posts_first_page_then_final_state() -> None:
     assert progress_updates == [(100, 101), (101, 101)]
     assert state.files_loading == LoadingState.LOADED
     assert [file.filename for file in state.files][-1] == "file-100.py"
+
+
+@pytest.mark.asyncio
+async def test_load_rest_file_pages_reuses_progress_between_decisions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_page = [PRFile(filename=f"file-{index}.py") for index in range(100)]
+    second_page = [PRFile(filename="file-100.py")]
+    state = IngestState(pr=PR(number=123, changedFiles=101), files_total_count=101)
+    progress_calls = 0
+    real_file_page_progress = file_ingest_module.file_page_progress
+
+    def counting_file_page_progress(state: IngestState):
+        nonlocal progress_calls
+        progress_calls += 1
+        return real_file_page_progress(state)
+
+    async def get_page(
+        pr_number: int,
+        *,
+        page: int,
+        per_page: int,
+    ) -> list[PRFile]:
+        return first_page
+
+    async def get_pages(
+        pr_number: int,
+        *,
+        pages: tuple[int, ...],
+        per_page: int,
+    ) -> dict[int, list[PRFile]]:
+        return {2: second_page}
+
+    monkeypatch.setattr(
+        file_ingest_module,
+        "file_page_progress",
+        counting_file_page_progress,
+    )
+
+    loaded = await load_rest_file_pages(
+        state,
+        pr_number=123,
+        get_page=get_page,
+        get_pages=get_pages,
+        on_progress=lambda: None,
+    )
+
+    assert loaded is True
+    assert progress_calls == 2
 
 
 @pytest.mark.asyncio

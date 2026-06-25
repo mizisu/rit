@@ -61,6 +61,43 @@ def test_line_index_for_location_finds_line_in_combined_file_section() -> None:
     )
 
 
+def test_line_index_for_location_uses_file_specific_index_without_scanning() -> None:
+    class ExplodingLines(list[DiffLine]):
+        def __iter__(self):
+            raise AssertionError("line lookup should use file-specific index")
+
+    diff = FileDiff(
+        filename="All files",
+        hunks=[
+            DiffHunk(
+                old_start=9,
+                old_count=1,
+                new_start=9,
+                new_count=1,
+                starts_file=True,
+                file_path="two.py",
+                lines=ExplodingLines(
+                    [DiffLine(old_line_no=9, new_line_no=9, line_index=1)]
+                ),
+            ),
+        ],
+    )
+
+    assert (
+        line_index_for_location(
+            diff,
+            "two.py",
+            9,
+            "RIGHT",
+            old_line_index={},
+            new_line_index={},
+            old_file_line_index={},
+            new_file_line_index={("two.py", 9): 77},
+        )
+        == 77
+    )
+
+
 def test_line_index_for_location_stops_at_next_file_section() -> None:
     diff = FileDiff(
         filename="All files",
@@ -176,6 +213,35 @@ def test_full_preview_location_label_includes_trimmed_hunk_header() -> None:
         total_lines=9,
         diff=diff,
         hunk_index=1,
+    )
+
+    assert label == "line 4/9  def render()"
+
+
+def test_full_preview_location_label_reuses_clean_hunk_header_without_strip() -> None:
+    class CleanHeader(str):
+        def strip(self, *_args: object, **_kwargs: object) -> str:
+            raise AssertionError("clean hunk headers should not be stripped")
+
+    diff = FileDiff(
+        filename="src/app.py",
+        hunks=[
+            DiffHunk(
+                old_start=4,
+                old_count=1,
+                new_start=4,
+                new_count=1,
+                header=CleanHeader("def render()"),
+            ),
+        ],
+    )
+    line = DiffLine(old_line_no=4, new_line_no=4, line_index=0)
+
+    label = full_preview_location_label(
+        line=line,
+        total_lines=9,
+        diff=diff,
+        hunk_index=0,
     )
 
     assert label == "line 4/9  def render()"

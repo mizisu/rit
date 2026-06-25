@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+import rit.services.pr_reviewer_request as pr_reviewer_request
 from rit.services.pr_reviewer_request import (
     add_assignees,
     assignee_payload,
@@ -51,6 +52,60 @@ def test_reviewer_payload_omits_empty_groups() -> None:
 def test_reviewer_payload_returns_empty_for_empty_input() -> None:
     assert reviewer_payload(reviewers=None, team_reviewers=None) == {}
     assert reviewer_payload(reviewers=[], team_reviewers=[]) == {}
+
+
+def test_parse_reviewer_user_candidates_empty_output_skips_model_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Adapter:
+        def validate_python(self, _data: object) -> list[object]:
+            raise AssertionError("empty reviewer user candidates should not validate")
+
+    monkeypatch.setattr(pr_reviewer_request, "_PRUserListAdapter", Adapter())
+
+    assert parse_reviewer_user_candidates("") == []
+
+
+def test_parse_reviewer_user_candidates_single_item_skips_list_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Adapter:
+        def validate_python(self, _data: object) -> list[object]:
+            raise AssertionError("single reviewer user candidate should not validate list")
+
+    monkeypatch.setattr(pr_reviewer_request, "_PRUserListAdapter", Adapter())
+
+    users = parse_reviewer_user_candidates('[{"login": "alice"}]')
+
+    assert len(users) == 1
+    assert users[0].login == "alice"
+
+
+def test_parse_reviewer_team_candidates_empty_output_skips_model_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Adapter:
+        def validate_python(self, _data: object) -> list[object]:
+            raise AssertionError("empty reviewer team candidates should not validate")
+
+    monkeypatch.setattr(pr_reviewer_request, "_PRTeamListAdapter", Adapter())
+
+    assert parse_reviewer_team_candidates("") == []
+
+
+def test_parse_reviewer_team_candidates_single_item_skips_list_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Adapter:
+        def validate_python(self, _data: object) -> list[object]:
+            raise AssertionError("single reviewer team candidate should not validate list")
+
+    monkeypatch.setattr(pr_reviewer_request, "_PRTeamListAdapter", Adapter())
+
+    teams = parse_reviewer_team_candidates('[{"name": "Backend", "slug": "backend"}]')
+
+    assert len(teams) == 1
+    assert teams[0].slug == "backend"
 
 
 def test_assignee_payload_includes_assignees() -> None:
