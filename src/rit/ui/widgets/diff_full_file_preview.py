@@ -81,13 +81,19 @@ def full_file_preview_target(
 def full_file_anchor_line_index(
     line_no: int | None,
     line_index_by_new_number: Mapping[int, int],
+    *,
+    available_line_bounds: tuple[int, int] | None = None,
 ) -> int | None:
     """Return the full-file preview line index for an anchor line number."""
     if line_no is None or not line_index_by_new_number:
         return None
 
-    available_lines = sorted(line_index_by_new_number)
-    target_line_no = min(max(line_no, available_lines[0]), available_lines[-1])
+    first_line, last_line = (
+        available_line_bounds
+        if available_line_bounds is not None
+        else (min(line_index_by_new_number), max(line_index_by_new_number))
+    )
+    target_line_no = min(max(line_no, first_line), last_line)
     return line_index_by_new_number.get(target_line_no)
 
 
@@ -124,11 +130,13 @@ def nearest_full_file_anchor_for_deleted_line(
             if line.old_line_no != old_line_no or not line.is_deleted:
                 continue
 
-            for next_line in hunk.lines[index + 1 :]:
+            for next_index in range(index + 1, len(hunk.lines)):
+                next_line = hunk.lines[next_index]
                 if next_line.new_line_no is not None:
                     return next_line.new_line_no
 
-            for previous_line in reversed(hunk.lines[:index]):
+            for previous_index in range(index - 1, -1, -1):
+                previous_line = hunk.lines[previous_index]
                 if previous_line.new_line_no is not None:
                     return previous_line.new_line_no + 1
 
@@ -248,6 +256,7 @@ def _build_full_file_preview_hunks(
     *,
     source_diff: FileDiff | None,
 ) -> list[DiffHunk]:
+    file_change_counts = source_diff.change_counts if source_diff else (0, 0)
     if not diff_lines:
         return [
             DiffHunk(
@@ -273,8 +282,8 @@ def _build_full_file_preview_hunks(
                 lines=diff_lines,
                 starts_file=True,
                 file_path=filename,
-                file_additions=source_diff.total_additions if source_diff else 0,
-                file_deletions=source_diff.total_deletions if source_diff else 0,
+                file_additions=file_change_counts[0],
+                file_deletions=file_change_counts[1],
             )
         ]
 
@@ -290,8 +299,8 @@ def _build_full_file_preview_hunks(
                 lines=diff_lines,
                 starts_file=True,
                 file_path=filename,
-                file_additions=source_diff.total_additions,
-                file_deletions=source_diff.total_deletions,
+                file_additions=file_change_counts[0],
+                file_deletions=file_change_counts[1],
             )
         ]
 
@@ -309,7 +318,7 @@ def _build_full_file_preview_hunks(
                     end=start - 1,
                     header=_full_preview_context_label(range_index),
                     starts_file=not hunks,
-                    source_diff=source_diff,
+                    file_change_counts=file_change_counts,
                 )
             )
 
@@ -325,7 +334,7 @@ def _build_full_file_preview_hunks(
                     source_hunk.header,
                 ),
                 starts_file=not hunks,
-                source_diff=source_diff,
+                file_change_counts=file_change_counts,
                 old_start=source_hunk.old_start,
                 old_count=source_hunk.old_count,
                 new_start=source_hunk.new_start,
@@ -343,7 +352,7 @@ def _build_full_file_preview_hunks(
                 end=len(diff_lines),
                 header=f"context after hunk {total_changes}",
                 starts_file=not hunks,
-                source_diff=source_diff,
+                file_change_counts=file_change_counts,
             )
         )
 
@@ -390,10 +399,18 @@ def _full_preview_change_label(
     header: str,
 ) -> str:
     label = f"change hunk {range_index}/{total_changes}"
-    header = header.strip()
+    header = _clean_hunk_header(header)
     if header:
         label += f"  {header}"
     return label
+
+
+def _clean_hunk_header(header: str) -> str:
+    if not header:
+        return ""
+    if header[0].isspace() or header[-1].isspace():
+        return header.strip()
+    return header
 
 
 def _make_full_preview_hunk(
@@ -404,22 +421,27 @@ def _make_full_preview_hunk(
     end: int,
     header: str,
     starts_file: bool,
-    source_diff: FileDiff,
+    file_change_counts: tuple[int, int],
     old_start: int | None = None,
     old_count: int | None = None,
     new_start: int | None = None,
     new_count: int | None = None,
 ) -> DiffHunk:
     count = max(0, end - start + 1)
+    hunk_lines = (
+        diff_lines
+        if start == 1 and end == len(diff_lines)
+        else diff_lines[start - 1 : end]
+    )
     return DiffHunk(
         old_start=old_start if old_start is not None else start,
         old_count=old_count if old_count is not None else count,
         new_start=new_start if new_start is not None else start,
         new_count=new_count if new_count is not None else count,
         header=header,
-        lines=diff_lines[start - 1 : end],
+        lines=hunk_lines,
         starts_file=starts_file,
         file_path=filename if starts_file else None,
-        file_additions=source_diff.total_additions,
-        file_deletions=source_diff.total_deletions,
+        file_additions=file_change_counts[0],
+        file_deletions=file_change_counts[1],
     )

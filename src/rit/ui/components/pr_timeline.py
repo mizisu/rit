@@ -1,19 +1,19 @@
 """PR Timeline: description, comments, reviews, and thread navigation."""
 
 import asyncio
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Literal
 
+from textual._context import NoActiveAppError
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
-from textual.message_pump import NoActiveAppError
-from textual.worker import Worker, WorkerState
-
 from textual.widget import Widget
 from textual.widgets import Collapsible
+from textual.worker import Worker, WorkerState
 
 from rit.core.datetime_utils import (
     datetime_sort_key,
@@ -21,20 +21,20 @@ from rit.core.datetime_utils import (
 )
 from rit.state.models import (
     PR,
-    PRComment,
-    PRReview,
-    PRIssueComment,
-    ReviewState,
     CommentThread,
-)
-from rit.ui.components.pr_timeline_projection import (
-    build_timeline_items,
-    review_timeline_time,
+    PRComment,
+    PRIssueComment,
+    PRReview,
+    ReviewState,
 )
 from rit.ui.components.pr_timeline_formatting import (
     pending_review_summary_header,
     resolved_thread_title,
     thread_title,
+)
+from rit.ui.components.pr_timeline_projection import (
+    build_timeline_items,
+    review_timeline_time,
 )
 from rit.ui.widgets.comment_card import CommentCard
 from rit.ui.widgets.comment_editor import InlineCommentEditor
@@ -47,14 +47,113 @@ __all__ = (
     "INITIAL_TIMELINE_BODY_COUNT",
     "PRTimeline",
     "TIMELINE_BODY_MOUNT_DELAY",
+    "TIMELINE_BODY_MOUNT_MAX_DELAY",
 )
 
 
-MOUNT_BATCH_SIZE = 1
+MOUNT_BATCH_SIZE = 8
 QUEUED_REFRESH_DELAY = 0.05
 TIMELINE_BODY_MOUNT_DELAY = 0.85
 TIMELINE_BODY_MOUNT_STAGGER_DELAY = 0.08
+TIMELINE_BODY_MOUNT_MAX_DELAY = 1.65
 INITIAL_TIMELINE_BODY_COUNT = 3
+_REVIEW_STATE_LABELS: dict[ReviewState, str] = {
+    ReviewState.APPROVED: "[#a6da95]approved[/]",
+    ReviewState.CHANGES_REQUESTED: "[#ed8796]requested changes[/]",
+    ReviewState.COMMENTED: "[#6e738d]reviewed[/]",
+    ReviewState.PENDING: "[#eed49f]pending[/]",
+    ReviewState.DISMISSED: "[#6e738d]dismissed[/]",
+}
+
+
+def _review_state_display(state: ReviewState) -> str:
+    return _REVIEW_STATE_LABELS.get(state, "reviewed")
+
+
+def _has_body(body: str) -> bool:
+    return bool(body) and not body.isspace()
+
+
+def _author_login(user: object) -> str:
+    login = getattr(user, "login", "")
+    return login if isinstance(login, str) else ""
+
+
+def _timeline_render_signature(
+    *,
+    issue_comments: Iterable[PRIssueComment],
+    reviews: Iterable[PRReview],
+    comments: Iterable[PRComment],
+) -> tuple[object, ...]:
+    return (
+        tuple(
+            sorted(
+                (
+                    comment.id,
+                    _author_login(comment.user),
+                    comment.body,
+                    comment.created_at,
+                )
+                for comment in issue_comments
+            )
+        ),
+        tuple(
+            sorted(
+                (
+                    review.id,
+                    _author_login(review.user),
+                    review.state.name,
+                    review.body,
+                    review.created_at,
+                    review.submitted_at,
+                )
+                for review in reviews
+            )
+        ),
+        tuple(
+            sorted(
+                (
+                    comment.id,
+                    _author_login(comment.user),
+                    comment.body,
+                    comment.path,
+                    comment.anchor_line,
+                    comment.created_at,
+                    comment.in_reply_to_id,
+                    comment.pull_request_review_id,
+                    comment.diff_hunk,
+                )
+                for comment in comments
+            )
+        ),
+    )
+
+
+def _navigable_items_by_region_y(items: Iterable[Widget]) -> list[Widget]:
+    iterator = iter(items)
+    try:
+        first = next(iterator)
+    except StopIteration:
+        return []
+
+    first_y = first.region.y
+    try:
+        second = next(iterator)
+    except StopIteration:
+        return [first]
+
+    second_y = second.region.y
+    try:
+        third = next(iterator)
+    except StopIteration:
+        if first_y <= second_y:
+            return [first, second]
+        return [second, first]
+
+    ordered = [first, second, third]
+    ordered.extend(iterator)
+    ordered.sort(key=lambda widget: widget.region.y)
+    return ordered
 
 
 class PRTimeline(Vertical):
@@ -87,6 +186,11 @@ class PRTimeline(Vertical):
         self._refresh_requested: bool = False
         self._queued_refresh_pending: bool = False
         self._preserve_initial_scroll_home: bool = True
+        self._navigable_item_source: list[Widget] = []
+        self._timeline_render_signature: tuple[object, ...] | None = None
+        self._description_card: CommentCard | None = None
+        self._comments_container: Vertical | None = None
+        self._issue_comment_editor: InlineCommentEditor | None = None
 
     def compose(self) -> ComposeResult:
         yield CommentCard(
@@ -131,17 +235,34 @@ class PRTimeline(Vertical):
         self._scroll_container = container
 
     def start_issue_comment(self) -> None:
-        self.query_one("#issue-comment-editor", InlineCommentEditor).open()
+        self._issue_comment_editor_widget().open()
 
     def close_issue_comment(self) -> None:
-        self.query_one("#issue-comment-editor", InlineCommentEditor).close()
+        self._issue_comment_editor_widget().close()
+
+    def _description_card_widget(self) -> CommentCard:
+        if self._description_card is None:
+            self._description_card = self.query_one("#pr-description-card", CommentCard)
+        return self._description_card
+
+    def _comments_container_widget(self) -> Vertical:
+        if self._comments_container is None:
+            self._comments_container = self.query_one("#comments-container", Vertical)
+        return self._comments_container
+
+    def _issue_comment_editor_widget(self) -> InlineCommentEditor:
+        if self._issue_comment_editor is None:
+            self._issue_comment_editor = self.query_one(
+                "#issue-comment-editor", InlineCommentEditor
+            )
+        return self._issue_comment_editor
 
     def refresh_description(self, pr: PR | None) -> None:
         if not pr:
             return
 
         author_name = pr.user.login if pr.user else "unknown"
-        description_card = self.query_one("#pr-description-card", CommentCard)
+        description_card = self._description_card_widget()
         description_card.remove_class("timeline-loading")
         description_card.set_content(
             f"[bold]{author_name}[/] [#6e738d]opened this PR[/]",
@@ -150,6 +271,9 @@ class PRTimeline(Vertical):
         )
 
     def refresh_timeline(self) -> None:
+        if self._current_timeline_render_signature() == self._timeline_render_signature:
+            return
+
         if self._refresh_worker is not None and self._refresh_worker.state in {
             WorkerState.PENDING,
             WorkerState.RUNNING,
@@ -197,56 +321,75 @@ class PRTimeline(Vertical):
         self._queued_refresh_pending = False
         self.refresh_timeline()
 
-    async def _build_timeline_async(self) -> None:
+    def _current_timeline_render_signature(self) -> tuple[object, ...]:
         state = self.store.state
-
-        container = self.query_one("#comments-container", Vertical)
-
-        await container.remove_children()
-        self._thread_widget_info.clear()
-
-        timeline_items = build_timeline_items(
+        return _timeline_render_signature(
             issue_comments=state.issue_comments,
             reviews=state.reviews,
             comments=state.comments,
         )
 
-        if not timeline_items:
-            return
+    async def _build_timeline_async(self) -> None:
+        state = self.store.state
+        render_signature = self._current_timeline_render_signature()
 
-        for i, item in enumerate(timeline_items):
-            body_mount_delay = self._body_mount_delay_for_index(i)
-            if item.kind == "issue_comment" and item.issue_comment is not None:
-                self._mount_issue_comment(
-                    container,
-                    item.issue_comment,
-                    body_mount_delay=body_mount_delay,
-                )
-            elif item.kind == "review" and item.review is not None:
-                self._mount_review_with_threads(
-                    container,
-                    item.review,
-                    item.threads,
-                    body_mount_delay=body_mount_delay,
-                )
-            elif item.kind == "thread" and item.thread is not None:
-                self._mount_comment_thread(
-                    container,
-                    item.thread,
-                    body_mount_delay=body_mount_delay,
-                )
+        container = self._comments_container_widget()
 
-            if (i + 1) % MOUNT_BATCH_SIZE == 0:
-                await asyncio.sleep(0)
+        with self.app.batch_update():
+            await container.remove_children()
+            self._thread_widget_info.clear()
+            self._reset_navigable_item_source()
 
-        self._invalidate_navigable_items()
+            timeline_items = build_timeline_items(
+                issue_comments=state.issue_comments,
+                reviews=state.reviews,
+                comments=state.comments,
+            )
+
+            if not timeline_items:
+                self._timeline_render_signature = render_signature
+                return
+
+            for i, item in enumerate(timeline_items):
+                body_mount_delay = self._body_mount_delay_for_index(i)
+                if item.kind == "issue_comment" and item.issue_comment is not None:
+                    self._mount_issue_comment(
+                        container,
+                        item.issue_comment,
+                        body_mount_delay=body_mount_delay,
+                    )
+                elif item.kind == "review" and item.review is not None:
+                    self._mount_review_with_threads(
+                        container,
+                        item.review,
+                        item.threads,
+                        body_mount_delay=body_mount_delay,
+                    )
+                elif item.kind == "thread" and item.thread is not None:
+                    self._mount_comment_thread(
+                        container,
+                        item.thread,
+                        body_mount_delay=body_mount_delay,
+                    )
+
+                if i == 0 or (i + 1) % MOUNT_BATCH_SIZE == 0:
+                    await asyncio.sleep(0)
+
+            self._invalidate_navigable_items()
+            self._timeline_render_signature = render_signature
 
     def _body_mount_delay_for_index(self, index: int) -> float:
         if index < INITIAL_TIMELINE_BODY_COUNT:
             return TIMELINE_BODY_MOUNT_DELAY
-        return TIMELINE_BODY_MOUNT_DELAY + (
-            index - INITIAL_TIMELINE_BODY_COUNT + 1
-        ) * TIMELINE_BODY_MOUNT_STAGGER_DELAY
+        staggered_delay = (
+            TIMELINE_BODY_MOUNT_DELAY
+            + (index - INITIAL_TIMELINE_BODY_COUNT + 1)
+            * TIMELINE_BODY_MOUNT_STAGGER_DELAY
+        )
+        return min(
+            TIMELINE_BODY_MOUNT_MAX_DELAY,
+            staggered_delay,
+        )
 
     def _mount_issue_comment(
         self,
@@ -255,22 +398,22 @@ class PRTimeline(Vertical):
         *,
         body_mount_delay: float = TIMELINE_BODY_MOUNT_DELAY,
     ) -> None:
-        if not comment.body or not comment.body.strip():
+        if not _has_body(comment.body):
             return
 
         time_str = self._format_time(comment.created_at)
         user_name = comment.user.login if comment.user else "unknown"
         header_text = f"[bold]{user_name}[/] [#6e738d]commented {time_str}[/]"
 
-        container.mount(
-            CommentCard(
-                header_text,
-                comment.body,
-                classes="comment-box",
-                markdown_base_url=self._markdown_base_url(),
-                body_mount_delay=body_mount_delay,
-            )
+        card = CommentCard(
+            header_text,
+            comment.body,
+            classes="comment-box",
+            markdown_base_url=self._markdown_base_url(),
+            body_mount_delay=body_mount_delay,
         )
+        container.mount(card)
+        self._register_navigable_item(card)
 
     def _mount_review(
         self,
@@ -278,31 +421,26 @@ class PRTimeline(Vertical):
         review: PRReview,
         *,
         body_mount_delay: float = TIMELINE_BODY_MOUNT_DELAY,
+        body_is_known_present: bool = False,
     ) -> None:
-        if not review.body or not review.body.strip():
+        if not body_is_known_present and not _has_body(review.body):
             return
 
         time_str = self._format_time(review_timeline_time(review, []))
-        state_display = {
-            ReviewState.APPROVED: "[#a6da95]approved[/]",
-            ReviewState.CHANGES_REQUESTED: "[#ed8796]requested changes[/]",
-            ReviewState.COMMENTED: "[#6e738d]reviewed[/]",
-            ReviewState.PENDING: "[#eed49f]pending[/]",
-            ReviewState.DISMISSED: "[#6e738d]dismissed[/]",
-        }.get(review.state, "reviewed")
+        state_display = _review_state_display(review.state)
 
         user_name = review.user.login if review.user else "unknown"
         header_text = f"[bold]{user_name}[/] {state_display} {time_str}"
 
-        container.mount(
-            CommentCard(
-                header_text,
-                review.body,
-                classes="comment-box",
-                markdown_base_url=self._markdown_base_url(),
-                body_mount_delay=body_mount_delay,
-            )
+        card = CommentCard(
+            header_text,
+            review.body,
+            classes="comment-box",
+            markdown_base_url=self._markdown_base_url(),
+            body_mount_delay=body_mount_delay,
         )
+        container.mount(card)
+        self._register_navigable_item(card)
 
     def _mount_review_with_threads(
         self,
@@ -319,9 +457,7 @@ class PRTimeline(Vertical):
                 threads,
                 body_mount_delay=body_mount_delay,
             )
-            for thread in sorted(
-                threads, key=lambda t: datetime_sort_key(t.created_at)
-            ):
+            for thread in threads:
                 self._mount_comment_thread(
                     container,
                     thread,
@@ -329,14 +465,15 @@ class PRTimeline(Vertical):
                 )
             return
 
-        if review.body and review.body.strip():
+        if _has_body(review.body):
             self._mount_review(
                 container,
                 review,
                 body_mount_delay=body_mount_delay,
+                body_is_known_present=True,
             )
 
-        for thread in sorted(threads, key=lambda t: datetime_sort_key(t.created_at)):
+        for thread in threads:
             self._mount_comment_thread(
                 container,
                 thread,
@@ -351,15 +488,15 @@ class PRTimeline(Vertical):
         *,
         body_mount_delay: float = TIMELINE_BODY_MOUNT_DELAY,
     ) -> None:
-        container.mount(
-            CommentCard(
-                self._pending_review_summary_header(review, threads),
-                review.body,
-                classes="comment-box pending-review-summary",
-                markdown_base_url=self._markdown_base_url(),
-                body_mount_delay=body_mount_delay,
-            )
+        card = CommentCard(
+            self._pending_review_summary_header(review, threads),
+            review.body,
+            classes="comment-box pending-review-summary",
+            markdown_base_url=self._markdown_base_url(),
+            body_mount_delay=body_mount_delay,
         )
+        container.mount(card)
+        self._register_navigable_item(card)
 
     def _pending_review_summary_header(
         self,
@@ -381,12 +518,32 @@ class PRTimeline(Vertical):
         *,
         body_mount_delay: float = TIMELINE_BODY_MOUNT_DELAY,
     ) -> None:
-        container.mount(
-            self._build_comment_thread_item(
-                thread,
-                body_mount_delay=body_mount_delay,
-            )
+        item = self._build_comment_thread_item(
+            thread,
+            body_mount_delay=body_mount_delay,
         )
+        container.mount(item)
+        self._register_navigable_item(item)
+
+    def _reset_navigable_item_source(self) -> None:
+        self._navigable_item_source = []
+        try:
+            self._register_navigable_item(self._description_card_widget())
+        except NoMatches:
+            pass
+
+    def _register_navigable_item(self, widget: Widget) -> None:
+        self._navigable_item_source.append(widget)
+
+    def _cached_navigable_items(self) -> list[Widget]:
+        return [
+            item
+            for item in self._navigable_item_source
+            if item.is_mounted
+            and (
+                not isinstance(item, Collapsible) or self._is_visible_collapsible(item)
+            )
+        ]
 
     def _build_comment_thread_item(
         self,
@@ -487,23 +644,35 @@ class PRTimeline(Vertical):
             current_widget = self._navigable_items[self._current_index]
 
         self._navigable_items = []
+        cached_items = self._cached_navigable_items()
 
-        # Note: .thread-container is excluded because it's inside Collapsible
-        # and returns y=0 when collapsed, causing sorting issues
-        all_items = list(self.query(".description-container, .comment-box, Collapsible"))
+        if cached_items:
+            self._navigable_items = cached_items
+        else:
+            # Note: .thread-container is excluded because it's inside Collapsible
+            # and returns y=0 when collapsed, causing sorting issues
+            filtered_items = (
+                item
+                for item in self.query(
+                    ".description-container, .comment-box, Collapsible"
+                )
+                if not isinstance(item, Collapsible)
+                or self._is_visible_collapsible(item)
+            )
 
-        filtered_items: list[Widget] = [
-            item
-            for item in all_items
-            if not isinstance(item, Collapsible) or self._is_visible_collapsible(item)
-        ]
+            self._navigable_items = _navigable_items_by_region_y(filtered_items)
 
-        self._navigable_items = sorted(filtered_items, key=lambda widget: widget.region.y)
-
-        if current_widget and current_widget in self._navigable_items:
-            self._current_index = self._navigable_items.index(current_widget)
-        elif current_widget:
+        current_index_still_valid = (
+            current_widget is not None
+            and 0 <= self._current_index < len(self._navigable_items)
+            and self._navigable_items[self._current_index] is current_widget
+        )
+        if current_widget and not current_index_still_valid:
             self._current_index = -1
+            for index, item in enumerate(self._navigable_items):
+                if item is current_widget:
+                    self._current_index = index
+                    break
 
         self._navigable_items_valid = True
 
@@ -701,10 +870,10 @@ class PRTimeline(Vertical):
 
     def refresh_thread_metadata(self) -> None:
         """Update rendered thread state after authoritative metadata arrives."""
-        keep_view_at_top = self._preserve_initial_scroll_home or self._is_scroll_at_top()
-        for widget, (_, root_comment_id, _) in list(
-            self._thread_widget_info.items()
-        ):
+        keep_view_at_top = (
+            self._preserve_initial_scroll_home or self._is_scroll_at_top()
+        )
+        for widget, (_, root_comment_id, _) in self._thread_widget_info.items():
             thread_info = self.store.get_thread_info(root_comment_id)
             if thread_info is None:
                 continue
@@ -831,9 +1000,7 @@ class PRTimeline(Vertical):
                     )
             except Exception as e:
                 self.log.error(f"Failed to toggle resolve: {e}")
-                self._update_thread_resolved_ui(
-                    thread_id, root_comment_id, is_resolved
-                )
+                self._update_thread_resolved_ui(thread_id, root_comment_id, is_resolved)
                 return (False, is_resolved)
 
             if success:

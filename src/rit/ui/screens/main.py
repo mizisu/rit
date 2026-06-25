@@ -257,8 +257,19 @@ class MainScreen(Screen[None]):
             if self.pr_info.cancel_comment_refresh():
                 self._pr_info_refresh_pending = True
             self.call_after_refresh(
-                lambda: self._focus_files_tree(preserve_existing_focus=True)
+                lambda: self._focus_files_diff(preserve_existing_focus=True)
             )
+
+    def _focus_files_diff(self, *, preserve_existing_focus: bool = False) -> None:
+        if self.current_tab != 1:
+            return
+        if preserve_existing_focus and self._current_files_focus_target() is not None:
+            return
+
+        try:
+            self.file_changes.diff_view.focus()
+        except NoMatches:
+            pass
 
     def _focus_files_tree(self, *, preserve_existing_focus: bool = False) -> None:
         if self.current_tab != 1:
@@ -309,11 +320,7 @@ class MainScreen(Screen[None]):
         self, _event: PRStore.PRDiscussionMetadataLoaded
     ) -> None:
         self.file_changes.file_tree.refresh_files()
-        self.run_worker(
-            self._refresh_current_diff_after_discussion(),
-            exclusive=False,
-            name="_refresh_current_diff_after_metadata",
-        )
+        self.file_changes.diff_view.refresh_thread_metadata()
         if self.current_tab == 0:
             self.pr_info.refresh_thread_metadata()
 
@@ -695,7 +702,9 @@ class MainScreen(Screen[None]):
             )
             return
 
-        target = self.file_changes.diff_view.inline_comment_target()
+        diff_view = self.file_changes.diff_view
+        target = diff_view.inline_comment_target()
+        draft_index = diff_view.inline_comment_draft_index()
         if target is None:
             self.post_message(
                 Flash("No diff line selected", style="warning", duration=2.0)
@@ -706,7 +715,11 @@ class MainScreen(Screen[None]):
         if event.mode == "post":
             self.run_worker(
                 self._post_inline_comment(
-                    event.body, path=path, line=line, side=side
+                    event.body,
+                    path=path,
+                    line=line,
+                    side=side,
+                    draft_index=draft_index,
                 ),
                 exclusive=False,
                 name="_post_inline_comment",
@@ -714,7 +727,11 @@ class MainScreen(Screen[None]):
             return
         self.run_worker(
             self._save_inline_comment_draft(
-                event.body, path=path, line=line, side=side
+                event.body,
+                path=path,
+                line=line,
+                side=side,
+                draft_index=draft_index,
             ),
             exclusive=False,
             name="_save_inline_comment_draft",
@@ -852,24 +869,21 @@ class MainScreen(Screen[None]):
         path: str,
         line: int,
         side: Literal["LEFT", "RIGHT"],
+        draft_index: int | None = None,
     ) -> bool:
         diff_view = self.file_changes.diff_view
         current_file = diff_view.current_file
         current_line = diff_view.cursor_line
         current_pane = diff_view.active_pane
 
-        await self.store.submit_inline_comment(
+        await self.store.post_inline_comment(
             body,
             path=path,
             line=line,
             side=side,
+            draft_index=draft_index,
         )
         await diff_view.close_inline_comment_editor()
-        await self.store.remove_pending_inline_comment(
-            path=path,
-            line=line,
-            side=side,
-        )
         await self.store.refresh_review_data()
         self.pr_info.refresh_comments()
         self.file_changes.file_tree.refresh_files()
@@ -892,36 +906,23 @@ class MainScreen(Screen[None]):
         path: str,
         line: int,
         side: Literal["LEFT", "RIGHT"],
+        draft_index: int | None = None,
     ) -> bool:
         diff_view = self.file_changes.diff_view
         current_file = diff_view.current_file
         current_line = diff_view.cursor_line
         current_pane = diff_view.active_pane
 
-        snapshot = self.store.snapshot_pending_review()
-        self.store.save_pending_inline_comment(
-            body,
-            path=path,
-            line=line,
-            side=side,
-        )
-        rollback_version = self.store.pending_review_version
-
         await diff_view.close_inline_comment_editor()
-        self.file_changes.file_tree.refresh_files()
-        await self._refresh_diff_preserving_cursor(
-            current_file,
-            current_line,
-            current_pane,
-            focus_diff=True,
-        )
-
         try:
-            await self.store.sync_pending_review(
-                rollback_to=snapshot,
-                rollback_if_version=rollback_version,
+            await self.store.queue_pending_inline_comment(
+                body,
+                path=path,
+                line=line,
+                side=side,
+                draft_index=draft_index,
             )
-        except Exception:
+        finally:
             self.file_changes.file_tree.refresh_files()
             await self._refresh_diff_preserving_cursor(
                 current_file,
@@ -929,7 +930,6 @@ class MainScreen(Screen[None]):
                 current_pane,
                 focus_diff=True,
             )
-            raise
 
         return True
 
@@ -943,30 +943,15 @@ class MainScreen(Screen[None]):
             return False
 
         path, line, side = target
-        snapshot = self.store.snapshot_pending_review()
-        deleted = self.store.delete_pending_inline_comment(
-            path=path,
-            line=line,
-            side=side,
-        )
-        if not deleted:
-            return False
-        rollback_version = self.store.pending_review_version
-
-        self.file_changes.file_tree.refresh_files()
-        await self._refresh_diff_preserving_cursor(
-            current_file,
-            current_line,
-            current_pane,
-            focus_diff=True,
-        )
-
+        draft_index = diff_view.active_pending_draft_index()
         try:
-            await self.store.sync_pending_review(
-                rollback_to=snapshot,
-                rollback_if_version=rollback_version,
+            deleted = await self.store.remove_pending_inline_comment(
+                path=path,
+                line=line,
+                side=side,
+                draft_index=draft_index,
             )
-        except Exception:
+        finally:
             self.file_changes.file_tree.refresh_files()
             await self._refresh_diff_preserving_cursor(
                 current_file,
@@ -974,9 +959,7 @@ class MainScreen(Screen[None]):
                 current_pane,
                 focus_diff=True,
             )
-            raise
-
-        return True
+        return deleted
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if (
@@ -1200,8 +1183,13 @@ class MainScreen(Screen[None]):
         self._focus_files_tree()
 
     def action_toggle_file_tree(self) -> None:
-        if self.current_tab == 1:
-            self.file_changes.toggle_file_tree()
+        if self.current_tab != 1:
+            return
+
+        was_hidden = not self.file_changes.file_tree.display
+        self.file_changes.toggle_file_tree()
+        if was_hidden:
+            self._focus_files_tree()
 
     def action_prev_file(self) -> None:
         self.file_changes.select_prev_file()

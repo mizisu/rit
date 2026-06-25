@@ -11,6 +11,8 @@ their parent diff line.
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
+from collections.abc import Iterator, Sequence
+from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, Literal
 
 from textual.containers import Horizontal, VerticalScroll
@@ -103,34 +105,110 @@ def build_comment_map(view: DiffView) -> None:
 
     threads = view.store.state.review_threads
     if not threads:
-        view._comment_line_indices = sorted(view._pending_comment_drafts_by_line)
+        view._comment_line_indices = _comment_line_indices_for_keys(
+            view._pending_comment_drafts_by_line.keys()
+        )
         return
 
     for thread in threads:
-        if thread.path not in file_paths:
-            continue
-        root = thread.root_comment
-        if root is None:
-            continue
+        if thread.path in file_paths:
+            _add_thread_to_comment_map(view, thread)
 
-        line_index = _resolve_line_index(view, root, thread=thread)
-        if line_index is not None:
-            view._comment_threads_by_line.setdefault(line_index, []).append(thread)
-            existing_side = view._comment_side_by_line.get(line_index)
-            root_side = _comment_target_side(root, thread=thread)
-            if existing_side is None:
-                view._comment_side_by_line[line_index] = root_side
-            elif existing_side == "auto":
-                view._comment_side_by_line[line_index] = root_side
-            elif root_side != "auto" and existing_side != root_side:
-                view._comment_side_by_line[line_index] = "auto"
-
-    view._comment_line_indices = sorted(
-        set(view._comment_threads_by_line) | set(view._pending_comment_drafts_by_line)
+    view._comment_line_indices = _comment_line_indices_for_keys(
+        view._comment_threads_by_line.keys()
+        | view._pending_comment_drafts_by_line.keys()
     )
 
 
-def _file_paths_for_current_diff(view: DiffView) -> set[str]:
+def refresh_thread_metadata(view: DiffView) -> None:
+    if not view.store or not view.current_file:
+        return
+
+    file_paths = _file_paths_for_current_diff(view)
+    updated_by_root = {
+        thread.root_comment_id: thread
+        for thread in view.store.state.review_threads
+        if thread.path in file_paths
+    }
+    if not updated_by_root:
+        return
+
+    layout_changed = False
+    for line_index, threads in list(view._comment_threads_by_line.items()):
+        updated_threads: list[ReviewThread] = []
+        for index, thread in enumerate(threads):
+            updated = updated_by_root.get(thread.root_comment_id)
+            if updated is None:
+                updated_threads.append(thread)
+                continue
+
+            updated_threads.append(updated)
+            if updated.is_resolved != thread.is_resolved:
+                layout_changed = True
+            if _update_mounted_thread_widget(view, line_index, index, updated):
+                layout_changed = True
+        view._comment_threads_by_line[line_index] = updated_threads
+
+    if layout_changed:
+        from rit.ui.widgets import diff_virtual as _virtual
+
+        _virtual._rebuild_virtual_layout(view)
+
+
+def _add_thread_to_comment_map(view: DiffView, thread: ReviewThread) -> None:
+    root = thread.root_comment
+    if root is None:
+        return
+
+    line_index = _resolve_line_index(view, root, thread=thread)
+    if line_index is None:
+        return
+
+    view._comment_threads_by_line.setdefault(line_index, []).append(thread)
+    existing_side = view._comment_side_by_line.get(line_index)
+    root_side = _comment_target_side(root, thread=thread)
+    if existing_side is None:
+        view._comment_side_by_line[line_index] = root_side
+    elif existing_side == "auto":
+        view._comment_side_by_line[line_index] = root_side
+    elif root_side != "auto" and existing_side != root_side:
+        view._comment_side_by_line[line_index] = "auto"
+
+
+def _update_mounted_thread_widget(
+    view: DiffView,
+    line_index: int,
+    index: int,
+    thread: ReviewThread,
+) -> bool:
+    widgets = view._comment_widgets_by_line.get(line_index, [])
+    if index >= len(widgets):
+        return False
+
+    widget = widgets[index]
+    if not isinstance(widget, ReviewThreadItem):
+        return False
+    if widget.is_resolved == thread.is_resolved:
+        return False
+
+    widget.set_resolved(thread.is_resolved, title=_inline_thread_title(thread))
+    return True
+
+
+def _comment_line_indices_for_keys(keys: AbstractSet[int]) -> list[int]:
+    count = len(keys)
+    if count == 0:
+        return []
+    if count == 1:
+        return [next(iter(keys))]
+    return sorted(keys)
+
+
+def _file_paths_for_current_diff(view: DiffView) -> AbstractSet[str]:
+    planned_paths = getattr(view, "_diff_file_paths", frozenset())
+    if planned_paths:
+        return planned_paths
+
     paths = {line.file_path for line in view._all_lines if line.file_path}
     if paths:
         return paths
@@ -139,8 +217,8 @@ def _file_paths_for_current_diff(view: DiffView) -> set[str]:
 
 def _pending_comments_for_current_diff(
     view: DiffView,
-    file_paths: set[str],
-) -> list[PendingReviewComment]:
+    file_paths: AbstractSet[str],
+) -> Sequence[PendingReviewComment]:
     get_pending_file_comments = getattr(view.store, "get_pending_file_comments", None)
     if callable(get_pending_file_comments) and len(file_paths) == 1:
         drafts = get_pending_file_comments(next(iter(file_paths)))
@@ -150,7 +228,9 @@ def _pending_comments_for_current_diff(
     state = getattr(view.store, "state", None)
     drafts = getattr(state, "pending_review_comments", [])
     if not isinstance(drafts, list):
-        return []
+        return ()
+    if not drafts:
+        return ()
     return [draft for draft in drafts if draft.path in file_paths]
 
 
@@ -349,39 +429,32 @@ def _nearest_line_index_in_hunk(
     target_side: Literal["old", "new", "auto"],
     anchor_line: int | None,
 ) -> int | None:
-    primary_candidates = [
-        line
-        for line in hunk.lines
-        if not line.is_context and _line_number_for_side(line, target_side) is not None
-    ]
-    fallback_candidates = [
-        line
-        for line in hunk.lines
-        if _line_number_for_side(line, target_side) is not None
-    ]
-    candidates = primary_candidates if primary_candidates else fallback_candidates
-    if not candidates:
-        return None
+    fallback_index: int | None = None
+    fallback_distance: int | None = None
+    primary_index: int | None = None
+    primary_distance: int | None = None
 
-    if anchor_line is None:
-        return candidates[0].line_index
+    for line in hunk.lines:
+        line_number = _line_number_for_side(line, target_side)
+        if line_number is None:
+            continue
 
-    nearest = min(
-        candidates,
-        key=lambda line: _line_distance_from_anchor(line, target_side, anchor_line),
-    )
-    return nearest.line_index
+        distance = 0 if anchor_line is None else abs(line_number - anchor_line)
+        if fallback_index is None or (
+            fallback_distance is not None and distance < fallback_distance
+        ):
+            fallback_index = line.line_index
+            fallback_distance = distance
 
+        if line.is_context:
+            continue
+        if primary_index is None or (
+            primary_distance is not None and distance < primary_distance
+        ):
+            primary_index = line.line_index
+            primary_distance = distance
 
-def _line_distance_from_anchor(
-    line: DiffLine,
-    target_side: Literal["old", "new", "auto"],
-    anchor_line: int,
-) -> int:
-    line_number = _line_number_for_side(line, target_side)
-    if line_number is None:
-        return 10**9
-    return abs(line_number - anchor_line)
+    return primary_index if primary_index is not None else fallback_index
 
 
 def _line_number_for_side(
@@ -427,6 +500,15 @@ def mount_pending_drafts_for_line(
     if not drafts:
         return
 
+    mount_before = before
+    if (
+        getattr(view, "_inline_comment_editor_line_index", None) == line_index
+        and getattr(view, "_inline_comment_editor_draft_index", None) is None
+    ):
+        mount_before = (
+            getattr(view, "_inline_comment_editor_layout_widget", None) or before
+        )
+
     mounted: list[Widget] = []
     layout_widgets: list[Widget] = []
     for index, draft in enumerate(drafts):
@@ -436,7 +518,7 @@ def mount_pending_drafts_for_line(
             container,
             widget,
             side=draft.anchor_side,
-            before=before,
+            before=mount_before,
         )
         mounted.append(widget)
         layout_widgets.append(layout_widget)
@@ -566,17 +648,36 @@ def _spacer(width: int, classes: str) -> Static:
 
 def comment_widgets_in_order(view: DiffView, line_index: int) -> list[Widget]:
     """Return ordered (drafts first, then threads) widgets attached to a line."""
-    widgets: list[Widget] = list(
-        view._pending_comment_widgets_by_line.get(line_index, [])
-    )
-    widgets.extend(view._comment_widgets_by_line.get(line_index, []))
+    pending_widgets = view._pending_comment_widgets_by_line.get(line_index)
+    comment_widgets = view._comment_widgets_by_line.get(line_index)
+    if pending_widgets is None:
+        if comment_widgets is None:
+            return []
+        return comment_widgets
+    if comment_widgets is None:
+        return pending_widgets
+
+    widgets: list[Widget] = list(pending_widgets)
+    widgets.extend(comment_widgets)
     return widgets
 
 
+def _iter_comment_widgets_in_order(view: DiffView, line_index: int) -> Iterator[Widget]:
+    pending_widgets = view._pending_comment_widgets_by_line.get(line_index)
+    if pending_widgets is not None:
+        yield from pending_widgets
+
+    comment_widgets = view._comment_widgets_by_line.get(line_index)
+    if comment_widgets is not None:
+        yield from comment_widgets
+
+
 def total_comments_at_line(view: DiffView, line_index: int) -> int:
-    return len(view._pending_comment_widgets_by_line.get(line_index, [])) + len(
-        view._comment_widgets_by_line.get(line_index, [])
-    )
+    pending_widgets = view._pending_comment_widgets_by_line.get(line_index)
+    comment_widgets = view._comment_widgets_by_line.get(line_index)
+    pending_count = len(pending_widgets) if pending_widgets is not None else 0
+    comment_count = len(comment_widgets) if comment_widgets is not None else 0
+    return pending_count + comment_count
 
 
 def active_comment_widget(view: DiffView, line_index: int) -> Widget | None:
@@ -584,9 +685,16 @@ def active_comment_widget(view: DiffView, line_index: int) -> Widget | None:
     index = view._comment_cursor_index
     if index <= 0:
         return None
-    widgets = comment_widgets_in_order(view, line_index)
-    if 1 <= index <= len(widgets):
-        return widgets[index - 1]
+
+    pending_widgets = view._pending_comment_widgets_by_line.get(line_index)
+    pending_count = len(pending_widgets) if pending_widgets is not None else 0
+    if pending_widgets is not None and index <= pending_count:
+        return pending_widgets[index - 1]
+
+    thread_widgets = view._comment_widgets_by_line.get(line_index)
+    thread_index = index - pending_count - 1
+    if thread_widgets is not None and 0 <= thread_index < len(thread_widgets):
+        return thread_widgets[thread_index]
     return None
 
 
@@ -594,26 +702,33 @@ def active_thread(view: DiffView, line_index: int) -> ReviewThread | None:
     index = view._comment_cursor_index
     if index <= 0:
         return None
-    drafts = view._pending_comment_drafts_by_line.get(line_index, [])
-    threads = view._comment_threads_by_line.get(line_index, [])
-    thread_index = index - 1 - len(drafts)
+    drafts = view._pending_comment_drafts_by_line.get(line_index)
+    threads = view._comment_threads_by_line.get(line_index)
+    if threads is None:
+        return None
+    draft_count = len(drafts) if drafts is not None else 0
+    thread_index = index - 1 - draft_count
     if 0 <= thread_index < len(threads):
         return threads[thread_index]
     return None
 
 
-def active_pending_draft(view: DiffView, line_index: int) -> PendingReviewComment | None:
+def active_pending_draft(
+    view: DiffView, line_index: int
+) -> PendingReviewComment | None:
     index = view._comment_cursor_index
     if index <= 0:
         return None
-    drafts = view._pending_comment_drafts_by_line.get(line_index, [])
+    drafts = view._pending_comment_drafts_by_line.get(line_index)
+    if drafts is None:
+        return None
     if 1 <= index <= len(drafts):
         return drafts[index - 1]
     return None
 
 
 def _clear_cursor_line_class(view: DiffView, line_index: int) -> None:
-    for w in comment_widgets_in_order(view, line_index):
+    for w in _iter_comment_widgets_in_order(view, line_index):
         w.remove_class("--cursor-line")
 
 
@@ -680,16 +795,17 @@ def _jump_to_comment_line(view: DiffView, line_index: int) -> None:
     target_side = view._comment_side_by_line.get(line_index, "auto")
     target_pane = None if target_side == "auto" else target_side
 
-    rows = view._rows_for_current_mode()
-    target_row = None
-    for row in rows:
-        if row.line_index != line_index:
-            continue
-        if row.side == target_side:
-            target_row = row
-            break
-        if target_row is None:
-            target_row = row
+    lookup_pane: Literal["old", "new"]
+    if target_side == "old":
+        lookup_pane = "old"
+    elif target_side == "new":
+        lookup_pane = "new"
+    elif 0 <= line_index < len(view._all_lines):
+        line = view._all_lines[line_index]
+        lookup_pane = "old" if line.is_deleted or line.is_modified else "new"
+    else:
+        lookup_pane = view.cursor_pane
+    target_row = view._row_for_line_and_pane(line_index, lookup_pane)
 
     if target_row is not None:
         view._jump_to_row_with_anchor(
@@ -762,14 +878,12 @@ def _update_thread_widget_resolved(
     widgets = view._comment_widgets_by_line.get(line_index, [])
     for w in widgets:
         if isinstance(w, ReviewThreadItem) and w.is_resolved != is_resolved:
-            root = thread.root_comment
-            line_info = f":{root.anchor_line}" if root and root.anchor_line else ""
-            file_icon = get_file_icon(thread.path)
-            if is_resolved:
-                new_title = f"✓ Resolved: {file_icon} {thread.path}{line_info}"
-            else:
-                new_title = f"{file_icon} {thread.path}{line_info}"
-            w.set_resolved(is_resolved, title=new_title)
+            w.set_resolved(
+                is_resolved,
+                title=_inline_thread_title(
+                    thread.model_copy(update={"is_resolved": is_resolved})
+                ),
+            )
             break
 
     _virtual._rebuild_virtual_layout(view)
@@ -781,8 +895,33 @@ def _update_thread_widget_resolved(
 
 
 def estimate_pending_draft_height(draft: PendingReviewComment) -> int:
-    body_lines = max(1, len(draft.body.splitlines()))
+    body_lines = max(1, _count_body_lines(draft.body))
     return max(PENDING_DRAFT_HEIGHT_ESTIMATE, body_lines + 2)
+
+
+def _count_body_lines(body: str) -> int:
+    if not body:
+        return 0
+
+    count = 1
+    index = 0
+    body_length = len(body)
+    while index < body_length:
+        char = body[index]
+        if char == "\r":
+            if index + 1 < body_length and body[index + 1] == "\n":
+                index += 2
+            else:
+                index += 1
+            if index < body_length:
+                count += 1
+        elif char == "\n":
+            index += 1
+            if index < body_length:
+                count += 1
+        else:
+            index += 1
+    return count
 
 
 def _build_pending_draft_widget(
@@ -791,7 +930,7 @@ def _build_pending_draft_widget(
     line_index: int,
     index: int,
 ) -> CommentCard:
-    side = draft.side.lower()
+    side = "left" if draft.side == "LEFT" else "right"
     side_label = "LEFT" if draft.side == "LEFT" else "RIGHT"
     return CommentCard(
         f"Pending comment ({side_label}) • c edit • d delete",
@@ -801,24 +940,26 @@ def _build_pending_draft_widget(
     )
 
 
-def _build_inline_thread_widget(thread: ReviewThread) -> ReviewThreadItem:
-    root = thread.root_comment
+def _inline_thread_title(thread: ReviewThread) -> str:
     line_info = f":{thread.anchor_line}" if thread.anchor_line else ""
     file_icon = get_file_icon(thread.path)
-
     if thread.is_resolved:
-        title = f"✓ Resolved: {file_icon} {thread.path}{line_info}"
+        return f"✓ Resolved: {file_icon} {thread.path}{line_info}"
+    return f"{file_icon} {thread.path}{line_info}"
+
+
+def _build_inline_thread_widget(thread: ReviewThread) -> ReviewThreadItem:
+    if thread.is_resolved:
         classes = "--thread --resolved --inline"
         collapsed = True
     else:
-        title = f"{file_icon} {thread.path}{line_info}"
         classes = "--thread --inline"
         collapsed = False
 
     line_no = thread.anchor_line
 
     return ReviewThreadItem(
-        title=title,
+        title=_inline_thread_title(thread),
         path=thread.path,
         line=line_no,
         comments=thread.comments,

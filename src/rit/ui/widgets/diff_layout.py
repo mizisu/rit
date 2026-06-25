@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 
 from rich.cells import cell_len
 
@@ -63,19 +63,22 @@ def can_fit_auto_split_content(
     if not lines:
         return True
 
-    max_old_width = max(
-        (cell_len(line.old_content) for line in lines if line.old_content),
-        default=0,
-    )
-    max_new_width = max(
-        (cell_len(line.new_content) for line in lines if line.new_content),
-        default=0,
-    )
     split_gap = 2
-    required_width = old_prefix_width + max_old_width + new_prefix_width + max_new_width
-    required_width += split_gap
-    required_width += split_gap
-    return available_width >= required_width
+    fixed_width = old_prefix_width + new_prefix_width + split_gap + split_gap
+    if available_width < fixed_width:
+        return False
+
+    max_old_width = 0
+    max_new_width = 0
+    for line in lines:
+        if line.old_content:
+            max_old_width = max(max_old_width, cell_len(line.old_content))
+        if line.new_content:
+            max_new_width = max(max_new_width, cell_len(line.new_content))
+        if available_width < fixed_width + max_old_width + max_new_width:
+            return False
+
+    return True
 
 
 def code_widths_for_layout(lines: Sequence[DiffLine]) -> tuple[int, int, int]:
@@ -125,12 +128,17 @@ def preview_prefix_width_for_layout(
 def line_number_width_for_layout(
     *,
     show_line_numbers: bool,
-    numbers: Sequence[int],
+    numbers: Collection[int],
 ) -> int:
     """Return the cell width needed for a line-number column."""
     if not show_line_numbers:
         return 0
-    return max(1, len(str(max(numbers)))) if numbers else 1
+    if not numbers:
+        return 1
+    if len(numbers) == 1:
+        width = len(str(next(iter(numbers))))
+        return width if width > 1 else 1
+    return max(1, len(str(max(numbers))))
 
 
 def split_placeholder_width_for_layout(

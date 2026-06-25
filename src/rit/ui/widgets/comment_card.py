@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 
 from textual.app import ComposeResult
 from textual.containers import Vertical
@@ -17,6 +18,7 @@ __all__ = (
 
 
 BODY_PREVIEW_RETIRE_DELAY = 0.8
+_PREVIEW_MARKDOWN_MARKERS = frozenset("<![`*_#>-")
 
 
 class CommentCard(Vertical):
@@ -79,6 +81,14 @@ class CommentCard(Vertical):
         margin: 0 0 1 0;
     }
 
+    CommentCard.--empty-body .comment-header {
+        margin: 0;
+    }
+
+    CommentCard.--empty-body .comment-content {
+        display: none;
+    }
+
     CommentCard.thread-comment .comment-header,
     CommentCard.thread-reply .comment-header {
         margin: 0 0 1 0;
@@ -88,7 +98,8 @@ class CommentCard(Vertical):
         height: auto;
     }
 
-    CommentCard .comment-body-preview {
+    CommentCard .comment-body-preview,
+    CommentCard .comment-body-plain {
         height: auto;
         color: #cad3f5;
     }
@@ -181,6 +192,7 @@ class CommentCard(Vertical):
         self._body_mount_delay = body_mount_delay
         self._is_ready = False
         self._body_mount_generation = 0
+        self._body_preview_widget: Static | None = None
         self._header_widget = Static(header, classes="comment-header", id=header_id)
         self._content_container = Vertical(
             id=content_id,
@@ -191,6 +203,8 @@ class CommentCard(Vertical):
             classes="inline-comment-preview",
             markup=False,
         )
+        if not _has_body(body):
+            self.add_class("--empty-body")
 
     def compose(self) -> ComposeResult:
         yield self._header_widget
@@ -217,6 +231,10 @@ class CommentCard(Vertical):
         self._body = body
         self._markdown_base_url = markdown_base_url
         self._header_widget.update(header)
+        if _has_body(body):
+            self.remove_class("--empty-body")
+        else:
+            self.add_class("--empty-body")
 
         if self._compact:
             self._preview_widget.update(self._build_preview(body))
@@ -226,66 +244,56 @@ class CommentCard(Vertical):
     def _schedule_body_mount(self) -> None:
         self._body_mount_generation += 1
         generation = self._body_mount_generation
-        self._show_body_preview()
-        if self.has_class("timeline-loading"):
-            return
-        if self._body_mount_delay > 0:
-            self.set_timer(
-                self._body_mount_delay,
-                lambda: self._mount_body(generation),
-            )
-        else:
-            self.call_after_refresh(lambda: self._mount_body(generation))
+        self.call_after_refresh(lambda: self._mount_body(generation))
 
-    def _show_body_preview(self) -> None:
-        self._content_container.remove_children()
-        preview = self._build_preview(self._body)
-        if preview:
+    def _show_plain_body(self) -> None:
+        body = self._body.strip()
+        if body:
             self._content_container.mount(
-                Static(
-                    preview,
-                    classes="comment-body-preview",
-                    markup=False,
-                )
+                Static(body, classes="comment-body-plain", markup=False)
             )
 
     def _mount_body(self, generation: int | None = None) -> None:
         if generation is not None and generation != self._body_mount_generation:
             return
-        self._remove_rendered_body_widgets()
+        self._content_container.remove_children()
+        self._body_preview_widget = None
+        if not _has_body(self._body):
+            return
+        if self.has_class("timeline-loading") or _is_plain_body(self._body):
+            self._show_plain_body()
+            return
         mount_markdown_with_details(
             self._content_container,
-            self._body or "*No content*",
+            self._body,
             base_url=self._markdown_base_url,
-        )
-        self.set_timer(
-            BODY_PREVIEW_RETIRE_DELAY,
-            lambda: self._retire_body_preview(generation),
         )
 
     def _remove_rendered_body_widgets(self) -> None:
-        for child in list(self._content_container.children):
-            if child.has_class("comment-body-preview"):
-                continue
-            child.remove()
+        self._content_container.remove_children()
 
     def _retire_body_preview(self, generation: int | None = None) -> None:
         if generation is not None and generation != self._body_mount_generation:
             return
-        for child in list(self._content_container.children):
-            if child.has_class("comment-body-preview"):
-                child.remove()
+        self._body_preview_widget = None
 
     def _build_preview(self, body: str) -> str:
-        cleaned_lines = [
-            self._sanitize_preview_line(line) for line in body.splitlines()
-        ]
-        cleaned_lines = [line for line in cleaned_lines if line]
-        if not cleaned_lines:
-            return "(No content)"
+        preview_lines: list[str] = []
+        truncated = False
 
-        preview = " ".join(cleaned_lines[: self._preview_max_lines])
-        truncated = len(cleaned_lines) > self._preview_max_lines
+        for line in self._iter_preview_lines(body):
+            cleaned_line = self._sanitize_preview_line(line)
+            if not cleaned_line:
+                continue
+            if len(preview_lines) >= self._preview_max_lines:
+                truncated = True
+                break
+            preview_lines.append(cleaned_line)
+
+        if not preview_lines:
+            return ""
+
+        preview = " ".join(preview_lines)
 
         if len(preview) > self._preview_max_chars:
             preview = preview[: self._preview_max_chars].rstrip()
@@ -297,10 +305,28 @@ class CommentCard(Vertical):
         return preview
 
     @staticmethod
+    def _iter_preview_lines(body: str) -> Iterator[str]:
+        start = 0
+        body_length = len(body)
+        while start < body_length:
+            end = body.find("\n", start)
+            if end < 0:
+                line = body[start:]
+                start = body_length
+            else:
+                line = body[start:end]
+                start = end + 1
+            if line.endswith("\r"):
+                line = line[:-1]
+            yield line
+
+    @staticmethod
     def _sanitize_preview_line(line: str) -> str:
         stripped = line.strip()
         if not stripped:
             return ""
+        if not _has_preview_markdown_marker(stripped):
+            return _collapse_preview_whitespace(stripped)
 
         stripped = re.sub(r"<!--.*?-->", " ", stripped)
         stripped = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", stripped)
@@ -311,4 +337,22 @@ class CommentCard(Vertical):
         stripped = stripped.replace("```", " ").replace("`", "")
         stripped = stripped.replace("**", "").replace("__", "")
         stripped = stripped.lstrip("-*># ")
-        return " ".join(stripped.split())
+        return _collapse_preview_whitespace(stripped)
+
+
+def _has_body(body: str) -> bool:
+    return bool(body) and not body.isspace()
+
+
+def _is_plain_body(body: str) -> bool:
+    return not _has_preview_markdown_marker(body)
+
+
+def _has_preview_markdown_marker(text: str) -> bool:
+    return not _PREVIEW_MARKDOWN_MARKERS.isdisjoint(text)
+
+
+def _collapse_preview_whitespace(text: str) -> str:
+    if "  " not in text and "\t" not in text:
+        return text
+    return " ".join(text.split())

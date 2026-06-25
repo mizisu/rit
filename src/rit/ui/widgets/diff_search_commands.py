@@ -30,6 +30,8 @@ def clear_state(view: DiffView) -> None:
     view._search_query = ""
     view._search_matches = []
     view._search_match_index = -1
+    view._search_matches_by_line_side = {}
+    view._search_matches_by_line_side_source = None
 
 
 def handle_changed(view: DiffView, value: str) -> None:

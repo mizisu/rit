@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections import deque
+from collections.abc import Iterator
 from datetime import datetime, timezone
 
 from rich.text import Text
@@ -58,9 +60,7 @@ class ReviewThreadCard(Vertical):
     ) -> None:
         super().__init__(id=id, classes=classes)
         self.styles.height = "auto"
-        self._comments = sorted(
-            comments, key=lambda comment: datetime_sort_key(comment.created_at)
-        )
+        self._comments = _comments_in_timeline_order(comments)
         self._diff_hunk = diff_hunk
         self._compact = compact
         self._show_diff_hunk = show_diff_hunk
@@ -112,8 +112,7 @@ class ReviewThreadCard(Vertical):
     @staticmethod
     def _render_diff_hunk(diff_hunk: str) -> Text:
         diff_text = Text()
-        hunk_lines = diff_hunk.split("\n")
-        display_lines = hunk_lines[-5:] if len(hunk_lines) > 5 else hunk_lines
+        display_lines = deque(_iter_diff_hunk_lines(diff_hunk), maxlen=5)
 
         for line in display_lines:
             if line.startswith("+") and not line.startswith("+++"):
@@ -147,6 +146,45 @@ class ReviewThreadCard(Vertical):
         if seconds < 604800:
             return f"[#6e738d]{int(seconds / 86400)}d ago[/]"
         return f"[#6e738d]{dt.strftime('%b %d, %Y')}[/]"
+
+
+def _iter_diff_hunk_lines(diff_hunk: str) -> Iterator[str]:
+    start = 0
+    text_length = len(diff_hunk)
+    while start < text_length:
+        end = diff_hunk.find("\n", start)
+        if end < 0:
+            line = diff_hunk[start:]
+            start = text_length
+        else:
+            line = diff_hunk[start:end]
+            start = end + 1
+        if line.endswith("\r"):
+            line = line[:-1]
+        yield line
+
+
+def _comments_in_timeline_order(comments: list[PRComment]) -> list[PRComment]:
+    if len(comments) < 2:
+        return comments
+    if len(comments) == 2:
+        first, second = comments
+        if datetime_sort_key(first.created_at) <= datetime_sort_key(second.created_at):
+            return comments
+        return [second, first]
+
+    ordered: list[PRComment] = []
+    previous_key: datetime | None = None
+    for comment in comments:
+        key = datetime_sort_key(comment.created_at)
+        if previous_key is not None and key < previous_key:
+            return sorted(
+                comments,
+                key=lambda item: datetime_sort_key(item.created_at),
+            )
+        ordered.append(comment)
+        previous_key = key
+    return ordered
 
 
 class ReviewThreadItem(Collapsible):

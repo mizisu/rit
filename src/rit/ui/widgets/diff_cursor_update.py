@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Collection, Set
+from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Literal
 
 
 PaneName = Literal["old", "new"]
+_EMPTY_LINE_SET: frozenset[int] = frozenset()
 
 __all__ = (
     "ActivePaneUpdate",
@@ -111,15 +112,30 @@ type CursorRepaintUpdate = (
 )
 
 
+def _single_line_set(line: int) -> frozenset[int]:
+    return frozenset((line,))
+
+
+def _empty_line_set() -> frozenset[int]:
+    return _EMPTY_LINE_SET
+
+
+def _line_pair_set(first: int, second: int) -> frozenset[int]:
+    if first == second:
+        return _single_line_set(first)
+    return frozenset((first, second))
+
+
 def active_pane_update(
     *,
     cursor_line: int,
     visual_mode: bool,
 ) -> ActivePaneUpdate:
     """Return repaint policy after the active pane changes."""
+    cursor_lines = _single_line_set(cursor_line)
     return ActivePaneUpdate(
-        cursor_lines=frozenset({cursor_line}),
-        selection_dirty_lines=frozenset({cursor_line}) if visual_mode else None,
+        cursor_lines=cursor_lines,
+        selection_dirty_lines=cursor_lines if visual_mode else None,
         sync_search_match=True,
         update_status_line=True,
     )
@@ -140,16 +156,17 @@ def cursor_column_update(
     if new_column != clamped_column:
         return CursorColumnUpdate(
             corrected_column=clamped_column,
-            cursor_lines=frozenset(),
+            cursor_lines=_empty_line_set(),
             selection_dirty_lines=None,
             sync_search_match=False,
             scroll_horizontal=False,
         )
 
+    cursor_lines = _single_line_set(cursor_line)
     return CursorColumnUpdate(
         corrected_column=None,
-        cursor_lines=frozenset({cursor_line}),
-        selection_dirty_lines=frozenset({cursor_line}) if visual_mode else None,
+        cursor_lines=cursor_lines,
+        selection_dirty_lines=cursor_lines if visual_mode else None,
         sync_search_match=True,
         scroll_horizontal=True,
     )
@@ -169,7 +186,7 @@ def cursor_line_update(
     visual_mode: bool,
 ) -> CursorLineUpdate:
     """Return repaint policy after the cursor line changes."""
-    lines = frozenset({old_line, new_line})
+    lines = _line_pair_set(old_line, new_line)
     return CursorLineUpdate(
         cursor_lines=lines,
         selection_dirty_lines=lines if visual_mode else None,
@@ -236,8 +253,28 @@ def _bounded_line_indices(
     line_count: int,
 ) -> frozenset[int]:
     if not lines or line_count <= 0:
-        return frozenset()
-    return frozenset(line_idx for line_idx in lines if 0 <= line_idx < line_count)
+        return _empty_line_set()
+    first_line: int | None = None
+    second_line: int | None = None
+    extra_lines: list[int] | None = None
+    for line_idx in lines:
+        if not 0 <= line_idx < line_count:
+            continue
+        if first_line is None:
+            first_line = line_idx
+        elif second_line is None:
+            second_line = line_idx
+        else:
+            if extra_lines is None:
+                extra_lines = [first_line, second_line]
+            extra_lines.append(line_idx)
+    if first_line is None:
+        return _empty_line_set()
+    if second_line is None:
+        return _single_line_set(first_line)
+    if extra_lines is None:
+        return _line_pair_set(first_line, second_line)
+    return frozenset(extra_lines)
 
 
 def cursor_move_update(
@@ -257,19 +294,18 @@ def cursor_move_update(
     pane_changed = old_pane != new_pane
     changed = line_changed or column_changed or pane_changed
 
-    cursor_lines = {new_line}
-    if line_changed:
-        cursor_lines.add(old_line)
+    cursor_lines = (
+        _line_pair_set(old_line, new_line)
+        if line_changed
+        else _single_line_set(new_line)
+    )
 
     selection_dirty_lines: frozenset[int] | None = None
     if visual_mode:
-        selection_lines = {new_line}
-        if line_changed:
-            selection_lines.add(old_line)
-        selection_dirty_lines = frozenset(selection_lines)
+        selection_dirty_lines = cursor_lines
 
     return CursorMoveUpdate(
-        cursor_lines=frozenset(cursor_lines),
+        cursor_lines=cursor_lines,
         selection_dirty_lines=selection_dirty_lines,
         sync_search_match=changed,
         update_status_line=(line_changed or pane_changed)
@@ -283,17 +319,18 @@ def cursor_move_update(
 
 def cursor_lines_for_flush(
     *,
-    cursor_lines: Set[int],
-    selection_dirty_lines: Set[int],
+    cursor_lines: set[int],
+    selection_dirty_lines: set[int],
     selection_full_refresh: bool,
     visual_mode: bool,
 ) -> set[int]:
     """Return cursor lines that still need repainting for a flush."""
-    lines = set(cursor_lines)
     if not visual_mode:
-        return lines
+        return cursor_lines
     if selection_full_refresh:
         return set()
-    if selection_dirty_lines:
-        lines.difference_update(selection_dirty_lines)
+    if not selection_dirty_lines:
+        return cursor_lines
+    lines = set(cursor_lines)
+    lines.difference_update(selection_dirty_lines)
     return lines

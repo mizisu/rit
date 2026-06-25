@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections.abc import Set
 from typing import Literal
 
@@ -22,6 +23,8 @@ from rit.ui.widgets.diff_search_types import (
 )
 from rit.ui.widgets.diff_types import DiffSearchMatch
 
+_EMPTY_LINE_SET: frozenset[int] = frozenset()
+
 __all__ = (
     "next_search_match_index",
     "search_activation_placement_update",
@@ -39,6 +42,20 @@ __all__ = (
     "search_submit_update",
     "search_submitted_input_update",
 )
+
+
+def _empty_line_set() -> frozenset[int]:
+    return _EMPTY_LINE_SET
+
+
+def _single_line_set(line: int) -> frozenset[int]:
+    return frozenset((line,))
+
+
+def _line_pair_set(first: int, second: int) -> frozenset[int]:
+    if first == second:
+        return _single_line_set(first)
+    return frozenset((first, second))
 
 
 def search_reveal_update(
@@ -63,7 +80,34 @@ def search_refresh_update(
     previous_match_lines: Set[int],
 ) -> SearchRefreshUpdate:
     """Return line refresh policy after search matches change."""
-    current_lines = frozenset(match.line_index for match in matches)
+    if not matches:
+        current_lines = _empty_line_set()
+    elif len(matches) == 1:
+        current_lines = _single_line_set(matches[0].line_index)
+    elif len(matches) == 2:
+        current_lines = _line_pair_set(matches[0].line_index, matches[1].line_index)
+    else:
+        current_lines = frozenset(match.line_index for match in matches)
+    if not current_lines:
+        if not previous_match_lines:
+            return SearchRefreshUpdate(
+                dirty_lines=current_lines,
+                previous_match_lines=current_lines,
+            )
+        return SearchRefreshUpdate(
+            dirty_lines=frozenset(previous_match_lines),
+            previous_match_lines=current_lines,
+        )
+    if not previous_match_lines:
+        return SearchRefreshUpdate(
+            dirty_lines=current_lines,
+            previous_match_lines=current_lines,
+        )
+    if current_lines == previous_match_lines:
+        return SearchRefreshUpdate(
+            dirty_lines=current_lines,
+            previous_match_lines=current_lines,
+        )
     return SearchRefreshUpdate(
         dirty_lines=current_lines | frozenset(previous_match_lines),
         previous_match_lines=current_lines,
@@ -81,14 +125,14 @@ def search_activation_update(
         return None
 
     match = matches[target_index]
-    dirty_lines = {match.line_index}
+    dirty_lines = _single_line_set(match.line_index)
     if 0 <= old_index < len(matches):
-        dirty_lines.add(matches[old_index].line_index)
+        dirty_lines = _line_pair_set(match.line_index, matches[old_index].line_index)
 
     pane = None if match.side == "auto" else match.side
     return SearchActivationUpdate(
         match=match,
-        dirty_lines=frozenset(dirty_lines),
+        dirty_lines=dirty_lines,
         pane=pane,
         update_active_pane=match.side != "auto",
     )
@@ -129,12 +173,19 @@ def search_match_index_at_cursor(
     current_column: int,
 ) -> int:
     """Return the search match index exactly under the cursor."""
-    for index, match in enumerate(matches):
-        if (
-            match.line_index == current_line
-            and match.side == current_side
-            and match.column == current_column
-        ):
+    position = (current_line, current_column)
+    start = bisect_left(
+        matches,
+        position,
+        key=lambda match: (match.line_index, match.column),
+    )
+    end = bisect_right(
+        matches,
+        position,
+        key=lambda match: (match.line_index, match.column),
+    )
+    for index in range(start, end):
+        if matches[index].side == current_side:
             return index
     return -1
 
@@ -197,15 +248,23 @@ def next_search_match_index(
     if not matches:
         return -1
 
-    for index, match in enumerate(matches):
-        if match.row_index > current_row_index:
+    position = (current_row_index, current_column)
+    equal_start = bisect_left(
+        matches,
+        position,
+        key=lambda match: (match.row_index, match.column),
+    )
+    equal_end = bisect_right(
+        matches,
+        position,
+        key=lambda match: (match.row_index, match.column),
+    )
+    for index in range(equal_start, equal_end):
+        if matches[index].side != current_side:
             return index
-        if match.row_index < current_row_index:
-            continue
-        if match.column > current_column:
-            return index
-        if match.column == current_column and match.side != current_side:
-            return index
+
+    if equal_end < len(matches):
+        return equal_end
 
     return 0
 

@@ -51,21 +51,22 @@ def append_file(
     total_count: int,
 ) -> FileAppendResult:
     """Append and index a file unless that filename is already loaded."""
-    if file.filename in files_by_filename:
+    filename = file.filename
+    if filename in files_by_filename:
         return FileAppendResult(
             added=False,
             loaded_count=len(files),
             total_count=total_count,
         )
 
-    file.comments = comments_by_file.get(file.filename, [])
+    file.comments = comments_by_file.get(filename, [])
     files.append(file)
-    files_by_filename[file.filename] = file
+    files_by_filename[filename] = file
     loaded_count = len(files)
     return FileAppendResult(
         added=True,
         loaded_count=loaded_count,
-        total_count=max(total_count, loaded_count),
+        total_count=total_count if total_count >= loaded_count else loaded_count,
     )
 
 
@@ -80,7 +81,8 @@ def apply_parsed_file(
 ) -> FileAppendResult:
     """Apply a parsed raw-diff file to file indexes and the diff cache."""
     diff = parsed_file.diff
-    if diff.filename in file_diffs:
+    filename = diff.filename
+    if filename in file_diffs:
         return FileAppendResult(
             added=False,
             loaded_count=len(files),
@@ -89,9 +91,9 @@ def apply_parsed_file(
 
     file = file_from_diff(diff)
     file.patch = parsed_file.patch
-    file_diffs[diff.filename] = diff
+    file_diffs[filename] = diff
 
-    existing = files_by_filename.get(diff.filename)
+    existing = files_by_filename.get(filename)
     if existing is not None:
         _replace_file_metadata(existing, file)
         return FileAppendResult(
@@ -144,10 +146,21 @@ def find_file(
     if file is not None:
         return file
 
-    file = next((item for item in files if item.filename == filename), None)
-    if file is not None:
-        files_by_filename[filename] = file
-    return file
+    file_count = len(files)
+    if file_count == 0:
+        return None
+    if file_count == 1:
+        item = files[0]
+        item_filename = item.filename
+        files_by_filename.setdefault(item_filename, item)
+        return item if item_filename == filename else None
+
+    for item in files:
+        item_filename = item.filename
+        files_by_filename.setdefault(item_filename, item)
+        if item_filename == filename:
+            return item
+    return None
 
 
 def cache_file_diff(
@@ -207,6 +220,9 @@ def apply_file_view_states(
     states: Mapping[str, str],
 ) -> None:
     """Apply GitHub viewed-state strings to loaded files."""
+    if not states:
+        return
+
     for file in files:
         raw_state = states.get(file.filename)
         if not raw_state:

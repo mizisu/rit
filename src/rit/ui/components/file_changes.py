@@ -11,6 +11,7 @@ from textual.reactive import reactive
 from textual.widgets import Static
 
 from rit.core.types import FileDiff
+from rit.state.models import LoadingState
 from rit.state.store import PRStore
 from rit.ui.components.combined_diff import (
     COMBINED_DIFF_FILENAME,
@@ -102,7 +103,7 @@ class FileChanges(Horizontal):
     @property
     def _combined_file_line_starts(self) -> dict[str, int]:
         document = self._render_session.combined_document
-        return dict(document.file_line_starts) if document is not None else {}
+        return document.file_line_starts if document is not None else {}
 
     def __init__(self, store: PRStore) -> None:
         super().__init__()
@@ -168,11 +169,12 @@ class FileChanges(Horizontal):
         self.file_tree.refresh_files()
 
         state = self.store.state
-        if state.files and self._queue_combined_files_render():
-            selected_file = state.selected_file or state.files[0].filename
-            self.store.state.selected_file = selected_file
-            self.file_tree.select_file(selected_file, emit_message=False)
-            return
+        if state.files and not self._files_are_still_loading():
+            if self._queue_combined_files_render():
+                selected_file = state.selected_file or state.files[0].filename
+                self.store.state.selected_file = selected_file
+                self.file_tree.select_file(selected_file, emit_message=False)
+                return
 
         if state.files and not state.selected_file:
             filename = state.files[0].filename
@@ -225,9 +227,16 @@ class FileChanges(Horizontal):
         )
 
     def _uses_combined_files(self) -> bool:
-        return self._render_session.uses_combined_files(self.store.state.files)
+        return (
+            not self._files_are_still_loading()
+        ) and self._render_session.uses_combined_files(self.store.state.files)
+
+    def _files_are_still_loading(self) -> bool:
+        return self.store.state.files_loading == LoadingState.LOADING
 
     def _queue_combined_file_jump(self, filename: str, *, focus_diff: bool) -> bool:
+        if self._files_are_still_loading():
+            return False
         if not self._render_session.queue_combined_file_jump(
             self.store.state.files,
             filename,
@@ -246,6 +255,8 @@ class FileChanges(Horizontal):
         focus_diff: bool = False,
         force: bool = False,
     ) -> bool:
+        if self._files_are_still_loading() and not force:
+            return False
         if not self._render_session.queue_combined_render(
             self.store.state.files,
             current_file=self.diff_view.current_file,

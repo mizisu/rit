@@ -14,24 +14,35 @@ def review_threads_from_rest_comments(
     comments: list[PRComment],
 ) -> list[ReviewThread]:
     """Build review threads from REST review comments."""
+    comment_count = len(comments)
+    if comment_count == 0:
+        return []
+    if comment_count == 1:
+        root = _comment_with_normalized_author(comments[0])
+        return [_review_thread_from_root(root, [root])]
+
     threads: list[ReviewThread] = []
     normalized_comments = [_comment_with_normalized_author(comment) for comment in comments]
     for thread in group_comments_into_threads(normalized_comments):
-        root = thread.root_comment
-        threads.append(
-            ReviewThread.model_validate(
-                {
-                    "id": "",
-                    "isResolved": False,
-                    "path": root.path,
-                    "line": root.line,
-                    "originalLine": root.original_line,
-                    "diffSide": root.side,
-                    "comments": NodeList(nodes=thread.all_comments),
-                }
-            )
-        )
+        threads.append(_review_thread_from_root(thread.root_comment, thread.all_comments))
     return threads
+
+
+def _review_thread_from_root(
+    root: PRComment,
+    comments: list[PRComment],
+) -> ReviewThread:
+    return ReviewThread.model_validate(
+        {
+            "id": "",
+            "isResolved": False,
+            "path": root.path,
+            "line": root.line,
+            "originalLine": root.original_line,
+            "diffSide": root.side,
+            "comments": NodeList(nodes=comments),
+        }
+    )
 
 
 def _comment_with_normalized_author(comment: PRComment) -> PRComment:

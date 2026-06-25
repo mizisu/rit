@@ -41,6 +41,19 @@ class VisualSelectionDelta:
     lines_to_apply: frozenset[int]
 
 
+_EMPTY_LINE_SET: frozenset[int] = frozenset()
+_EMPTY_SELECTION_DELTA = VisualSelectionDelta(
+    lines_to_clear=_EMPTY_LINE_SET,
+    lines_to_apply=_EMPTY_LINE_SET,
+)
+
+
+def _line_set_or_empty(line_indices: Collection[int]) -> frozenset[int]:
+    if not line_indices:
+        return _EMPTY_LINE_SET
+    return frozenset(line_indices)
+
+
 def visual_selection_bounds(
     *,
     visual_anchor_line: int,
@@ -104,23 +117,32 @@ def visual_selection_delta(
     dirty_lines: Collection[int] | None = None,
 ) -> VisualSelectionDelta:
     """Return highlight clear/apply work for a visual selection update."""
-    lines_to_clear = set(old_specs) - set(new_specs)
+    if dirty_lines is None and old_specs is new_specs:
+        return _EMPTY_SELECTION_DELTA
+
+    if dirty_lines:
+        lines_to_clear: list[int] = []
+        lines_to_apply: list[int] = []
+        for line_idx in dirty_lines:
+            if line_idx in new_specs:
+                lines_to_apply.append(line_idx)
+            elif line_idx in old_specs:
+                lines_to_clear.append(line_idx)
+        return VisualSelectionDelta(
+            lines_to_clear=_line_set_or_empty(lines_to_clear),
+            lines_to_apply=_line_set_or_empty(lines_to_apply),
+        )
+
+    lines_to_clear = old_specs.keys() - new_specs.keys()
     lines_to_apply = {
         line_idx
         for line_idx, spec in new_specs.items()
         if old_specs.get(line_idx) != spec
     }
 
-    if dirty_lines:
-        for line_idx in dirty_lines:
-            if line_idx in new_specs:
-                lines_to_apply.add(line_idx)
-            elif line_idx in old_specs:
-                lines_to_clear.add(line_idx)
-
     return VisualSelectionDelta(
-        lines_to_clear=frozenset(lines_to_clear),
-        lines_to_apply=frozenset(lines_to_apply),
+        lines_to_clear=_line_set_or_empty(lines_to_clear),
+        lines_to_apply=_line_set_or_empty(lines_to_apply),
     )
 
 

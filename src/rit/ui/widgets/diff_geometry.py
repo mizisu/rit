@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from bisect import bisect_right
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from typing import cast, overload
 
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.ui.widgets.diff_types import RenderedRow
@@ -35,6 +37,35 @@ __all__ = (
 FILE_DIFF_HEADER_HEIGHT = 1
 
 
+class _DiffLineWindow(Sequence[DiffLine]):
+    def __init__(self, lines: Sequence[DiffLine], start: int, stop: int) -> None:
+        self._lines = lines
+        self._start = start
+        self._stop = stop
+
+    def __len__(self) -> int:
+        return max(0, self._stop - self._start)
+
+    def __iter__(self) -> Iterator[DiffLine]:
+        for index in range(self._start, self._stop):
+            yield self._lines[index]
+
+    @overload
+    def __getitem__(self, index: int) -> DiffLine: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[DiffLine]: ...
+
+    def __getitem__(self, index: int | slice) -> DiffLine | list[DiffLine]:
+        if isinstance(index, slice):
+            return [self[line_index] for line_index in range(*index.indices(len(self)))]
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        return self._lines[self._start + index]
+
+
 @dataclass(frozen=True)
 class DiffGeometry:
     hunk_header_top_offsets: list[int]
@@ -63,20 +94,26 @@ def build_diff_geometry(
     diff: FileDiff | None,
     *,
     split: bool,
+    line_count: int | None = None,
     extra_heights_by_line: dict[int, int] | None = None,
     inline_editor_line_index: int | None = None,
     inline_editor_height: int = 0,
 ) -> DiffGeometry:
     if diff is None:
         return DiffGeometry([], [], [], [], 0, 0)
+    if line_count is None and not diff.hunks:
+        return DiffGeometry([], [], [], [], 0, 0)
 
-    line_count = (
-        max(
-            (line.line_index for hunk in diff.hunks for line in hunk.lines),
-            default=-1,
+    if line_count is None:
+        line_count = (
+            max(
+                (line.line_index for hunk in diff.hunks for line in hunk.lines),
+                default=-1,
+            )
+            + 1
         )
-        + 1
-    )
+    else:
+        line_count = max(0, line_count)
     hunk_header_top_offsets: list[int] = []
     line_top_offsets = [0] * line_count
     line_heights = [1] * line_count
@@ -193,12 +230,17 @@ def is_line_rendered(
     return start <= line_index <= end
 
 
-def merge_line_ranges(ranges: list[tuple[int, int]]) -> list[tuple[int, int]]:
+def merge_line_ranges(
+    ranges: Iterable[tuple[int, int]],
+    *,
+    already_sorted: bool = False,
+) -> list[tuple[int, int]]:
     """Return sorted, coalesced inclusive line ranges."""
-    if not ranges:
-        return []
     merged: list[tuple[int, int]] = []
-    for start, end in sorted(ranges):
+    if not already_sorted and isinstance(ranges, Sequence) and len(ranges) <= 1:
+        return list(cast(Sequence[tuple[int, int]], ranges))
+    ordered_ranges = ranges if already_sorted else sorted(ranges)
+    for start, end in ordered_ranges:
         if not merged:
             merged.append((start, end))
             continue
@@ -229,7 +271,7 @@ def hunk_lines_for_window(
     hunk: DiffHunk,
     window_start: int | None,
     window_end: int | None,
-) -> list[DiffLine]:
+) -> Sequence[DiffLine]:
     """Return hunk lines intersecting an optional inclusive line-index window."""
     if window_start is None or window_end is None:
         return hunk.lines
@@ -240,10 +282,12 @@ def hunk_lines_for_window(
     hunk_end = hunk.lines[-1].line_index
     if hunk_end < window_start or hunk_start > window_end:
         return []
+    if window_start <= hunk_start and hunk_end <= window_end:
+        return hunk.lines
 
     start_index = max(0, window_start - hunk_start)
     end_index = min(len(hunk.lines) - 1, window_end - hunk_start)
-    return hunk.lines[start_index : end_index + 1]
+    return _DiffLineWindow(hunk.lines, start_index, end_index + 1)
 
 
 def virtual_top_buffer_height(

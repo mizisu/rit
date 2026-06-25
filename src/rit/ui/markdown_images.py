@@ -61,6 +61,7 @@ IMAGE_FETCH_TIMEOUT_SECONDS = 10
 MAX_INLINE_IMAGE_WIDTH_CELLS = 112
 MAX_INLINE_IMAGE_HEIGHT_CELLS = 36
 IMAGE_BLOCK_HORIZONTAL_PADDING_CELLS = 2
+IMAGE_BLOCK_HORIZONTAL_BORDER_CELLS = 2
 IMAGE_TABLE_LABEL_WIDTH_CELLS = 10
 IMAGE_TABLE_CELL_HORIZONTAL_PADDING_CELLS = 2
 
@@ -467,12 +468,16 @@ class MarkdownImageBlock(Vertical):
         )
 
     def _size_block_to_preview(self, preview_width: int) -> None:
-        frame_width = preview_width
+        body_width = preview_width
         if not self.compact:
-            frame_width += IMAGE_BLOCK_HORIZONTAL_PADDING_CELLS
+            body_width += IMAGE_BLOCK_HORIZONTAL_PADDING_CELLS
+
+        frame_width = body_width
+        if not self.compact:
+            frame_width += IMAGE_BLOCK_HORIZONTAL_BORDER_CELLS
 
         self.styles.width = frame_width
-        self._body.styles.width = frame_width
+        self._body.styles.width = body_width
         if self._on_preview_width is not None:
             self._on_preview_width(frame_width)
 
@@ -828,9 +833,7 @@ def _parse_image_table_at(
 def _is_table_row(line: str) -> bool:
     stripped = line.strip()
     return (
-        stripped.startswith("|")
-        and stripped.endswith("|")
-        and stripped.count("|") >= 2
+        stripped.startswith("|") and stripped.endswith("|") and stripped.count("|") >= 2
     )
 
 

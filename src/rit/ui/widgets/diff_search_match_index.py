@@ -7,8 +7,8 @@ from typing import TYPE_CHECKING
 from textual.content import Content
 
 from rit.ui.widgets.diff_search_matching import (
-    search_highlight_spans,
-    search_matches_for_text,
+    append_search_matches_for_text_casefolded,
+    search_match_style,
     search_sides_for_line,
 )
 from rit.ui.widgets.diff_search_policy import (
@@ -17,7 +17,7 @@ from rit.ui.widgets.diff_search_policy import (
     search_match_refresh,
 )
 from rit.ui.widgets.diff_search_types import SearchSide
-from rit.ui.widgets.diff_types import DiffSearchMatch
+from rit.ui.widgets.diff_types import DiffSearchMatch, RenderedRow
 
 __all__ = (
     "apply_search_highlights",
@@ -32,12 +32,18 @@ if TYPE_CHECKING:
     from rit.ui.widgets.diff_view import DiffView
 
 
+type SearchMatchIndexSource = tuple[int, int]
+type SearchMatchBucket = tuple[tuple[int, DiffSearchMatch], ...]
+type SearchMatchesByLineSide = dict[tuple[int, SearchSide], SearchMatchBucket]
+type _SearchMatchBucketBuilder = (
+    SearchMatchBucket | list[tuple[int, DiffSearchMatch]]
+)
+
+
 def search_sides_for_row(
     view: DiffView,
     row: DiffSearchMatch | object,
 ) -> tuple[SearchSide, ...]:
-    from rit.ui.widgets.diff_types import RenderedRow
-
     assert isinstance(row, RenderedRow)
     line = view._all_lines[row.line_index]
     return search_sides_for_line(
@@ -54,19 +60,19 @@ def build_matches(view: DiffView, query: str) -> list[DiffSearchMatch]:
     if not query:
         return []
 
+    query = query.casefold()
     matches: list[DiffSearchMatch] = []
     for row in view._rows_for_current_mode():
         line = view._all_lines[row.line_index]
         for side in search_sides_for_row(view, row):
             text = view._get_line_text(line, side)
-            matches.extend(
-                search_matches_for_text(
-                    text=text,
-                    query=query,
-                    row_index=row.row_index,
-                    line_index=row.line_index,
-                    side=side,
-                )
+            append_search_matches_for_text_casefolded(
+                matches,
+                text=text,
+                query=query,
+                row_index=row.row_index,
+                line_index=row.line_index,
+                side=side,
             )
     return matches
 
@@ -85,16 +91,70 @@ def apply_search_highlights(
     active_idx = view._search_match_index
     result = content
 
-    for span in search_highlight_spans(
-        view._search_matches,
+    for match_index, match in _search_matches_for_line_side(
+        view,
         line_index=line_index,
         side=side,
-        query_length=needle_len,
-        active_match_index=active_idx,
     ):
-        result = result.stylize(span.style, span.start, span.end)
+        result = result.stylize(
+            search_match_style(
+                match_index=match_index,
+                active_match_index=active_idx,
+            ),
+            match.column,
+            match.column + needle_len,
+        )
 
     return result
+
+
+def _search_matches_for_line_side(
+    view: DiffView,
+    *,
+    line_index: int,
+    side: SearchSide,
+) -> SearchMatchBucket:
+    source = _search_match_index_source(view._search_matches)
+    if view._search_matches_by_line_side_source != source:
+        view._search_matches_by_line_side = _build_search_matches_by_line_side(
+            view._search_matches
+        )
+        view._search_matches_by_line_side_source = source
+    return view._search_matches_by_line_side.get((line_index, side), ())
+
+
+def _search_match_index_source(
+    matches: list[DiffSearchMatch],
+) -> SearchMatchIndexSource:
+    return (id(matches), len(matches))
+
+
+def _build_search_matches_by_line_side(
+    matches: list[DiffSearchMatch],
+) -> SearchMatchesByLineSide:
+    match_count = len(matches)
+    if match_count == 0:
+        return {}
+    if match_count == 1:
+        match = matches[0]
+        return {(match.line_index, match.side): ((0, match),)}
+
+    buckets: dict[tuple[int, SearchSide], _SearchMatchBucketBuilder] = {}
+    for match_index, match in enumerate(matches):
+        key = (match.line_index, match.side)
+        entry = (match_index, match)
+        bucket = buckets.get(key)
+        if bucket is None:
+            buckets[key] = (entry,)
+        elif isinstance(bucket, list):
+            bucket.append(entry)
+        else:
+            buckets[key] = [bucket[0], entry]
+
+    return {
+        key: tuple(bucket) if isinstance(bucket, list) else bucket
+        for key, bucket in buckets.items()
+    }
 
 
 def refresh_matches(view: DiffView) -> None:

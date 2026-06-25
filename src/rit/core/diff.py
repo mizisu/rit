@@ -1,9 +1,10 @@
 """Diff parsing and word-level diff computation."""
 
 import re
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import Literal
+from typing import Literal, overload
 
 from rit.core.types import (
     DiffHunk,
@@ -62,9 +63,8 @@ def parse_multi_file_patch(
     refinement_cell_budget: int | None = PARSE_REFINEMENT_CELL_BUDGET,
 ) -> list[ParsedFilePatch]:
     """Parse a multi-file unified diff into per-file diffs."""
-    sections = _split_multi_file_patch(patch)
     parsed: list[ParsedFilePatch] = []
-    for section in sections:
+    for section in _iter_multi_file_patch_sections(patch):
         filename, old_filename, is_new, is_deleted, is_binary = _parse_file_metadata(
             section
         )
@@ -87,13 +87,18 @@ def parse_multi_file_patch(
 
 def parse_file_patch_summary(section: str) -> ParsedFilePatchSummary | None:
     """Parse file metadata and line counts without building diff line objects."""
-    filename, old_filename, is_new, is_deleted, is_binary = _parse_file_metadata(
-        section
-    )
+    (
+        filename,
+        old_filename,
+        is_new,
+        is_deleted,
+        is_binary,
+        additions,
+        deletions,
+    ) = _parse_file_summary_metadata(section)
     if not filename:
         return None
 
-    additions, deletions = _count_patch_changes(section)
     return ParsedFilePatchSummary(
         filename=filename,
         patch=section,
@@ -107,18 +112,40 @@ def parse_file_patch_summary(section: str) -> ParsedFilePatchSummary | None:
 
 
 def _split_multi_file_patch(patch: str) -> list[str]:
+    return list(_iter_multi_file_patch_sections(patch))
+
+
+def _iter_multi_file_patch_sections(patch: str) -> Iterator[str]:
     if not patch:
-        return []
+        return
 
-    starts = [match.start() for match in re.finditer(r"(?m)^diff --git ", patch)]
-    if not starts:
-        return [patch]
+    section_start: int | None = None
+    for match in re.finditer(r"(?m)^diff --git ", patch):
+        start = match.start()
+        if section_start is not None:
+            yield patch[section_start:start].rstrip("\n")
+        section_start = start
 
-    sections: list[str] = []
-    for index, start in enumerate(starts):
-        end = starts[index + 1] if index + 1 < len(starts) else len(patch)
-        sections.append(patch[start:end].rstrip("\n"))
-    return sections
+    if section_start is None:
+        yield patch
+    else:
+        yield patch[section_start:].rstrip("\n")
+
+
+def _iter_patch_lines(text: str) -> Iterator[str]:
+    start = 0
+    text_length = len(text)
+    while start < text_length:
+        end = text.find("\n", start)
+        if end < 0:
+            line = text[start:]
+            start = text_length
+        else:
+            line = text[start:end]
+            start = end + 1
+        if line.endswith("\r"):
+            line = line[:-1]
+        yield line
 
 
 def _parse_file_metadata(section: str) -> tuple[str, str | None, bool, bool, bool]:
@@ -128,7 +155,7 @@ def _parse_file_metadata(section: str) -> tuple[str, str | None, bool, bool, boo
     is_deleted = False
     is_binary = False
 
-    for line in section.splitlines():
+    for line in _iter_patch_lines(section):
         if line.startswith(DIFF_GIT_PREFIX):
             old_path, new_path = _parse_diff_git_paths(line)
             filename = new_path or old_path
@@ -165,10 +192,73 @@ def _parse_file_metadata(section: str) -> tuple[str, str | None, bool, bool, boo
     return filename, old_filename, is_new, is_deleted, is_binary
 
 
+def _parse_file_summary_metadata(
+    section: str,
+) -> tuple[str, str | None, bool, bool, bool, int, int]:
+    filename = ""
+    old_filename: str | None = None
+    is_new = False
+    is_deleted = False
+    is_binary = False
+    additions = 0
+    deletions = 0
+    in_hunk = False
+
+    for line in _iter_patch_lines(section):
+        if line.startswith("+++") or line.startswith("---"):
+            if not in_hunk:
+                if line.startswith("--- "):
+                    old_path = _normalize_patch_path(line.removeprefix("--- "))
+                    if old_path is None:
+                        is_new = True
+                        old_filename = None
+                    elif old_filename is None:
+                        old_filename = old_path
+                else:
+                    new_path = _normalize_patch_path(line.removeprefix("+++ "))
+                    if new_path is None:
+                        is_deleted = True
+                    else:
+                        filename = new_path
+            continue
+
+        if line.startswith("@@ "):
+            in_hunk = True
+            continue
+
+        if line.startswith("+"):
+            additions += 1
+        elif line.startswith("-"):
+            deletions += 1
+
+        if in_hunk:
+            continue
+
+        if line.startswith(DIFF_GIT_PREFIX):
+            old_path, new_path = _parse_diff_git_paths(line)
+            filename = new_path or old_path
+            old_filename = old_path if old_path != new_path else None
+        elif line.startswith("new file mode"):
+            is_new = True
+            old_filename = None
+        elif line.startswith("deleted file mode"):
+            is_deleted = True
+        elif line.startswith("rename from "):
+            old_filename = line.removeprefix("rename from ")
+        elif line.startswith("rename to "):
+            filename = line.removeprefix("rename to ")
+        elif line.startswith("Binary files ") or line.startswith("GIT binary patch"):
+            is_binary = True
+
+    if old_filename == filename:
+        old_filename = None
+    return filename, old_filename, is_new, is_deleted, is_binary, additions, deletions
+
+
 def _count_patch_changes(section: str) -> tuple[int, int]:
     additions = 0
     deletions = 0
-    for line in section.splitlines():
+    for line in _iter_patch_lines(section):
         if line.startswith("+++") or line.startswith("---"):
             continue
         if line.startswith("+"):
@@ -220,7 +310,7 @@ def parse_patch(
     old_line_no = 0
     new_line_no = 0
 
-    for line in patch.splitlines():
+    for line in _iter_patch_lines(patch):
         match = HUNK_PATTERN.match(line) if line.startswith("@@ ") else None
         if match:
             if current_hunk:
@@ -357,27 +447,81 @@ def _estimate_hunk_refinement_cost(hunk: DiffHunk) -> int:
     return cost
 
 
+class _DiffLineContentWindow(Sequence[str]):
+    def __init__(
+        self,
+        lines: Sequence[DiffLine],
+        start: int,
+        stop: int,
+        side: Literal["old", "new"],
+    ) -> None:
+        self._lines = lines
+        self._start = start
+        self._stop = stop
+        self._side = side
+
+    def __len__(self) -> int:
+        return max(0, self._stop - self._start)
+
+    def __iter__(self) -> Iterator[str]:
+        for index in range(self._start, self._stop):
+            yield self._content_at(index)
+
+    @overload
+    def __getitem__(self, index: int) -> str: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[str]: ...
+
+    def __getitem__(self, index: int | slice) -> str | list[str]:
+        if isinstance(index, slice):
+            return [self[line_index] for line_index in range(*index.indices(len(self)))]
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        return self._content_at(self._start + index)
+
+    def _content_at(self, index: int) -> str:
+        line = self._lines[index]
+        if self._side == "old":
+            return line.old_content
+        return line.new_content
+
+
 def _realign_replace_block(
-    deleted_lines: list[DiffLine],
-    added_lines: list[DiffLine],
+    lines: Sequence[DiffLine],
+    deleted_start: int,
+    added_start: int,
+    end: int,
 ) -> list[DiffLine]:
     realigned_lines = compute_line_diff(
-        [line.old_content for line in deleted_lines],
-        [line.new_content for line in added_lines],
+        _DiffLineContentWindow(lines, deleted_start, added_start, "old"),
+        _DiffLineContentWindow(lines, added_start, end, "new"),
     )
 
-    old_index = 0
-    new_index = 0
+    old_index = deleted_start
+    new_index = added_start
 
     for line in realigned_lines:
         if line.old_line_no is not None:
-            line.old_line_no = deleted_lines[old_index].old_line_no
+            line.old_line_no = lines[old_index].old_line_no
             old_index += 1
         if line.new_line_no is not None:
-            line.new_line_no = added_lines[new_index].new_line_no
+            line.new_line_no = lines[new_index].new_line_no
             new_index += 1
 
     return realigned_lines
+
+
+def _extend_line_range(
+    target: list[DiffLine],
+    source: Sequence[DiffLine],
+    start: int,
+    end: int,
+) -> None:
+    for index in range(start, end):
+        target.append(source[index])
 
 
 def _identify_modified_lines(
@@ -405,19 +549,21 @@ def _identify_modified_lines(
         while i < len(hunk.lines) and hunk.lines[i].is_added:
             i += 1
 
-        deleted_lines = hunk.lines[deleted_start:added_start]
-        added_lines = hunk.lines[added_start:i]
+        deleted_count = added_start - deleted_start
+        added_count = i - added_start
 
-        if added_lines:
-            block_cost = len(deleted_lines) * len(added_lines)
+        if added_count:
+            block_cost = deleted_count * added_count
             if block_cell_budget is None or block_cost <= block_cell_budget:
-                new_lines.extend(_realign_replace_block(deleted_lines, added_lines))
+                new_lines.extend(
+                    _realign_replace_block(hunk.lines, deleted_start, added_start, i)
+                )
             else:
-                new_lines.extend(deleted_lines)
-                new_lines.extend(added_lines)
+                _extend_line_range(new_lines, hunk.lines, deleted_start, added_start)
+                _extend_line_range(new_lines, hunk.lines, added_start, i)
                 fully_refined = False
         else:
-            new_lines.extend(deleted_lines)
+            _extend_line_range(new_lines, hunk.lines, deleted_start, added_start)
 
     hunk.lines = new_lines
     return fully_refined
@@ -434,9 +580,38 @@ def _replace_pair_cost(old_text: str, new_text: str) -> float:
     return 1.0 - similarity
 
 
+class _LineWindow(Sequence[str]):
+    def __init__(self, lines: Sequence[str], start: int, stop: int) -> None:
+        self._lines = lines
+        self._start = start
+        self._stop = stop
+
+    def __len__(self) -> int:
+        return max(0, self._stop - self._start)
+
+    def __iter__(self) -> Iterator[str]:
+        for index in range(self._start, self._stop):
+            yield self._lines[index]
+
+    @overload
+    def __getitem__(self, index: int) -> str: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[str]: ...
+
+    def __getitem__(self, index: int | slice) -> str | list[str]:
+        if isinstance(index, slice):
+            return [self[line_index] for line_index in range(*index.indices(len(self)))]
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        return self._lines[self._start + index]
+
+
 def _align_replace_lines(
-    old_lines: list[str],
-    new_lines: list[str],
+    old_lines: Sequence[str],
+    new_lines: Sequence[str],
 ) -> list[tuple[str | None, str | None]]:
     old_count = len(old_lines)
     new_count = len(new_lines)
@@ -445,6 +620,12 @@ def _align_replace_lines(
         return [(None, line) for line in new_lines]
     if new_count == 0:
         return [(line, None) for line in old_lines]
+    if old_count == 1 and new_count == 1:
+        old_text = old_lines[0]
+        new_text = new_lines[0]
+        if old_text == new_text or _replace_pair_cost(old_text, new_text) < 2.0:
+            return [(old_text, new_text)]
+        return [(old_text, None), (None, new_text)]
 
     costs = [[0.0] * (new_count + 1) for _ in range(old_count + 1)]
     choices = [[""] * (new_count + 1) for _ in range(old_count + 1)]
@@ -527,31 +708,44 @@ def _tokenize(text: str) -> list[str]:
     return re.findall(r"\S+|\s+", text)
 
 
-def _merge_segments(segments: list[InlineSegment]) -> list[InlineSegment]:
+def _effective_merge_segment(
+    segments: Sequence[InlineSegment],
+    index: int,
+) -> InlineSegment:
+    segment = segments[index]
+    if not (0 < index < len(segments) - 1):
+        return segment
+
+    previous_type = segments[index - 1].type
+    next_type = segments[index + 1].type
+    if (
+        segment.type == SegmentType.UNCHANGED
+        and segment.text.strip() == ""
+        and previous_type != SegmentType.UNCHANGED
+        and next_type != SegmentType.UNCHANGED
+    ):
+        return InlineSegment(text=segment.text, type=previous_type)
+    return segment
+
+
+def _merge_segments(segments: Sequence[InlineSegment]) -> list[InlineSegment]:
     """Merge small unchanged gaps between changed segments.
 
     Whitespace-only UNCHANGED segments between same-type changed segments
     are absorbed into the changed region, producing one continuous highlight
     instead of a fragmented patchwork.
     """
-    if len(segments) <= 2:
-        return segments
+    segment_count = len(segments)
+    if segment_count == 0:
+        return []
+    if segment_count == 1:
+        return [segments[0]]
+    if segment_count == 2:
+        return [segments[0], segments[1]]
 
-    # First pass: convert whitespace-only UNCHANGED between changed segments
-    converted = list(segments)
-    for i in range(1, len(converted) - 1):
-        seg = converted[i]
-        if (
-            seg.type == SegmentType.UNCHANGED
-            and seg.text.strip() == ""
-            and converted[i - 1].type != SegmentType.UNCHANGED
-            and converted[i + 1].type != SegmentType.UNCHANGED
-        ):
-            converted[i] = InlineSegment(text=seg.text, type=converted[i - 1].type)
-
-    # Second pass: merge consecutive same-type segments
-    result: list[InlineSegment] = [converted[0]]
-    for seg in converted[1:]:
+    result: list[InlineSegment] = [_effective_merge_segment(segments, 0)]
+    for index in range(1, segment_count):
+        seg = _effective_merge_segment(segments, index)
         if result[-1].type == seg.type:
             prev = result[-1]
             result[-1] = InlineSegment(text=prev.text + seg.text, type=prev.type)
@@ -561,12 +755,28 @@ def _merge_segments(segments: list[InlineSegment]) -> list[InlineSegment]:
     return result
 
 
-def _can_refine_token_replace(old_words: list[str], new_words: list[str]) -> bool:
-    if len(old_words) != 1 or len(new_words) != 1:
+def _join_range(words: Sequence[str], start: int, end: int) -> str:
+    token_count = end - start
+    if token_count <= 0:
+        return ""
+    if token_count == 1:
+        return words[start]
+    return "".join(words[index] for index in range(start, end))
+
+
+def _can_refine_token_replace(
+    old_words: Sequence[str],
+    old_start: int,
+    old_end: int,
+    new_words: Sequence[str],
+    new_start: int,
+    new_end: int,
+) -> bool:
+    if old_end - old_start != 1 or new_end - new_start != 1:
         return False
 
-    old_text = old_words[0]
-    new_text = new_words[0]
+    old_text = old_words[old_start]
+    new_text = new_words[new_start]
     if old_text.isspace() or new_text.isspace():
         return False
 
@@ -680,6 +890,10 @@ def compute_word_diff(
             [InlineSegment(text=old_text, type=SegmentType.UNCHANGED)],
             [InlineSegment(text=new_text, type=SegmentType.UNCHANGED)],
         )
+    if not old_text:
+        return ([], [InlineSegment(text=new_text, type=SegmentType.ADDED)])
+    if not new_text:
+        return ([InlineSegment(text=old_text, type=SegmentType.DELETED)], [])
 
     old_words = _tokenize(old_text)
     new_words = _tokenize(new_text)
@@ -690,17 +904,15 @@ def compute_word_diff(
 
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag == "equal":
-            text = "".join(old_words[i1:i2])
+            text = _join_range(old_words, i1, i2)
             old_segments.append(InlineSegment(text=text, type=SegmentType.UNCHANGED))
             new_segments.append(InlineSegment(text=text, type=SegmentType.UNCHANGED))
         elif tag == "replace":
-            replaced_old_words = old_words[i1:i2]
-            replaced_new_words = new_words[j1:j2]
-            if _can_refine_token_replace(replaced_old_words, replaced_new_words):
+            if _can_refine_token_replace(old_words, i1, i2, new_words, j1, j2):
                 refined_old_segments, refined_new_segments = (
                     _compute_char_diff_segments(
-                        replaced_old_words[0],
-                        replaced_new_words[0],
+                        old_words[i1],
+                        new_words[j1],
                     )
                 )
                 old_segments.extend(refined_old_segments)
@@ -708,29 +920,38 @@ def compute_word_diff(
             else:
                 old_segments.append(
                     InlineSegment(
-                        text="".join(replaced_old_words),
+                        text=_join_range(old_words, i1, i2),
                         type=SegmentType.DELETED,
                     )
                 )
                 new_segments.append(
                     InlineSegment(
-                        text="".join(replaced_new_words),
+                        text=_join_range(new_words, j1, j2),
                         type=SegmentType.ADDED,
                     )
                 )
         elif tag == "delete":
             old_segments.append(
-                InlineSegment(text="".join(old_words[i1:i2]), type=SegmentType.DELETED)
+                InlineSegment(
+                    text=_join_range(old_words, i1, i2),
+                    type=SegmentType.DELETED,
+                )
             )
         elif tag == "insert":
             new_segments.append(
-                InlineSegment(text="".join(new_words[j1:j2]), type=SegmentType.ADDED)
+                InlineSegment(
+                    text=_join_range(new_words, j1, j2),
+                    type=SegmentType.ADDED,
+                )
             )
 
     return _merge_segments(old_segments), _merge_segments(new_segments)
 
 
-def compute_line_diff(old_lines: list[str], new_lines: list[str]) -> list[DiffLine]:
+def compute_line_diff(old_lines: Sequence[str], new_lines: Sequence[str]) -> list[DiffLine]:
+    if old_lines is new_lines:
+        return _context_diff_lines(old_lines)
+
     matcher = SequenceMatcher(None, old_lines, new_lines)
     result: list[DiffLine] = []
 
@@ -752,8 +973,8 @@ def compute_line_diff(old_lines: list[str], new_lines: list[str]) -> list[DiffLi
                 new_line_no += 1
 
         elif tag == "replace":
-            old_chunk = old_lines[i1:i2]
-            new_chunk = new_lines[j1:j2]
+            old_chunk = _LineWindow(old_lines, i1, i2)
+            new_chunk = _LineWindow(new_lines, j1, j2)
 
             for old_text, new_text in _align_replace_lines(old_chunk, new_chunk):
                 if old_text is not None and new_text is not None:
@@ -859,4 +1080,20 @@ def compute_line_diff(old_lines: list[str], new_lines: list[str]) -> list[DiffLi
                 )
                 new_line_no += 1
 
+    return result
+
+
+def _context_diff_lines(lines: Sequence[str]) -> list[DiffLine]:
+    result: list[DiffLine] = []
+    line_no = 1
+    for line in lines:
+        result.append(
+            DiffLine(
+                old_line_no=line_no,
+                new_line_no=line_no,
+                old_content=line,
+                new_content=line,
+            )
+        )
+        line_no += 1
     return result

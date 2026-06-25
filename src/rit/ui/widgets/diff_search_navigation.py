@@ -67,7 +67,7 @@ def activate_match(view: DiffView, index: int) -> None:
 
     match = activation.match
     view._search_match_index = index
-    view._invalidate_base_code_content_cache(set(activation.dirty_lines))
+    view._invalidate_base_code_content_cache(activation.dirty_lines)
 
     rows = view._rows_for_current_mode()
     target_row = rows[match.row_index] if 0 <= match.row_index < len(rows) else None

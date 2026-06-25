@@ -98,6 +98,11 @@ class DiffHunk:
 
     @property
     def has_changes(self) -> bool:
+        if not self.lines:
+            return False
+        if len(self.lines) == 1:
+            line = self.lines[0]
+            return line.is_added or line.is_deleted or line.is_modified
         return any(
             line.is_added or line.is_deleted or line.is_modified for line in self.lines
         )
@@ -116,7 +121,31 @@ class FileDiff:
     show_hunk_headers: bool = True
 
     @property
+    def change_counts(self) -> tuple[int, int]:
+        additions = 0
+        deletions = 0
+        for hunk in self.hunks:
+            for line in hunk.lines:
+                if line.is_added or line.is_modified:
+                    additions += 1
+                if line.is_deleted or line.is_modified:
+                    deletions += 1
+        return additions, deletions
+
+    @property
     def total_additions(self) -> int:
+        if not self.hunks:
+            return 0
+        if len(self.hunks) == 1:
+            lines = self.hunks[0].lines
+            if len(lines) == 1:
+                line = lines[0]
+                return 1 if line.is_added or line.is_modified else 0
+            additions = 0
+            for line in lines:
+                if line.is_added or line.is_modified:
+                    additions += 1
+            return additions
         return sum(
             1
             for hunk in self.hunks
@@ -126,6 +155,18 @@ class FileDiff:
 
     @property
     def total_deletions(self) -> int:
+        if not self.hunks:
+            return 0
+        if len(self.hunks) == 1:
+            lines = self.hunks[0].lines
+            if len(lines) == 1:
+                line = lines[0]
+                return 1 if line.is_deleted or line.is_modified else 0
+            deletions = 0
+            for line in lines:
+                if line.is_deleted or line.is_modified:
+                    deletions += 1
+            return deletions
         return sum(
             1
             for hunk in self.hunks

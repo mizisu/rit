@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, Literal
 
 from rich.cells import cell_len
@@ -81,12 +81,19 @@ def _split_prefix_width_for_layout(
 
 
 def _can_fit_auto_split_content(view: DiffView) -> bool:
-    return _layout.can_fit_auto_split_content(
-        view._all_lines,
-        old_prefix_width=_split_prefix_width_for_layout(view, "old"),
-        new_prefix_width=_split_prefix_width_for_layout(view, "new"),
-        available_width=view.size.width,
+    if not view._all_lines:
+        return True
+
+    split_gap = 2
+    required_width = (
+        _split_prefix_width_for_layout(view, "old")
+        + view._split_old_code_width
+        + _split_prefix_width_for_layout(view, "new")
+        + view._split_new_code_width
+        + split_gap
+        + split_gap
     )
+    return view.size.width >= required_width
 
 
 def _update_split_state(view: DiffView) -> None:
@@ -108,6 +115,9 @@ def _update_split_state(view: DiffView) -> None:
     if view.split:
         view.scroll_x = 0
         view._sync_split_horizontal_scroll(view._split_horizontal_scroll_x)
+
+    if view._all_lines:
+        _ensure_rendered_rows_for_mode(view, split=view.split)
 
     if old_split != view.split and view._all_lines:
         _virtual._rebuild_virtual_layout(view)
@@ -134,11 +144,45 @@ def _update_split_state(view: DiffView) -> None:
 
 
 def _rebuild_rendered_rows(view: DiffView) -> None:
-    rows = _plan.build_rendered_rows(view._diff)
+    rows = _rendered_rows_for_mode(view)
     view._rows_unified = rows.rows_unified
     view._rows_split = rows.rows_split
     view._row_lookup_unified = rows.row_lookup_unified
     view._row_lookup_split = rows.row_lookup_split
+    view._rows_unified_ready = True
+    view._rows_split_ready = True
+
+
+def _ensure_rendered_rows_for_mode(view: DiffView, *, split: bool) -> None:
+    if split:
+        if view._rows_split_ready:
+            return
+        rows = _rendered_rows_for_mode(view, split=True)
+        view._rows_split = rows.rows_split
+        view._row_lookup_split = rows.row_lookup_split
+        view._rows_split_ready = True
+        return
+
+    if view._rows_unified_ready:
+        return
+    rows = _rendered_rows_for_mode(view, split=False)
+    view._rows_unified = rows.rows_unified
+    view._row_lookup_unified = rows.row_lookup_unified
+    view._rows_unified_ready = True
+
+
+def _rendered_rows_for_mode(
+    view: DiffView,
+    *,
+    split: bool | None = None,
+) -> _plan.RenderedRowsPlan:
+    if view._all_lines and len(view._hunk_index_by_line) == len(view._all_lines):
+        return _plan.build_rendered_rows_from_lines(
+            view._all_lines,
+            view._hunk_index_by_line,
+            split=split,
+        )
+    return _plan.build_rendered_rows(view._diff, split=split)
 
 
 # ---------------------------------------------------------------------------
@@ -164,15 +208,16 @@ def _precompute_diff_data(view: DiffView) -> None:
 
 
 def _invalidate_base_code_content_cache(
-    view: DiffView, line_indices: set[int] | None = None
+    view: DiffView, line_indices: Collection[int] | None = None
 ) -> None:
     if line_indices is None:
         view._base_code_content_cache.clear()
+        view._base_code_content_cache_keys_by_line.clear()
         return
     for line_idx in line_indices:
-        for side in ("old", "new", "auto"):
-            view._base_code_content_cache.pop((line_idx, side, ""), None)
-            view._base_code_content_cache.pop((line_idx, side, " "), None)
+        cache_keys = view._base_code_content_cache_keys_by_line.pop(line_idx, ())
+        for cache_key in cache_keys:
+            view._base_code_content_cache.pop(cache_key, None)
 
 
 def _render_height_for_line(view: DiffView, line: DiffLine) -> int:
@@ -278,49 +323,52 @@ async def _render_diff(view: DiffView) -> None:
     if new_content is None:
         new_content = view.query_one("#diff-content", VerticalScroll)
         view._content_widget = new_content
-    await new_content.remove_children()
-    if request_token is not None and not view._is_current_render_request(request_token):
-        return
+    with view.app.batch_update():
+        await new_content.remove_children()
+        if request_token is not None and not view._is_current_render_request(
+            request_token
+        ):
+            return
 
-    view._code_widgets_by_line = {}
-    view._unified_blocks_by_line = {}
-    view._split_blocks_by_line = {}
-    view._line_widgets_by_index = {}
-    view._comment_widgets_by_line = {}
-    view._comment_layout_widgets_by_line = {}
-    view._pending_comment_widgets_by_line = {}
-    view._pending_comment_layout_widgets_by_line = {}
-    view._inline_comment_editor_widget = None
-    view._inline_comment_editor_layout_widget = None
-    view._row_anchor_widgets = {}
-    view._hunk_header_widgets = {}
-    view._virt.top_buffer = None
-    view._virt.bottom_buffer = None
-    view._center_padding_widget = None
-    view._center_padding_height = 0
-    view._cursor_ui.suspend_pane_watch = False
-    view._visual_selection_specs = {}
+        view._code_widgets_by_line = {}
+        view._unified_blocks_by_line = {}
+        view._split_blocks_by_line = {}
+        view._line_widgets_by_index = {}
+        view._comment_widgets_by_line = {}
+        view._comment_layout_widgets_by_line = {}
+        view._pending_comment_widgets_by_line = {}
+        view._pending_comment_layout_widgets_by_line = {}
+        view._inline_comment_editor_widget = None
+        view._inline_comment_editor_layout_widget = None
+        view._row_anchor_widgets = {}
+        view._hunk_header_widgets = {}
+        view._virt.top_buffer = None
+        view._virt.bottom_buffer = None
+        view._center_padding_widget = None
+        view._center_padding_height = 0
+        view._cursor_ui.suspend_pane_watch = False
+        view._visual_selection_specs = {}
 
-    if not view._diff or not view._diff.hunks:
-        new_content.mount(Static("No changes in this file", classes="placeholder"))
-    elif view._virt.active:
-        _virtual._render_virtual_window(view, new_content)
-    else:
-        for hunk_index, hunk in enumerate(view._diff.hunks):
-            _render_hunk(
-                view,
-                new_content,
-                hunk,
-                hunk_index=hunk_index,
-                show_header=True,
-            )
+        if not view._diff or not view._diff.hunks:
+            new_content.mount(Static("No changes in this file", classes="placeholder"))
+        elif view._virt.active:
+            _virtual._render_virtual_window(view, new_content)
+        else:
+            for hunk_index, hunk in enumerate(view._diff.hunks):
+                _render_hunk(
+                    view,
+                    new_content,
+                    hunk,
+                    hunk_index=hunk_index,
+                    show_header=True,
+                )
 
-    if view._virt.active:
-        view._virt.rendered_start = view._virt.window_start
-        view._virt.rendered_end = view._virt.window_end
-    else:
-        view._virt.rendered_start = 0
-        view._virt.rendered_end = len(view._all_lines) - 1
+        if view._virt.active:
+            view._virt.rendered_start = view._virt.window_start
+            view._virt.rendered_end = view._virt.window_end
+        else:
+            view._virt.rendered_start = 0
+            view._virt.rendered_end = len(view._all_lines) - 1
 
     if request_token is not None:
         view.call_after_refresh(
@@ -331,6 +379,10 @@ async def _render_diff(view: DiffView) -> None:
 
 
 def _file_for_header(view: DiffView, path: str) -> PRFile | None:
+    file = getattr(view, "_file", None)
+    if isinstance(file, PRFile) and file.filename == path:
+        return file
+
     store = getattr(view, "store", None)
     state = getattr(store, "state", None)
     files = getattr(state, "files", None)
@@ -351,10 +403,6 @@ def _file_for_header(view: DiffView, path: str) -> PRFile | None:
         file = files_by_filename.get(path)
         if isinstance(file, PRFile):
             return file
-
-    file = getattr(view, "_file", None)
-    if isinstance(file, PRFile) and file.filename == path:
-        return file
 
     return None
 
@@ -377,6 +425,9 @@ def _file_header_width_for_layout(view: DiffView, fallback_width: int) -> int:
 
 
 def _aggregate_file_change_stats(view: DiffView, path: str) -> tuple[int, int]:
+    planned_stats = getattr(view, "_file_change_stats", {})
+    if path in planned_stats:
+        return planned_stats[path]
     return _header.aggregate_file_change_stats(view._diff, path)
 
 
@@ -484,7 +535,7 @@ def _hunk_lines_for_window(
     hunk: DiffHunk,
     window_start: int | None,
     window_end: int | None,
-) -> list[DiffLine]:
+) -> Sequence[DiffLine]:
     return _geometry.hunk_lines_for_window(hunk, window_start, window_end)
 
 
@@ -540,16 +591,26 @@ PREVIEW_PREFIX_WIDTH = 7
 
 
 def _old_line_number_width(view: DiffView) -> int:
+    if not view.show_line_numbers:
+        return 0
+    planned_width = getattr(view, "_old_line_number_width_value", None)
+    if isinstance(planned_width, int):
+        return planned_width
     return _layout.line_number_width_for_layout(
-        show_line_numbers=view.show_line_numbers,
-        numbers=tuple(view._line_index_by_old_number),
+        show_line_numbers=True,
+        numbers=view._line_index_by_old_number.keys(),
     )
 
 
 def _new_line_number_width(view: DiffView) -> int:
+    if not view.show_line_numbers:
+        return 0
+    planned_width = getattr(view, "_new_line_number_width_value", None)
+    if isinstance(planned_width, int):
+        return planned_width
     return _layout.line_number_width_for_layout(
-        show_line_numbers=view.show_line_numbers,
-        numbers=tuple(view._line_index_by_new_number),
+        show_line_numbers=True,
+        numbers=view._line_index_by_new_number.keys(),
     )
 
 
@@ -659,7 +720,7 @@ def _split_code_widths_for_layout(view: DiffView) -> tuple[int, int]:
 def _mount_split_lines(
     view: DiffView,
     container: VerticalScroll,
-    lines: list[DiffLine],
+    lines: Sequence[DiffLine],
     *,
     before: Widget | None = None,
 ) -> None:
@@ -792,7 +853,7 @@ def _mount_split_lines(
 def _mount_unified_lines(
     view: DiffView,
     container: VerticalScroll,
-    lines: list[DiffLine],
+    lines: Sequence[DiffLine],
     *,
     before: Widget | None = None,
 ) -> None:
@@ -912,7 +973,7 @@ def _mount_unified_lines(
 def _render_hunk_unified(
     view: DiffView,
     container: VerticalScroll,
-    lines: list[DiffLine],
+    lines: Sequence[DiffLine],
 ) -> None:
     _mount_unified_lines(view, container, lines)
 
@@ -920,7 +981,7 @@ def _render_hunk_unified(
 def _render_hunk_split(
     view: DiffView,
     container: VerticalScroll,
-    lines: list[DiffLine],
+    lines: Sequence[DiffLine],
 ) -> None:
     _mount_split_lines(view, container, lines)
 
@@ -1097,8 +1158,7 @@ def _build_split_code_content(
             return _split_placeholder_content(view, side=side)
         return None
 
-    text = line.old_content if side == "old" else line.new_content
-    spec = view._compute_selection_spec_for_line(line.line_index)
+    spec = _selection_spec_for_rendered_line(view, line.line_index)
     has_cursor = (
         view._diff_line_cursor_active(line.line_index)
         and view._cursor_side_for_line(line) == side
@@ -1106,6 +1166,7 @@ def _build_split_code_content(
     cursor_col = view.cursor_column if has_cursor else None
 
     if spec is not None:
+        text = line.old_content if side == "old" else line.new_content
         sel_start, sel_end, _ = spec
         actual_end = sel_end if sel_end is not None else max(0, len(text) - 1)
         return view._build_code_content_with_selection(
@@ -1123,6 +1184,14 @@ def _build_split_code_content(
         cursor_col,
         side=side,
     )
+
+
+def _selection_spec_for_rendered_line(view: DiffView, line_index: int):
+    if not getattr(view, "visual_mode", False):
+        return None
+    if getattr(view, "visual_anchor_line", None) is None:
+        return None
+    return view._compute_selection_spec_for_line(line_index)
 
 
 def _render_line_split(
@@ -1348,6 +1417,10 @@ def _base_code_content(
         line, side=side, empty_fallback=empty_fallback
     )
     view._base_code_content_cache[cache_key] = cached
+    view._base_code_content_cache_keys_by_line.setdefault(
+        line_index,
+        set(),
+    ).add(cache_key)
     return cached
 
 
@@ -1361,7 +1434,7 @@ def _update_line_cursor(view: DiffView, line_idx: int) -> None:
         return
     if not view.is_mounted:
         return
-    if _blocks._refresh_grouped_blocks_for_lines(view, {line_idx}):
+    if _blocks._refresh_grouped_blocks_for_lines(view, (line_idx,)):
         return
     code_widgets = view._get_code_widgets(line_idx)
     if not code_widgets:
@@ -1420,6 +1493,8 @@ def _build_code_content_with_cursor(
         line.line_index,
         side,
     )
+    if not has_cursor or cursor_col is None:
+        return base_content
     return _cursor_content.apply_cursor_to_code_content(
         base_content,
         line_text=view._get_line_text(line, side),

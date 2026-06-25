@@ -18,8 +18,8 @@ def refresh_search_display(view: DiffView) -> None:
         view._search_matches,
         previous_match_lines=view._prev_search_match_lines,
     )
-    match_lines = set(update.dirty_lines)
-    view._prev_search_match_lines = set(update.previous_match_lines)
+    match_lines = update.dirty_lines
+    view._prev_search_match_lines = update.previous_match_lines
 
     if not match_lines:
         return

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+from bisect import bisect_left, bisect_right
+from collections.abc import Iterable, Iterator, Sequence
+from typing import overload
 
 from textual import highlight
 from textual.content import Content, Span
 from textual.highlight import HighlightTheme
 
 from rit.core.highlight_theme import RitHighlightTheme, RitLightHighlightTheme
-from rit.core.types import DiffLine, FileDiff
+from rit.core.types import DiffHunk, DiffLine, FileDiff
 
 __all__ = (
     "WORD_DIFF_ADDED_STYLE",
@@ -54,6 +56,35 @@ def _filename_for_lines(lines: Iterable[DiffLine], fallback: str) -> str:
     return fallback
 
 
+class _DiffLineWindow(Sequence[DiffLine]):
+    def __init__(self, lines: Sequence[DiffLine], start: int, stop: int) -> None:
+        self._lines = lines
+        self._start = start
+        self._stop = stop
+
+    def __len__(self) -> int:
+        return max(0, self._stop - self._start)
+
+    def __iter__(self) -> Iterator[DiffLine]:
+        for index in range(self._start, self._stop):
+            yield self._lines[index]
+
+    @overload
+    def __getitem__(self, index: int) -> DiffLine: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[DiffLine]: ...
+
+    def __getitem__(self, index: int | slice) -> DiffLine | list[DiffLine]:
+        if isinstance(index, slice):
+            return [self[line_index] for line_index in range(*index.indices(len(self)))]
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        return self._lines[self._start + index]
+
+
 def _iter_diff_line_file_groups(diff: FileDiff) -> Iterable[tuple[str, list[DiffLine]]]:
     active_filename = diff.filename
     current_filename: str | None = None
@@ -92,7 +123,35 @@ def _iter_diff_line_context_windows(
     diff: FileDiff,
     start_line: int,
     end_line: int,
-) -> Iterable[tuple[str, list[DiffLine], list[DiffLine], int, int]]:
+    *,
+    hunk_start_line_indices: Sequence[int] | None = None,
+    hunk_end_line_indices: Sequence[int] | None = None,
+) -> Iterable[tuple[str, Sequence[DiffLine], Sequence[DiffLine], int, int]]:
+    if (
+        hunk_start_line_indices is not None
+        and hunk_end_line_indices is not None
+        and len(hunk_start_line_indices) >= len(diff.hunks)
+        and len(hunk_end_line_indices) >= len(diff.hunks)
+    ):
+        first = bisect_left(hunk_end_line_indices, start_line)
+        last = bisect_right(hunk_start_line_indices, end_line) - 1
+        if first > last:
+            return
+
+        active_filename = diff.filename
+        for hunk_index in range(first, last + 1):
+            hunk = diff.hunks[hunk_index]
+            hunk_filename = hunk.file_path or active_filename
+            window = _diff_line_context_window_for_hunk(
+                hunk,
+                start_line,
+                end_line,
+                hunk_filename,
+            )
+            if window is not None:
+                yield window
+        return
+
     active_filename = diff.filename
     for hunk in diff.hunks:
         if hunk.file_path:
@@ -100,21 +159,49 @@ def _iter_diff_line_context_windows(
         if not hunk.lines:
             continue
 
-        hunk_start = hunk.lines[0].line_index
-        hunk_end = hunk.lines[-1].line_index
-        if hunk_end < start_line:
+        if hunk.lines[-1].line_index < start_line:
             continue
-        if hunk_start > end_line:
+        if hunk.lines[0].line_index > end_line:
             break
 
-        selected_start = max(0, start_line - hunk_start)
-        selected_end = min(len(hunk.lines) - 1, end_line - hunk_start)
-        context_lines = hunk.lines[: selected_end + 1]
-        selected_lines = hunk.lines[selected_start : selected_end + 1]
-        old_offset, new_offset = _count_side_lines(hunk.lines[:selected_start])
         hunk_filename = hunk.file_path or active_filename
-        filename = _filename_for_lines(selected_lines, hunk_filename)
-        yield filename, context_lines, selected_lines, old_offset, new_offset
+        window = _diff_line_context_window_for_hunk(
+            hunk,
+            start_line,
+            end_line,
+            hunk_filename,
+        )
+        if window is not None:
+            yield window
+
+
+def _diff_line_context_window_for_hunk(
+    hunk: DiffHunk,
+    start_line: int,
+    end_line: int,
+    fallback_filename: str,
+) -> tuple[str, Sequence[DiffLine], Sequence[DiffLine], int, int] | None:
+    if not hunk.lines:
+        return None
+
+    hunk_start = hunk.lines[0].line_index
+    hunk_end = hunk.lines[-1].line_index
+    if hunk_end < start_line or hunk_start > end_line:
+        return None
+
+    selected_start = max(0, start_line - hunk_start)
+    selected_end = min(len(hunk.lines) - 1, end_line - hunk_start)
+    context_lines = _DiffLineWindow(hunk.lines, 0, selected_end + 1)
+    selected_lines = _DiffLineWindow(hunk.lines, selected_start, selected_end + 1)
+    if selected_start == 0:
+        old_offset = 0
+        new_offset = 0
+    else:
+        old_offset, new_offset = _count_side_lines(
+            _DiffLineWindow(hunk.lines, 0, selected_start)
+        )
+    filename = _filename_for_lines(selected_lines, fallback_filename)
+    return filename, context_lines, selected_lines, old_offset, new_offset
 
 
 def _collect_line_text(lines: Iterable[DiffLine]) -> tuple[list[str], list[str]]:
@@ -160,10 +247,21 @@ def _highlight_text_lines(
             theme=theme,
         )
 
-    old_content_lines = old_highlighted.split("\n") if old_lines_text else []
-    new_content_lines = new_highlighted.split("\n") if new_lines_text else []
+    old_content_lines = _highlighted_lines(old_highlighted, old_lines_text)
+    new_content_lines = _highlighted_lines(new_highlighted, new_lines_text)
 
     return old_content_lines, new_content_lines
+
+
+def _highlighted_lines(
+    highlighted: Content,
+    source_lines: list[str],
+) -> list[Content]:
+    if not source_lines:
+        return []
+    if len(source_lines) == 1:
+        return [highlighted]
+    return highlighted.split("\n")
 
 
 def highlight_diff(
@@ -205,7 +303,7 @@ def apply_word_diff_spans(
 
 
 def _apply_highlighted_content_to_lines(
-    lines: list[DiffLine],
+    lines: Iterable[DiffLine],
     *,
     old_lines: list[Content],
     new_lines: list[Content],
@@ -266,6 +364,8 @@ def highlight_lines_for_diff_range(
     *,
     include_word_diff: bool = True,
     dark_mode: bool = True,
+    hunk_start_line_indices: Sequence[int] | None = None,
+    hunk_end_line_indices: Sequence[int] | None = None,
 ) -> None:
     """Apply syntax highlighting to a contiguous diff-line window in-place."""
     if start_line > end_line:
@@ -277,7 +377,13 @@ def highlight_lines_for_diff_range(
         selected_lines,
         old_offset,
         new_offset,
-    ) in _iter_diff_line_context_windows(diff, start_line, end_line):
+    ) in _iter_diff_line_context_windows(
+        diff,
+        start_line,
+        end_line,
+        hunk_start_line_indices=hunk_start_line_indices,
+        hunk_end_line_indices=hunk_end_line_indices,
+    ):
         old_lines_text, new_lines_text = _collect_line_text(context_lines)
         old_lines, new_lines = _highlight_text_lines(
             filename=filename,

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from bisect import bisect_left, bisect_right
+from collections.abc import Iterator, Sequence
 from contextvars import ContextVar
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, overload
 
 from textual.widgets import Static
 from textual.containers import VerticalScroll
@@ -22,6 +23,35 @@ __all__ = ()
 _RENDER_REQUEST_CONTEXT: ContextVar[int | None] = ContextVar(
     "diff_view_render_request", default=None
 )
+
+
+class _VirtualLineWindow(Sequence["DiffLine"]):
+    def __init__(self, lines: Sequence["DiffLine"], start: int, stop: int) -> None:
+        self._lines = lines
+        self._start = start
+        self._stop = stop
+
+    def __len__(self) -> int:
+        return max(0, self._stop - self._start)
+
+    def __iter__(self) -> Iterator["DiffLine"]:
+        for index in range(self._start, self._stop):
+            yield self._lines[index]
+
+    @overload
+    def __getitem__(self, index: int) -> "DiffLine": ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list["DiffLine"]: ...
+
+    def __getitem__(self, index: int | slice) -> "DiffLine" | list["DiffLine"]:
+        if isinstance(index, slice):
+            return [self[line_index] for line_index in range(*index.indices(len(self)))]
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        return self._lines[self._start + index]
 
 
 def _has_custom_virtual_setting(view, name: str) -> bool:
@@ -62,6 +92,7 @@ def _rebuild_virtual_layout(view) -> None:
     geometry = _geometry.build_diff_geometry(
         view._diff,
         split=view.split,
+        line_count=len(view._all_lines),
         extra_heights_by_line=_extra_heights_by_line(view),
         inline_editor_line_index=getattr(
             view, "_inline_comment_editor_line_index", None
@@ -86,15 +117,21 @@ def _extra_heights_by_line(view) -> dict[int, int]:
 
     pending_draft_map = getattr(view, "_pending_comment_drafts_by_line", {})
     for line_index, drafts in pending_draft_map.items():
-        extra_heights[line_index] = extra_heights.get(line_index, 0) + sum(
-            estimate_pending_draft_height(draft) for draft in drafts
+        height = (
+            estimate_pending_draft_height(drafts[0])
+            if len(drafts) == 1
+            else sum(estimate_pending_draft_height(draft) for draft in drafts)
         )
+        extra_heights[line_index] = extra_heights.get(line_index, 0) + height
 
     comment_map = getattr(view, "_comment_threads_by_line", {})
     for line_index, threads in comment_map.items():
-        extra_heights[line_index] = extra_heights.get(line_index, 0) + sum(
-            estimate_thread_height(thread) for thread in threads
+        height = (
+            estimate_thread_height(threads[0])
+            if len(threads) == 1
+            else sum(estimate_thread_height(thread) for thread in threads)
         )
+        extra_heights[line_index] = extra_heights.get(line_index, 0) + height
 
     return extra_heights
 
@@ -233,6 +270,24 @@ def _virtual_bottom_buffer_height(view, window_end: int) -> int:
     )
 
 
+def _visible_hunk_index_range(
+    view,
+    window_start: int,
+    window_end: int,
+) -> range:
+    """Return hunk indexes whose line ranges intersect the virtual window."""
+    hunk_starts = view._hunk_start_line_indices
+    hunk_ends = view._hunk_end_line_indices
+    if window_start > window_end or not hunk_starts or not hunk_ends:
+        return range(0)
+
+    first = bisect_left(hunk_ends, window_start)
+    last = bisect_right(hunk_starts, window_end) - 1
+    if first > last:
+        return range(0)
+    return range(first, last + 1)
+
+
 @staticmethod
 def _set_virtual_buffer_height(view, widget: Static, height: int) -> None:
     widget.styles.height = max(1, height)
@@ -320,13 +375,13 @@ async def _remove_virtualized_lines(
         view._code_widgets_by_line.pop(line_idx, None)
         view._unregister_line_widgets(line_idx)
 
-    return _geometry.merge_line_ranges(repair_ranges)
+    return _geometry.merge_line_ranges(repair_ranges, already_sorted=True)
 
 
 async def _clear_virtual_hunk_headers(view) -> None:
-    for hunk_index, header_widget in list(view._hunk_header_widgets.items()):
+    while view._hunk_header_widgets:
+        _, header_widget = view._hunk_header_widgets.popitem()
         await header_widget.remove()
-        view._hunk_header_widgets.pop(hunk_index, None)
 
 
 async def _remove_stale_virtual_hunk_headers(
@@ -334,13 +389,15 @@ async def _remove_stale_virtual_hunk_headers(
     window_start: int,
     window_end: int,
 ) -> None:
-    for hunk_index in list(view._hunk_header_widgets):
+    stale_headers = []
+    for hunk_index, header_widget in view._hunk_header_widgets.items():
         if view._should_render_hunk_header(hunk_index, window_start, window_end):
             continue
-        header_widget = view._get_hunk_header_widget(hunk_index)
-        if header_widget is not None:
-            await header_widget.remove()
-            view._hunk_header_widgets.pop(hunk_index, None)
+        stale_headers.append((hunk_index, header_widget))
+
+    for hunk_index, header_widget in stale_headers:
+        await header_widget.remove()
+        view._hunk_header_widgets.pop(hunk_index, None)
 
 
 async def _sync_visible_virtual_hunk_headers(
@@ -354,12 +411,15 @@ async def _sync_visible_virtual_hunk_headers(
     if not view._diff.show_hunk_headers:
         return
 
-    for hunk_index, hunk in enumerate(view._diff.hunks):
+    for hunk_index in _visible_hunk_index_range(view, window_start, window_end):
+        if not (0 <= hunk_index < len(view._diff.hunks)):
+            continue
         if not view._should_render_hunk_header(hunk_index, window_start, window_end):
             continue
         if view._get_hunk_header_widget(hunk_index) is not None:
             continue
 
+        hunk = view._diff.hunks[hunk_index]
         hunk_header = (
             f"@@ -{hunk.old_start},{hunk.old_count} "
             f"+{hunk.new_start},{hunk.new_count} @@"
@@ -434,7 +494,7 @@ def _iter_virtualized_line_groups(
     view,
     start: int,
     end: int,
-) -> Iterator[list[DiffLine]]:
+) -> Iterator[Sequence["DiffLine"]]:
     if view._diff is None or start > end or not view._all_lines:
         return
 
@@ -444,8 +504,9 @@ def _iter_virtualized_line_groups(
         return
 
     current_hunk_index: int | None = None
-    current_group: list[DiffLine] = []
-    for line in view._all_lines[start : end + 1]:
+    current_group_start: int | None = None
+    for visible_line_index in range(start, end + 1):
+        line = view._all_lines[visible_line_index]
         line_index = line.line_index
         if not (0 <= line_index < len(view._hunk_index_by_line)):
             continue
@@ -453,16 +514,21 @@ def _iter_virtualized_line_groups(
         hunk_index = view._hunk_index_by_line[line_index]
         if current_hunk_index is None or hunk_index == current_hunk_index:
             current_hunk_index = hunk_index
-            current_group.append(line)
+            if current_group_start is None:
+                current_group_start = visible_line_index
             continue
 
-        if current_group:
-            yield current_group
+        if current_group_start is not None:
+            yield _VirtualLineWindow(
+                view._all_lines,
+                current_group_start,
+                visible_line_index,
+            )
         current_hunk_index = hunk_index
-        current_group = [line]
+        current_group_start = visible_line_index
 
-    if current_group:
-        yield current_group
+    if current_group_start is not None:
+        yield _VirtualLineWindow(view._all_lines, current_group_start, end + 1)
 
 
 def _mount_virtualized_lines_at_bottom(
@@ -511,7 +577,7 @@ def _mount_virtualized_ranges_at_top(
     container: VerticalScroll,
     ranges: list[tuple[int, int]],
 ) -> None:
-    for start, end in sorted(ranges, reverse=True):
+    for start, end in reversed(ranges):
         _mount_virtualized_lines_at_top(view, container, start, end)
 
 
@@ -520,7 +586,7 @@ def _mount_virtualized_ranges_at_bottom(
     container: VerticalScroll,
     ranges: list[tuple[int, int]],
 ) -> None:
-    for start, end in sorted(ranges):
+    for start, end in ranges:
         _mount_virtualized_lines_at_bottom(view, container, start, end)
 
 
@@ -743,12 +809,10 @@ def _render_virtual_window(view, container: VerticalScroll) -> None:
         container.mount(top_buffer)
         view._virt.top_buffer = top_buffer
 
-    for hunk_index, hunk in enumerate(view._diff.hunks):
-        if hunk_index < len(view._hunk_line_ranges):
-            _, hunk_start, hunk_end = view._hunk_line_ranges[hunk_index]
-            if hunk_end < start or hunk_start > end:
-                continue
-
+    for hunk_index in _visible_hunk_index_range(view, start, end):
+        if not (0 <= hunk_index < len(view._diff.hunks)):
+            continue
+        hunk = view._diff.hunks[hunk_index]
         view._render_hunk(
             container,
             hunk,

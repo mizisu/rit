@@ -2,20 +2,22 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from typing import cast
 
 from rit.state.models import (
-    NodeList,
     PR,
+    NodeList,
     PRComment,
     PRIssueComment,
     PRReview,
-    ReviewThreadInfo,
     ReviewThread,
+    ReviewThreadInfo,
 )
-
 
 __all__ = (
     "DiscussionProjection",
+    "PRDiscussion",
+    "PRDiscussionReadModel",
     "RecentDiscussion",
     "ThreadResolutionProjection",
     "merge_recent_submitted_discussion",
@@ -28,6 +30,16 @@ __all__ = (
 
 
 @dataclass(frozen=True)
+class PRDiscussion:
+    """Discussion timeline data loaded from a PR source."""
+
+    body: str
+    reviews: list[PRReview]
+    issue_comments: list[PRIssueComment]
+    review_threads: list[ReviewThread]
+
+
+@dataclass(frozen=True)
 class RecentDiscussion:
     """Recently submitted discussion objects that may precede GitHub refresh data."""
 
@@ -36,8 +48,8 @@ class RecentDiscussion:
 
 
 @dataclass(frozen=True)
-class DiscussionProjection:
-    """Derived discussion state ready to install into the store."""
+class PRDiscussionReadModel:
+    """Read model for PR discussion data and derived views."""
 
     pr: PR
     reviews: list[PRReview]
@@ -47,6 +59,9 @@ class DiscussionProjection:
     comments_by_file: dict[str, list[PRComment]]
     thread_info_cache: dict[int, ReviewThreadInfo]
     thread_cache: dict[int, ReviewThread]
+
+
+DiscussionProjection = PRDiscussionReadModel
 
 
 @dataclass(frozen=True)
@@ -62,38 +77,51 @@ def project_discussion_state(
     pr: PR,
     *,
     recent: RecentDiscussion | None = None,
-) -> DiscussionProjection:
+) -> PRDiscussionReadModel:
     """Return store-ready discussion state for a PR."""
-    reviews = list(pr.reviews)
-    review_threads = list(pr.review_threads)
-    if recent is not None:
+    if recent is not None and (recent.reviews or recent.review_comments):
+        reviews = list(pr.reviews)
+        review_threads = list(pr.review_threads)
         reviews, review_threads = merge_recent_submitted_discussion(
             reviews,
             review_threads,
             recent=recent,
         )
-
-    comments = [
-        comment
-        for thread in review_threads
-        for comment in thread.comments
-    ]
-    comments_by_file = _comments_by_file(comments)
-
-    return DiscussionProjection(
-        pr=pr.model_copy(
+        projected_pr = pr.model_copy(
             update={
                 "reviews_connection": NodeList.from_nodes(reviews),
                 "review_threads_connection": NodeList.from_nodes(review_threads),
             }
-        ),
+        )
+    else:
+        reviews = pr.reviews
+        review_threads = pr.review_threads
+        projected_pr = pr
+
+    if not review_threads:
+        comments = []
+        comments_by_file = {}
+        thread_info_cache = {}
+        thread_cache = {}
+    else:
+        comments = [comment for thread in review_threads for comment in thread.comments]
+        if len(comments) == 1:
+            comment = comments[0]
+            comments_by_file = {comment.path: [comment]}
+        else:
+            comments_by_file = _comments_by_file(comments)
+        thread_info_cache = _thread_info_cache(review_threads)
+        thread_cache = _thread_cache(review_threads)
+
+    return PRDiscussionReadModel(
+        pr=projected_pr,
         reviews=reviews,
         issue_comments=pr.issue_comments,
         review_threads=review_threads,
         comments=comments,
         comments_by_file=comments_by_file,
-        thread_info_cache=_thread_info_cache(review_threads),
-        thread_cache=_thread_cache(review_threads),
+        thread_info_cache=thread_info_cache,
+        thread_cache=thread_cache,
     )
 
 
@@ -107,11 +135,24 @@ def merge_recent_submitted_discussion(
     if not recent.reviews and not recent.review_comments:
         return reviews, review_threads
 
-    review_ids = {review.id for review in reviews if review.id}
-    for review_id, review in recent.reviews.items():
-        if review_id not in review_ids:
-            reviews.append(review)
-            review_ids.add(review_id)
+    if recent.reviews:
+        if not reviews:
+            reviews.extend(recent.reviews.values())
+        else:
+            review_ids = {review.id for review in reviews if review.id}
+            for review_id, review in recent.reviews.items():
+                if review_id not in review_ids:
+                    reviews.append(review)
+                    review_ids.add(review_id)
+
+    if not recent.review_comments:
+        return reviews, review_threads
+
+    if not review_threads:
+        for comments in recent.review_comments.values():
+            for comment in comments:
+                review_threads.append(thread_from_submitted_comment(comment))
+        return reviews, review_threads
 
     comment_ids = {
         comment.id
@@ -140,7 +181,7 @@ def remember_submitted_review(
         return recent
 
     reviews = dict(recent.reviews)
-    review_comments = _mutable_review_comments(recent)
+    review_comments = dict(recent.review_comments)
     reviews[review.id] = review
     review_comments[review.id] = [
         _comment_with_review_id(comment, review.id) for comment in comments
@@ -157,11 +198,21 @@ def remember_submitted_comment(
     if not review_id:
         return recent
 
-    review_comments = _mutable_review_comments(recent)
-    comments = review_comments.setdefault(review_id, [])
-    if not comment.id or all(existing.id != comment.id for existing in comments):
-        comments.append(comment)
-    return RecentDiscussion(reviews=dict(recent.reviews), review_comments=review_comments)
+    existing_comments = recent.review_comments.get(review_id)
+    if comment.id and existing_comments is not None:
+        if len(existing_comments) == 1:
+            if existing_comments[0].id == comment.id:
+                return recent
+        elif any(existing.id == comment.id for existing in existing_comments):
+            return recent
+
+    review_comments = dict(recent.review_comments)
+    comments = list(existing_comments) if existing_comments is not None else []
+    comments.append(comment)
+    review_comments[review_id] = comments
+    return RecentDiscussion(
+        reviews=dict(recent.reviews), review_comments=review_comments
+    )
 
 
 def thread_from_submitted_comment(comment: PRComment) -> ReviewThread:
@@ -191,27 +242,82 @@ def update_thread_resolution(
     is_resolved: bool,
 ) -> ThreadResolutionProjection:
     """Return discussion thread state with one root comment resolution updated."""
+    info = thread_info_cache.get(root_comment_id)
+    matching_thread_index = next(
+        (
+            index
+            for index, thread in enumerate(review_threads)
+            if thread.root_comment_id == root_comment_id
+        ),
+        None,
+    )
+    matching_thread = (
+        review_threads[matching_thread_index]
+        if matching_thread_index is not None
+        else None
+    )
+    if info is None and matching_thread_index is None:
+        return _thread_resolution_projection(
+            review_threads,
+            thread_info_cache,
+            thread_cache,
+        )
+    if (
+        info is not None
+        and info.is_resolved == is_resolved
+        and matching_thread is not None
+        and matching_thread.is_resolved == is_resolved
+    ):
+        return _thread_resolution_projection(
+            review_threads,
+            thread_info_cache,
+            thread_cache,
+        )
+
     updated_threads = list(review_threads)
     updated_info = dict(thread_info_cache)
     updated_cache = dict(thread_cache)
 
-    if root_comment_id in updated_info:
+    if info is not None:
         updated_info[root_comment_id] = replace(
-            updated_info[root_comment_id],
+            info,
             is_resolved=is_resolved,
         )
 
-    for index, thread in enumerate(updated_threads):
-        if thread.root_comment_id == root_comment_id:
-            updated_thread = thread.model_copy(update={"is_resolved": is_resolved})
-            updated_threads[index] = updated_thread
-            updated_cache[root_comment_id] = updated_thread
-            break
+    if matching_thread_index is not None:
+        thread = review_threads[matching_thread_index]
+        updated_thread = thread.model_copy(update={"is_resolved": is_resolved})
+        updated_threads[matching_thread_index] = updated_thread
+        updated_cache[root_comment_id] = updated_thread
 
     return ThreadResolutionProjection(
         review_threads=updated_threads,
         thread_info_cache=updated_info,
         thread_cache=updated_cache,
+    )
+
+
+def _thread_resolution_projection(
+    review_threads: Sequence[ReviewThread],
+    thread_info_cache: Mapping[int, ReviewThreadInfo],
+    thread_cache: Mapping[int, ReviewThread],
+) -> ThreadResolutionProjection:
+    return ThreadResolutionProjection(
+        review_threads=(
+            cast(list[ReviewThread], review_threads)
+            if isinstance(review_threads, list)
+            else list(review_threads)
+        ),
+        thread_info_cache=(
+            cast(dict[int, ReviewThreadInfo], thread_info_cache)
+            if isinstance(thread_info_cache, dict)
+            else dict(thread_info_cache)
+        ),
+        thread_cache=(
+            cast(dict[int, ReviewThread], thread_cache)
+            if isinstance(thread_cache, dict)
+            else dict(thread_cache)
+        ),
     )
 
 
@@ -243,15 +349,6 @@ def _thread_cache(review_threads: Sequence[ReviewThread]) -> dict[int, ReviewThr
         thread.root_comment_id: thread
         for thread in review_threads
         if thread.root_comment_id
-    }
-
-
-def _mutable_review_comments(
-    recent: RecentDiscussion,
-) -> dict[int, list[PRComment]]:
-    return {
-        review_id: list(comments)
-        for review_id, comments in recent.review_comments.items()
     }
 
 

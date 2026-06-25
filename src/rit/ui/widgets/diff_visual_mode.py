@@ -8,6 +8,7 @@ from typing import Literal
 from rit.ui.widgets.diff_selection_range import SelectionKind
 
 VisualLineSelectionRole = Literal["none", "selected", "anchor"]
+_EMPTY_LINE_SET: frozenset[int] = frozenset()
 
 __all__ = (
     "VisualAnchorUIUpdate",
@@ -75,6 +76,14 @@ class VisualQueueUpdate:
 
 
 type VisualQueuedUpdate = VisualTypeUIUpdate | VisualAnchorUIUpdate
+
+
+def _empty_line_set() -> frozenset[int]:
+    return _EMPTY_LINE_SET
+
+
+def _single_line_set(line: int) -> frozenset[int]:
+    return frozenset((line,))
 
 
 def enter_visual_mode(
@@ -186,7 +195,7 @@ def visual_mode_ui_update(
             visual_type=visual_type,
         ),
         selection_refresh_lines=(
-            frozenset({cursor_line}) if visual_mode else frozenset()
+            _single_line_set(cursor_line) if visual_mode else _empty_line_set()
         ),
         clear_selection=not visual_mode,
         update_status_line=True,
@@ -207,7 +216,7 @@ def visual_type_ui_update(
             else None
         ),
         selection_dirty_lines=(
-            frozenset({cursor_line}) if visual_mode else frozenset()
+            _single_line_set(cursor_line) if visual_mode else _empty_line_set()
         ),
         update_status_line=True,
     )
@@ -221,7 +230,7 @@ def visual_anchor_ui_update(
     """Return UI update policy after visual anchor changes."""
     return VisualAnchorUIUpdate(
         selection_dirty_lines=(
-            frozenset({cursor_line}) if visual_mode else frozenset()
+            _single_line_set(cursor_line) if visual_mode else _empty_line_set()
         )
     )
 

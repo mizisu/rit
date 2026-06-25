@@ -41,6 +41,12 @@ class CombinedDiffDocument:
     def file_for_line(self, line_index: int) -> str | None:
         if not self.file_start_lines:
             return None
+        if len(self.file_start_lines) == 1:
+            return (
+                self.file_start_names[0]
+                if line_index >= self.file_start_lines[0]
+                else None
+            )
 
         index = bisect_right(self.file_start_lines, line_index) - 1
         if index < 0:
@@ -53,9 +59,6 @@ def build_combined_diff_document(
     file_diffs: Mapping[str, FileDiff],
 ) -> CombinedDiffDocument | None:
     """Build a combined diff document once every file diff is available."""
-    if not all(file.filename in file_diffs for file in files):
-        return None
-
     hunks: list[DiffHunk] = []
     file_line_starts: dict[str, int] = {}
     file_start_lines: list[int] = []
@@ -65,19 +68,22 @@ def build_combined_diff_document(
     is_fully_refined = True
 
     for file in files:
-        diff = file_diffs[file.filename]
+        filename = file.filename
+        diff = file_diffs.get(filename)
+        if diff is None:
+            return None
         is_fully_refined = is_fully_refined and diff.is_fully_refined
         file_start_recorded = False
 
         if not diff.hunks:
             _record_file_start(
-                file.filename,
+                filename,
                 next_line_index,
                 file_line_starts,
                 file_start_lines,
                 file_start_names,
             )
-            hunks.append(_placeholder_hunk(file))
+            hunks.append(_placeholder_hunk(file, filename))
             next_line_index += 1
             continue
 
@@ -85,7 +91,7 @@ def build_combined_diff_document(
             starts_file = not file_start_recorded
             if starts_file:
                 _record_file_start(
-                    file.filename,
+                    filename,
                     next_line_index,
                     file_line_starts,
                     file_start_lines,
@@ -95,7 +101,7 @@ def build_combined_diff_document(
 
             lines = [
                 _combined_line(
-                    file.filename,
+                    filename,
                     line,
                     next_line_index + offset,
                     line_lookup,
@@ -111,7 +117,7 @@ def build_combined_diff_document(
                     header=hunk.header,
                     lines=lines,
                     starts_file=starts_file,
-                    file_path=file.filename if starts_file else None,
+                    file_path=filename if starts_file else None,
                     file_old_path=file.previous_filename if starts_file else None,
                     file_status=file.status,
                     file_additions=file.additions,
@@ -145,6 +151,9 @@ async def load_missing_combined_file_diffs(
     missing = [filename for filename in filenames if filename not in file_diffs]
     if not missing:
         return
+    if len(missing) == 1:
+        await load_diff(missing[0])
+        return
 
     semaphore = asyncio.Semaphore(max(1, concurrency))
 
@@ -167,7 +176,7 @@ def _record_file_start(
     file_start_names.append(filename)
 
 
-def _placeholder_hunk(file: PRFile) -> DiffHunk:
+def _placeholder_hunk(file: PRFile, filename: str) -> DiffHunk:
     return DiffHunk(
         old_start=0,
         old_count=0,
@@ -180,11 +189,11 @@ def _placeholder_hunk(file: PRFile) -> DiffHunk:
                 new_line_no=None,
                 old_content="",
                 new_content="No textual changes",
-                file_path=file.filename,
+                file_path=filename,
             )
         ],
         starts_file=True,
-        file_path=file.filename,
+        file_path=filename,
         file_old_path=file.previous_filename,
         file_status=file.status,
         file_additions=file.additions,

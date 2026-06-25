@@ -42,6 +42,9 @@ def missing_side_hatch_text(width: int, *, row_index: int = 0) -> str:
     if width <= 0:
         return ""
 
+    if MISSING_SIDE_HATCH_STEP == 1:
+        return MISSING_SIDE_HATCH * width
+
     chars = [" "] * width
     start = row_index % MISSING_SIDE_HATCH_STEP
     for index in range(start, width, MISSING_SIDE_HATCH_STEP):
@@ -59,6 +62,18 @@ class LineContent(Visual):
         self.code_lines = code_lines
         self.line_styles = line_styles
         self._width = width
+        if width is not None:
+            self._content_width: int | None = width
+        elif not code_lines:
+            self._content_width = None
+        elif len(code_lines) == 1:
+            line = code_lines[0]
+            self._content_width = line.cell_length if line is not None else None
+        else:
+            self._content_width = max(
+                (line.cell_length for line in code_lines if line is not None),
+                default=None,
+            )
 
     def render_strips(
         self, width: int, height: int | None, style: Style, options: RenderOptions
@@ -113,9 +128,9 @@ class LineContent(Visual):
         return strips
 
     def get_optimal_width(self, rules: RulesMap, container_width: int) -> int:
-        if self._width is not None:
-            return self._width
-        return max(line.cell_length for line in self.code_lines if line is not None)
+        if self._content_width is None:
+            raise ValueError("max() arg is an empty sequence")
+        return self._content_width
 
     def get_minimal_width(self, rules: RulesMap) -> int:
         return 1
@@ -146,8 +161,18 @@ class LineAnnotations(Widget):
         disabled: bool = False,
     ):
         super().__init__(name=name, id=id, classes=classes, disabled=disabled)
+        self._number_width = 0
         self.numbers = list(numbers)
         self.line_styles = list(line_styles or [])
+
+    def watch_numbers(self, numbers: list[Content]) -> None:
+        count = len(numbers)
+        if count == 0:
+            self._number_width = 0
+        elif count == 1:
+            self._number_width = numbers[0].cell_length
+        else:
+            self._number_width = max(number.cell_length for number in numbers)
 
     @property
     def total_width(self) -> int:
@@ -161,7 +186,7 @@ class LineAnnotations(Widget):
 
     @property
     def number_width(self) -> int:
-        return max(number.cell_length for number in self.numbers) if self.numbers else 0
+        return self._number_width
 
     def render_line(self, y: int) -> Strip:
         width = self.total_width

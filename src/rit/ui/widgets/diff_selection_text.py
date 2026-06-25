@@ -46,7 +46,10 @@ def selected_text_for_visual_range(
     )
 
     if visual_type == "line":
-        text_to_copy = "\n".join(line_texts[bounds.start_line : bounds.end_line + 1])
+        text_to_copy = "\n".join(
+            line_texts[line_idx]
+            for line_idx in range(bounds.start_line, bounds.end_line + 1)
+        )
         return f"{text_to_copy}\n" if text_to_copy else ""
 
     selected_lines: list[str] = []

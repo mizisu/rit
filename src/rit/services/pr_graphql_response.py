@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 
 from rit.services.gh_request import GitHubInputRunner, run_request
 from rit.services.pr_graphql_queries import (
@@ -35,17 +36,14 @@ class PullRequestNotFound(ValueError):
 
 
 def _mapping_value(data: object, key: str) -> object | None:
-    if not isinstance(data, dict):
+    if not isinstance(data, Mapping):
         return None
-    for item_key, item_value in data.items():
-        if item_key == key:
-            return item_value
-    return None
+    return getattr(data, "get")(key)
 
 
-def _required_mapping(value: object, *, pr_number: int) -> dict[object, object]:
-    if isinstance(value, dict):
-        return {key: item_value for key, item_value in value.items()}
+def _required_mapping(value: object, *, pr_number: int) -> Mapping:
+    if isinstance(value, Mapping):
+        return value
     raise PullRequestNotFound(f"PR #{pr_number} not found")
 
 
@@ -53,7 +51,7 @@ def parse_pull_request_graphql_result(
     result: str,
     *,
     pr_number: int,
-) -> dict[str, object]:
+) -> Mapping[str, object]:
     """Parse a gh GraphQL JSON string into a pullRequest object."""
     return parse_pull_request_graphql_data(json.loads(result), pr_number=pr_number)
 
@@ -62,7 +60,7 @@ def parse_pull_request_graphql_data(
     data: object,
     *,
     pr_number: int,
-) -> dict[str, object]:
+) -> Mapping[str, object]:
     """Extract the pullRequest node from a GitHub GraphQL response."""
     response = _required_mapping(data, pr_number=pr_number)
     errors = _mapping_value(response, "errors")
@@ -82,11 +80,15 @@ def parse_pull_request_graphql_data(
         pr_number=pr_number,
     )
 
-    return {
-        key: value
-        for key, value in pr_data.items()
-        if isinstance(key, str)
-    }
+    if isinstance(pr_data, dict):
+        if not pr_data:
+            return pr_data
+        if len(pr_data) == 1:
+            key = next(iter(pr_data))
+            return pr_data if isinstance(key, str) else {}
+        if all(isinstance(key, str) for key in pr_data):
+            return pr_data
+    return {key: value for key, value in pr_data.items() if isinstance(key, str)}
 
 
 def parse_pull_request_graphql_pr(data: object, *, pr_number: int) -> PR:

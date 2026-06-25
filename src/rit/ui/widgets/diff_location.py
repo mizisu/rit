@@ -32,10 +32,18 @@ def full_preview_location_label(
         return label
 
     hunk = diff.hunks[hunk_index]
-    section = hunk.header.strip()
+    section = _clean_header(hunk.header)
     if not section:
         section = f"section {hunk_index + 1}/{len(diff.hunks)}"
     return f"{label}  {section}"
+
+
+def _clean_header(header: str) -> str:
+    if not header:
+        return ""
+    if header[0].isspace() or header[-1].isspace():
+        return header.strip()
+    return header
 
 
 def line_index_for_location(
@@ -46,8 +54,16 @@ def line_index_for_location(
     *,
     old_line_index: Mapping[int, int],
     new_line_index: Mapping[int, int],
+    old_file_line_index: Mapping[tuple[str, int], int] | None = None,
+    new_file_line_index: Mapping[tuple[str, int], int] | None = None,
 ) -> int | None:
     """Return the rendered diff line index for a file location."""
+    file_index = old_file_line_index if side == "LEFT" else new_file_line_index
+    if file_index is not None:
+        cached = file_index.get((filename, line))
+        if cached is not None:
+            return cached
+
     if diff.filename == filename:
         cached = (old_line_index if side == "LEFT" else new_line_index).get(line)
         if cached is not None:

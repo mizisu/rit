@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Collection, Set
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,8 +16,6 @@ from textual.message import Message
 from textual.reactive import reactive, var
 from textual.widget import Widget
 from textual.widgets import Input, Static, TextArea
-
-from rit.ui.widgets.comment_editor import InlineCommentEditor
 
 from rit.core.types import DiffLine, FileDiff
 from rit.state.models import PendingReviewComment, PRFile, ReviewThread
@@ -33,8 +32,9 @@ from rit.ui.widgets import diff_render as _render
 from rit.ui.widgets import diff_search as _search
 from rit.ui.widgets import diff_selection as _selection
 from rit.ui.widgets import diff_status as _status
-from rit.ui.widgets import diff_visual_mode as _visual_mode
 from rit.ui.widgets import diff_virtual as _virtual
+from rit.ui.widgets import diff_visual_mode as _visual_mode
+from rit.ui.widgets.comment_editor import InlineCommentEditor
 from rit.ui.widgets.diff_types import (
     DEFAULT_DIFF_LAYOUT,
     CursorUIState,
@@ -44,8 +44,8 @@ from rit.ui.widgets.diff_types import (
     SplitBlockLineStaticData,
     SplitDiffBlock,
     UnifiedBlockRowStaticData,
-    VirtualState,
     UnifiedDiffBlock,
+    VirtualState,
 )
 
 if TYPE_CHECKING:
@@ -62,6 +62,11 @@ __all__ = (
 _RENDER_REQUEST_CONTEXT: ContextVar[int | None] = ContextVar(
     "diff_view_render_request", default=None
 )
+_DIFF_MODE_LABELS: dict[str, str] = {
+    "auto": "Auto",
+    "split": "Split",
+    "unified": "Unified",
+}
 
 
 class DiffView(VerticalScroll):
@@ -177,11 +182,18 @@ class DiffView(VerticalScroll):
         self._rows_split = []
         self._row_lookup_unified = {}
         self._row_lookup_split = {}
+        self._rows_unified_ready = False
+        self._rows_split_ready = False
 
         self._search_query: str = ""
         self._search_matches: list[DiffSearchMatch] = []
         self._search_match_index: int = -1
-        self._prev_search_match_lines: set[int] = set()
+        self._search_matches_by_line_side: dict[
+            tuple[int, Literal["old", "new", "auto"]],
+            tuple[tuple[int, DiffSearchMatch], ...],
+        ] = {}
+        self._search_matches_by_line_side_source: tuple[int, int] | None = None
+        self._prev_search_match_lines: Set[int] = frozenset()
 
         self._hl_state = HighlightState()
         self._unified_block_static_rows_by_line: dict[
@@ -191,8 +203,15 @@ class DiffView(VerticalScroll):
         self._base_code_content_cache: dict[
             tuple[int, Literal["old", "new", "auto"], str], Content
         ] = {}
+        self._base_code_content_cache_keys_by_line: dict[
+            int,
+            set[tuple[int, Literal["old", "new", "auto"], str]],
+        ] = {}
+        self._diff_file_paths: frozenset[str] = frozenset()
+        self._file_change_stats: dict[str, tuple[int, int]] = {}
         self._line_index_by_new_number: dict[int, int] = {}
         self._line_index_by_old_number: dict[int, int] = {}
+        self._new_line_number_bounds: tuple[int, int] | None = None
         self._line_index_by_file_new_number: dict[tuple[str, int], int] = {}
         self._line_index_by_file_old_number: dict[tuple[str, int], int] = {}
         self._hunk_index_by_line: list[int] = []
@@ -200,6 +219,8 @@ class DiffView(VerticalScroll):
         self._total_line_render_height: int = 0
 
         self._hunk_line_ranges: list[tuple[int, int, int]] = []
+        self._hunk_start_line_indices: list[int] = []
+        self._hunk_end_line_indices: list[int] = []
         self._hunk_header_top_offsets: list[int] = []
         self._line_top_offsets: list[int] = []
         self._line_heights: list[int] = []
@@ -215,6 +236,8 @@ class DiffView(VerticalScroll):
         self._unified_code_width: int = 1
         self._split_old_code_width: int = 1
         self._split_new_code_width: int = 1
+        self._old_line_number_width_value: int = 1
+        self._new_line_number_width_value: int = 1
 
         self._code_widgets_by_line: dict[int, tuple[Static, ...]] = {}
         self._split_scroll_widgets_by_line: dict[int, tuple[Widget, ...]] = {}
@@ -236,9 +259,9 @@ class DiffView(VerticalScroll):
         self._showing_full_file: bool = False
         self._saved_diff: FileDiff | None = None
         self._saved_filename: str | None = None
-        self._saved_restore_position: (
-            _full_preview.FullFileRestorePosition | None
-        ) = None
+        self._saved_restore_position: _full_preview.FullFileRestorePosition | None = (
+            None
+        )
 
         self._highlighter_prewarm_started: bool = False
         self._cursor_ui = CursorUIState()
@@ -263,6 +286,7 @@ class DiffView(VerticalScroll):
         self._inline_comment_editor_widget: InlineCommentEditor | None = None
         self._inline_comment_editor_layout_widget: Widget | None = None
         self._inline_comment_editor_initial_body: str = ""
+        self._inline_comment_editor_draft_index: int | None = None
         self._pending_comment_jump: str | None = None  # "first" or "last"
 
         self.mode = mode
@@ -446,9 +470,10 @@ class DiffView(VerticalScroll):
                 self, set(update.selection_refresh_lines)
             )
         if update.clear_selection:
-            for line_idx in list(self._visual_selection_specs):
-                _selection._clear_line_selection(self, line_idx)
+            old_selection_specs = self._visual_selection_specs
             self._visual_selection_specs = {}
+            for line_idx in old_selection_specs:
+                _selection._clear_line_selection(self, line_idx)
 
         if update.update_status_line:
             self._update_status_line()
@@ -636,6 +661,21 @@ class DiffView(VerticalScroll):
     ) -> tuple[str, int, Literal["LEFT", "RIGHT"]] | None:
         return self._inline_comment_editor_target
 
+    def inline_comment_draft_index(self) -> int | None:
+        return self._inline_comment_editor_draft_index
+
+    def active_pending_draft_index(self) -> int | None:
+        draft = _comments.active_pending_draft(self, self.cursor_line)
+        return self._pending_draft_index(draft)
+
+    def _pending_draft_index(
+        self,
+        draft: PendingReviewComment | None,
+    ) -> int | None:
+        if self.store is None:
+            return None
+        return self.store.review_annotations().index_for_comment(draft)
+
     @property
     def current_diff(self) -> FileDiff | None:
         return self._diff
@@ -657,6 +697,8 @@ class DiffView(VerticalScroll):
             side,
             old_line_index=self._line_index_by_old_number,
             new_line_index=self._line_index_by_new_number,
+            old_file_line_index=self._line_index_by_file_old_number,
+            new_file_line_index=self._line_index_by_file_new_number,
         )
 
     def jump_to_line_index(
@@ -755,18 +797,19 @@ class DiffView(VerticalScroll):
         if line is None or target is None:
             return False
 
-        self._inline_comment_editor_line_index = line.line_index
-        self._inline_comment_editor_target = target
-        if self.store is not None:
-            path, target_line, side = target
-            existing = self.store.get_pending_inline_comment(
-                path=path,
-                line=target_line,
-                side=side,
+        selected_draft = _comments.active_pending_draft(self, line.line_index)
+        if selected_draft is not None:
+            target = (selected_draft.path, selected_draft.line, selected_draft.side)
+            self._inline_comment_editor_initial_body = selected_draft.body
+            self._inline_comment_editor_draft_index = self._pending_draft_index(
+                selected_draft
             )
-            self._inline_comment_editor_initial_body = existing.body if existing else ""
         else:
             self._inline_comment_editor_initial_body = ""
+            self._inline_comment_editor_draft_index = None
+
+        self._inline_comment_editor_line_index = line.line_index
+        self._inline_comment_editor_target = target
         _virtual._rebuild_virtual_layout(self)
         await self._render_diff()
         self.call_after_refresh(self._focus_inline_comment_editor)
@@ -784,6 +827,7 @@ class DiffView(VerticalScroll):
         self._inline_comment_editor_widget = None
         self._inline_comment_editor_layout_widget = None
         self._inline_comment_editor_initial_body = ""
+        self._inline_comment_editor_draft_index = None
         _virtual._rebuild_virtual_layout(self)
         await self._render_diff()
         self.call_after_refresh(self.focus)
@@ -799,6 +843,7 @@ class DiffView(VerticalScroll):
         line = self._current_line()
         if line is None:
             return 0
+        _render._ensure_rendered_rows_for_mode(self, split=self.split)
         if self.split:
             return self._row_lookup_split.get(line.line_index, 0)
         side = self._cursor_side_for_line(line)
@@ -814,6 +859,7 @@ class DiffView(VerticalScroll):
         return rows[row_index]
 
     def _rows_for_current_mode(self) -> list[RenderedRow]:
+        _render._ensure_rendered_rows_for_mode(self, split=self.split)
         return self._rows_split if self.split else self._rows_unified
 
     def _get_cursor_text(self) -> str:
@@ -934,6 +980,8 @@ class DiffView(VerticalScroll):
         source: Widget | None = None,
     ) -> None:
         clamped_scroll_x = max(0.0, scroll_x)
+        if source is not None and clamped_scroll_x == self._split_horizontal_scroll_x:
+            return
         self._split_horizontal_scroll_x = clamped_scroll_x
 
         if self._syncing_split_scroll:
@@ -1045,6 +1093,7 @@ class DiffView(VerticalScroll):
                 self._inline_comment_editor_widget = None
                 self._inline_comment_editor_layout_widget = None
                 self._inline_comment_editor_initial_body = ""
+                self._inline_comment_editor_draft_index = None
 
             self.current_file = filename
             self._diff = diff
@@ -1055,16 +1104,25 @@ class DiffView(VerticalScroll):
             self._rows_split = []
             self._row_lookup_unified = {}
             self._row_lookup_split = {}
+            self._rows_unified_ready = False
+            self._rows_split_ready = False
+            self._diff_file_paths = frozenset()
+            self._file_change_stats = {}
             _search.clear_state(self)
             _comments.clear_state(self)
             self._line_index_by_new_number = {}
             self._line_index_by_old_number = {}
+            self._new_line_number_bounds = None
             self._line_index_by_file_new_number = {}
             self._line_index_by_file_old_number = {}
             self._hunk_index_by_line = []
             self._modified_line_count = 0
             self._total_line_render_height = 0
+            self._old_line_number_width_value = 1
+            self._new_line_number_width_value = 1
             self._hunk_line_ranges = []
+            self._hunk_start_line_indices = []
+            self._hunk_end_line_indices = []
             self._hunk_header_top_offsets = []
             self._line_top_offsets = []
             self._line_heights = []
@@ -1077,6 +1135,7 @@ class DiffView(VerticalScroll):
             self._unified_block_static_rows_by_line.clear()
             self._split_block_static_rows_by_line.clear()
             self._base_code_content_cache.clear()
+            self._base_code_content_cache_keys_by_line.clear()
             self._code_widgets_by_line = {}
             self._split_scroll_widgets_by_line = {}
             self._split_horizontal_scroll_x = 0.0
@@ -1104,34 +1163,46 @@ class DiffView(VerticalScroll):
             self._comment_cursor_index = 0
 
             if self.store:
-                self._file = next(
-                    (f for f in self.store.state.files if f.filename == filename),
-                    None,
+                state = self.store.state
+                files_by_filename = getattr(state, "files_by_filename", None)
+                self._file = (
+                    files_by_filename.get(filename)
+                    if files_by_filename is not None
+                    else None
                 )
+                if self._file is None:
+                    self._file = next(
+                        (f for f in state.files if f.filename == filename),
+                        None,
+                    )
             else:
                 self._file = None
 
-            plan = _plan.build_diff_plan(diff)
+            plan = _plan.build_diff_plan(diff, include_rendered_rows=False)
             self._all_lines = plan.all_lines
+            self._diff_file_paths = plan.file_paths
+            self._file_change_stats = plan.file_change_stats
             self._line_index_by_new_number = plan.line_index_by_new_number
             self._line_index_by_old_number = plan.line_index_by_old_number
+            self._new_line_number_bounds = plan.new_line_number_bounds
             self._line_index_by_file_new_number = plan.line_index_by_file_new_number
             self._line_index_by_file_old_number = plan.line_index_by_file_old_number
             self._hunk_index_by_line = plan.hunk_index_by_line
             self._modified_line_count = plan.modified_line_count
             self._hunk_line_ranges = plan.hunk_line_ranges
-            self._rows_unified = plan.rendered_rows.rows_unified
-            self._rows_split = plan.rendered_rows.rows_split
-            self._row_lookup_unified = plan.rendered_rows.row_lookup_unified
-            self._row_lookup_split = plan.rendered_rows.row_lookup_split
-
-            _comments.build_comment_map(self)
+            self._hunk_start_line_indices = plan.hunk_start_line_indices
+            self._hunk_end_line_indices = plan.hunk_end_line_indices
             (
                 self._unified_code_width,
                 self._split_old_code_width,
                 self._split_new_code_width,
-            ) = _render._code_widths_for_layout(self)
+            ) = plan.code_widths
+            self._old_line_number_width_value = plan.old_line_number_width
+            self._new_line_number_width_value = plan.new_line_number_width
+
+            _comments.build_comment_map(self)
             _render._update_split_state(self)
+            _render._ensure_rendered_rows_for_mode(self, split=self.split)
             _virtual._rebuild_virtual_layout(self)
             _virtual._configure_virtual_window(self)
 
@@ -1155,6 +1226,10 @@ class DiffView(VerticalScroll):
     def refresh_header(self) -> None:
         """Re-render the diff header badge without re-rendering diff content."""
         self._update_status_line()
+
+    def refresh_thread_metadata(self) -> None:
+        """Refresh inline thread metadata without rebuilding diff rows."""
+        _comments.refresh_thread_metadata(self)
 
     def _reset_current_diff_highlight_state(self) -> bool:
         diff = self._diff
@@ -1291,19 +1366,20 @@ class DiffView(VerticalScroll):
         line_index = _full_preview.full_file_anchor_line_index(
             line_no,
             self._line_index_by_new_number,
+            available_line_bounds=self._new_line_number_bounds,
         )
         if line_index is None:
             return
 
-        for row in self._rows_for_current_mode():
-            if row.line_index == line_index:
-                self._jump_to_row_with_anchor(
-                    row,
-                    pane="new",
-                    viewport_offset=2,
-                    update_active_pane=True,
-                )
-                return
+        row = self._row_for_line_and_pane(line_index, "new")
+        if row is not None:
+            self._jump_to_row_with_anchor(
+                row,
+                pane="new",
+                viewport_offset=2,
+                update_active_pane=True,
+            )
+            return
 
         self._move_cursor(line=line_index, pane="new", update_active_pane=True)
 
@@ -1362,7 +1438,9 @@ class DiffView(VerticalScroll):
         if line_index is None:
             return
 
-        target_row = self._row_for_line_and_pane(line_index, restore_position.cursor_pane)
+        target_row = self._row_for_line_and_pane(
+            line_index, restore_position.cursor_pane
+        )
         if target_row is not None:
             self._jump_to_row_with_anchor(
                 target_row,
@@ -1387,11 +1465,30 @@ class DiffView(VerticalScroll):
         line_index: int,
         pane: Literal["old", "new"],
     ) -> RenderedRow | None:
-        return _location.row_for_line_and_pane(
-            self._rows_for_current_mode(),
-            line_index,
-            pane,
-        )
+        rows = self._rows_for_current_mode()
+        if not (0 <= line_index < len(self._all_lines)):
+            return None
+
+        if self.split:
+            row_index = self._row_lookup_split.get(line_index)
+            if row_index is None or not (0 <= row_index < len(rows)):
+                return None
+            return rows[row_index]
+
+        line = self._all_lines[line_index]
+        fallback_side: Literal["old", "new", "auto"]
+        if line.is_modified or line.is_deleted:
+            fallback_side = "old"
+        elif line.is_added:
+            fallback_side = "new"
+        else:
+            fallback_side = "auto"
+
+        for side in dict.fromkeys((pane, "auto", fallback_side)):
+            row_index = self._row_lookup_unified.get((line_index, side))
+            if row_index is not None and 0 <= row_index < len(rows):
+                return rows[row_index]
+        return None
 
     _DIFF_MODES: tuple[Literal["auto", "split", "unified"], ...] = (
         "auto",
@@ -1406,7 +1503,7 @@ class DiffView(VerticalScroll):
             idx = 0
         new_mode = self._DIFF_MODES[(idx + 1) % len(self._DIFF_MODES)]
         self.mode = new_mode
-        label = {"auto": "Auto", "split": "Split", "unified": "Unified"}[new_mode]
+        label = _DIFF_MODE_LABELS[new_mode]
         self.post_message(Flash(f"Diff mode: {label}", style="success", duration=1.5))
 
     # ==================================================================
@@ -1578,7 +1675,7 @@ class DiffView(VerticalScroll):
         _render._update_line_cursor(self, line_idx)
 
     def _invalidate_base_code_content_cache(
-        self, line_indices: set[int] | None = None
+        self, line_indices: Collection[int] | None = None
     ) -> None:
         _render._invalidate_base_code_content_cache(self, line_indices)
 

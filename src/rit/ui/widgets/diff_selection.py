@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from collections.abc import Collection, Sequence
+from typing import TYPE_CHECKING, Literal, overload
 
 from textual.content import Content
 
@@ -20,6 +21,27 @@ if TYPE_CHECKING:
 
 
 __all__ = ()
+
+
+class _DiffLineTexts(Sequence[str]):
+    def __init__(self, view: DiffView) -> None:
+        self._view = view
+
+    def __len__(self) -> int:
+        return len(self._view._all_lines)
+
+    @overload
+    def __getitem__(self, index: int) -> str: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[str]: ...
+
+    def __getitem__(self, index: int | slice) -> str | list[str]:
+        if isinstance(index, slice):
+            return [self[line_idx] for line_idx in range(*index.indices(len(self)))]
+
+        line = self._view._all_lines[index]
+        return self._view._get_line_text(line)
 
 
 def _apply_visual_mode_state(
@@ -102,7 +124,7 @@ def _yank(view: DiffView) -> None:
     if view.visual_anchor_line is None:
         return
 
-    line_texts = [view._get_line_text(line) for line in view._all_lines]
+    line_texts = _DiffLineTexts(view)
     yank = _selection_text.visual_yank_for_range(
         line_texts,
         visual_anchor_line=view.visual_anchor_line,
@@ -184,36 +206,63 @@ def _update_selection_highlighting(
     if incremental:
         dirty_specs = {
             line_idx: _compute_selection_spec_for_line(view, line_idx)
-            for line_idx in set(dirty_lines or ())
+            for line_idx in dirty_lines
         }
-        new_specs = _selection_range.visual_selection_specs_with_dirty_lines(
-            old_specs,
-            dirty_specs,
+        lines_to_clear: list[int] = []
+        lines_to_apply: list[int] = []
+        for line_idx, spec in dirty_specs.items():
+            if spec is None:
+                if line_idx in old_specs:
+                    lines_to_clear.append(line_idx)
+            else:
+                lines_to_apply.append(line_idx)
+        delta = _selection_range.VisualSelectionDelta(
+            lines_to_clear=frozenset(lines_to_clear),
+            lines_to_apply=frozenset(lines_to_apply),
         )
+        new_specs = old_specs
     else:
         new_specs = _compute_visible_selection_specs(view)
+        delta = _selection_range.visual_selection_delta(old_specs, new_specs)
 
-    delta = _selection_range.visual_selection_delta(
-        old_specs,
-        new_specs,
-        dirty_lines=dirty_lines,
-    )
-
-    for line_idx in sorted(delta.lines_to_clear):
+    for line_idx in _ordered_selection_lines(delta.lines_to_clear):
         _clear_line_selection(view, line_idx)
 
-    for line_idx in sorted(delta.lines_to_apply):
-        sel_start, sel_end, _ = new_specs[line_idx]
+    for line_idx in _ordered_selection_lines(delta.lines_to_apply):
+        if incremental:
+            dirty_spec = dirty_specs[line_idx]
+            assert dirty_spec is not None
+            sel_start, sel_end, _ = dirty_spec
+        else:
+            sel_start, sel_end, _ = new_specs[line_idx]
         _apply_line_selection(view, line_idx, sel_start, sel_end)
 
+    if incremental:
+        for line_idx, spec in dirty_specs.items():
+            if spec is None:
+                new_specs.pop(line_idx, None)
+            else:
+                new_specs[line_idx] = spec
+
     view._visual_selection_specs = new_specs
+
+
+def _ordered_selection_lines(line_indices: Collection[int]) -> Collection[int]:
+    if len(line_indices) <= 1:
+        return line_indices
+    if len(line_indices) == 2:
+        first, second = line_indices
+        if first <= second:
+            return (first, second)
+        return (second, first)
+    return sorted(line_indices)
 
 
 def _clear_line_selection(view: DiffView, line_idx: int) -> None:
     if line_idx < 0 or line_idx >= len(view._all_lines):
         return
 
-    if _blocks._refresh_grouped_blocks_for_lines(view, {line_idx}):
+    if _blocks._refresh_grouped_blocks_for_lines(view, (line_idx,)):
         return
 
     code_widgets = view._get_code_widgets(line_idx)
@@ -252,7 +301,7 @@ def _apply_line_selection(
     if line_idx < 0 or line_idx >= len(view._all_lines):
         return
 
-    if _blocks._refresh_grouped_blocks_for_lines(view, {line_idx}):
+    if _blocks._refresh_grouped_blocks_for_lines(view, (line_idx,)):
         return
 
     line = view._all_lines[line_idx]

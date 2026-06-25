@@ -384,7 +384,8 @@ def _next_word_once(view: DiffView) -> bool:
 
     rows = view._rows_for_current_mode()
     current = view._current_row_index()
-    for target_row in rows[current + 1 :]:
+    for row_index in range(current + 1, len(rows)):
+        target_row = rows[row_index]
         pane = _pane_for_row(view, target_row)
         next_text = _get_cursor_text_for_target(view, target_row.line_index, pane)
         if next_text == "":
@@ -417,7 +418,8 @@ def _prev_word_once(view: DiffView) -> bool:
 
     rows = view._rows_for_current_mode()
     current = view._current_row_index()
-    for target_row in reversed(rows[:current]):
+    for row_index in range(current - 1, -1, -1):
+        target_row = rows[row_index]
         pane = _pane_for_row(view, target_row)
         prev_text = _get_cursor_text_for_target(view, target_row.line_index, pane)
         if prev_text == "":
@@ -450,7 +452,8 @@ def _end_word_once(view: DiffView) -> bool:
 
     rows = view._rows_for_current_mode()
     current = view._current_row_index()
-    for target_row in rows[current + 1 :]:
+    for row_index in range(current + 1, len(rows)):
+        target_row = rows[row_index]
         pane = _pane_for_row(view, target_row)
         next_text = _get_cursor_text_for_target(view, target_row.line_index, pane)
         first_word_pos = _word_motion.first_word_start(next_text)
@@ -625,18 +628,16 @@ def _mounted_block_row_vertical_bounds(
     if block is None or not block.is_mounted:
         return None
 
-    line_indices = list(block.line_indices)
-    try:
-        row_offset = line_indices.index(row.line_index)
-    except ValueError:
-        return None
-
+    line_indices = block.line_indices
     block_top = int(view.scroll_y) + (
         block.region.y - view.scrollable_content_region.y
     )
     if view.split:
-        top = block_top + row_offset
-        return top, top + 1
+        for row_offset, line_index in enumerate(line_indices):
+            if line_index == row.line_index:
+                top = block_top + row_offset
+                return top, top + 1
+        return None
 
     offset = 0
     for line_index in line_indices:
@@ -850,14 +851,14 @@ def _queue_cursor_update(
 def _flush_queued_cursor_ui_updates(view: DiffView) -> None:
     view._cursor_ui.flush_pending = False
 
-    cursor_lines = set(view._cursor_ui.dirty_lines)
-    selection_dirty_lines = set(view._cursor_ui.selection_dirty)
+    cursor_lines = view._cursor_ui.dirty_lines
+    selection_dirty_lines = view._cursor_ui.selection_dirty
     selection_full_refresh = view._cursor_ui.selection_full_refresh
     sync_search_match = view._cursor_ui.sync_search
     update_status_line = view._cursor_ui.update_status
 
-    view._cursor_ui.dirty_lines.clear()
-    view._cursor_ui.selection_dirty.clear()
+    view._cursor_ui.dirty_lines = set()
+    view._cursor_ui.selection_dirty = set()
     view._cursor_ui.selection_full_refresh = False
     view._cursor_ui.sync_search = False
     view._cursor_ui.update_status = False
@@ -874,7 +875,7 @@ def _flush_queued_cursor_ui_updates(view: DiffView) -> None:
 
     if cursor_lines:
         _blocks._refresh_grouped_blocks_for_lines(view, cursor_lines)
-        for line_idx in sorted(cursor_lines):
+        for line_idx in _cursor_lines_for_repaint(cursor_lines):
             if (
                 line_idx in view._unified_blocks_by_line
                 or line_idx in view._split_blocks_by_line
@@ -891,6 +892,17 @@ def _flush_queued_cursor_ui_updates(view: DiffView) -> None:
         _search.sync_match_index_to_cursor(view)
     if update_status_line:
         view._update_status_line()
+
+
+def _cursor_lines_for_repaint(cursor_lines: Collection[int]) -> Collection[int]:
+    if len(cursor_lines) == 1:
+        return cursor_lines
+    if len(cursor_lines) == 2:
+        first, second = cursor_lines
+        if first <= second:
+            return (first, second)
+        return (second, first)
+    return sorted(cursor_lines)
 
 
 # ---------------------------------------------------------------------------
@@ -1072,17 +1084,38 @@ def _clamp_cursor_column_to_current_row(view: DiffView) -> None:
 
 
 def _first_row_for_line(view: DiffView, line_index: int) -> RenderedRow | None:
-    for row in view._rows_for_current_mode():
-        if row.line_index == line_index:
-            return row
-    return None
+    rows = view._rows_for_current_mode()
+    if not (0 <= line_index < len(view._all_lines)):
+        return None
+
+    if view.split:
+        row_index = view._row_lookup_split.get(line_index)
+        if row_index is None or not (0 <= row_index < len(rows)):
+            return None
+        return rows[row_index]
+
+    line = view._all_lines[line_index]
+    side: Literal["old", "new", "auto"]
+    if line.is_modified or line.is_deleted:
+        side = "old"
+    elif line.is_added:
+        side = "new"
+    else:
+        side = "auto"
+
+    row_index = view._row_lookup_unified.get((line_index, side))
+    if row_index is None or not (0 <= row_index < len(rows)):
+        return None
+    return rows[row_index]
 
 
 def _first_row_for_hunk(view: DiffView, hunk_index: int) -> RenderedRow | None:
-    for row in view._rows_for_current_mode():
-        if row.hunk_index == hunk_index:
-            return row
-    return None
+    if not (0 <= hunk_index < len(view._hunk_line_ranges)):
+        return None
+    _, hunk_start, hunk_end = view._hunk_line_ranges[hunk_index]
+    if hunk_end < hunk_start:
+        return None
+    return _first_row_for_line(view, hunk_start)
 
 
 # ---------------------------------------------------------------------------
@@ -1133,9 +1166,10 @@ def _scroll_to_hunk(view: DiffView, index: int) -> None:
         return
 
     if view._virt.active:
-        target_range = next(
-            (item for item in view._hunk_line_ranges if item[0] == index),
-            None,
+        target_range = (
+            view._hunk_line_ranges[index]
+            if 0 <= index < len(view._hunk_line_ranges)
+            else None
         )
         if target_range is not None:
             _, start, end = target_range

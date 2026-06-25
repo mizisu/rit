@@ -44,8 +44,12 @@ def pr_files_page_request(
 def parse_pr_files_page(data: object) -> list[PRFile]:
     """Normalize a PR files REST page into PRFile models."""
     if isinstance(data, list):
+        if not data:
+            return []
+        if len(data) == 1:
+            return [PRFile.model_validate(data[0])]
         return _PRFileListAdapter.validate_python(data)
-    return _PRFileListAdapter.validate_python([data])
+    return [PRFile.model_validate(data)]
 
 
 def parse_pr_files_result(result: str) -> list[PRFile]:
@@ -115,6 +119,10 @@ async def fetch_pr_files(
         per_page=per_page,
         runner=runner,
     )
+    if len(first_page) < per_page:
+        return first_page
+    if total_count is not None and total_count <= len(first_page):
+        return first_page
 
     async def fetch_pages(pages: tuple[int, ...]) -> dict[int, list[PRFile]]:
         return await fetch_pr_file_pages(

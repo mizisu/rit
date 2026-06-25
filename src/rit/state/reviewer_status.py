@@ -50,11 +50,31 @@ def _reviewer_kind(review: PRReview | None, *, is_requested: bool) -> ReviewerKi
 def derive_reviewer_states(
     pr: PR, reviews: list[PRReview]
 ) -> list[ReviewerDisplayState]:
+    requested_reviewers = pr.requested_reviewers
+    if not requested_reviewers and not reviews:
+        return []
+
     author_login = pr.user.login if pr.user else ""
+
+    if not requested_reviewers and len(reviews) == 1:
+        review = reviews[0]
+        user = review.user
+        login = user.login if user else ""
+        if not login or login == author_login:
+            return []
+        return [
+            ReviewerDisplayState(
+                display_name=login,
+                kind=_reviewer_kind(review, is_requested=False),
+                latest_review_at=review.submitted_at,
+                is_requested=False,
+                is_team=False,
+            )
+        ]
 
     requested_by_name: dict[str, ReviewRequest] = {}
     requested_order: list[str] = []
-    for request in pr.requested_reviewers:
+    for request in requested_reviewers:
         display_name = request.display_name
         if not display_name or display_name == author_login:
             continue
@@ -65,6 +85,7 @@ def derive_reviewer_states(
 
     latest_reviews: dict[str, tuple[PRReview, tuple[datetime, int]]] = {}
     review_order: list[str] = []
+    review_order_seen: set[str] = set()
     for index, review in enumerate(reviews):
         user = review.user
         login = user.login if user else ""
@@ -75,8 +96,9 @@ def derive_reviewer_states(
         existing = latest_reviews.get(login)
         if existing is None or review_key >= existing[1]:
             latest_reviews[login] = (review, review_key)
-        if login not in review_order:
+        if login not in review_order_seen:
             review_order.append(login)
+            review_order_seen.add(login)
 
     ordered_names = requested_order + [
         login for login in review_order if login not in requested_by_name

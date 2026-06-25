@@ -1,15 +1,14 @@
 """PR data models matching GitHub GraphQL/REST response structures."""
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Generic, Literal, TypeVar
+from typing import Generic, Literal, TypeVar, cast
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from rit.core.datetime_utils import datetime_min_utc, datetime_sort_key
-
 
 __all__ = (
     "CommentThread",
@@ -35,15 +34,22 @@ __all__ = (
 
 
 T = TypeVar("T")
+_LIST_TYPE = list
+
+
+_FILE_STATUS_ICONS: dict[str, str] = {
+    "added": "+",
+    "removed": "-",
+    "modified": "M",
+    "renamed": "R",
+    "copied": "C",
+}
 
 
 def _dict_value(value: object, key: str) -> object | None:
-    if not isinstance(value, dict):
+    if not isinstance(value, Mapping):
         return None
-    for item_key, item_value in value.items():
-        if item_key == key:
-            return item_value
-    return None
+    return getattr(value, "get")(key)
 
 
 class NodeList(BaseModel, Generic[T]):
@@ -54,6 +60,12 @@ class NodeList(BaseModel, Generic[T]):
     @classmethod
     def from_nodes(cls, nodes: Iterable[T]) -> "NodeList[T]":
         """Return a connection wrapper from any iterable of nodes."""
+        if isinstance(nodes, _LIST_TYPE):
+            node_count = len(nodes)
+            if node_count == 0 or (node_count == 1 and isinstance(nodes[0], BaseModel)):
+                return cls.model_construct(nodes=nodes)
+            if all(isinstance(node, BaseModel) for node in nodes):
+                return cls.model_construct(nodes=nodes)
         return cls(nodes=list(nodes))
 
 
@@ -99,7 +111,9 @@ class PRUser(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     login: str = ""
-    avatar_url: str = Field(default="", alias="avatarUrl")
+    avatar_url: str = Field(
+        default="", validation_alias=AliasChoices("avatarUrl", "avatar_url")
+    )
 
 
 class PRTeam(BaseModel):
@@ -120,16 +134,22 @@ class PRIssueComment(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    id: int = Field(default=0, alias="databaseId")
+    id: int = Field(default=0, validation_alias=AliasChoices("databaseId", "id"))
     body: str = ""
-    user: PRUser | None = Field(default=None, alias="author")
+    user: PRUser | None = Field(
+        default=None, validation_alias=AliasChoices("author", "user")
+    )
     created_at: datetime = Field(
-        default_factory=datetime_min_utc, alias="createdAt"
+        default_factory=datetime_min_utc,
+        validation_alias=AliasChoices("createdAt", "created_at"),
     )
     updated_at: datetime = Field(
-        default_factory=datetime_min_utc, alias="updatedAt"
+        default_factory=datetime_min_utc,
+        validation_alias=AliasChoices("updatedAt", "updated_at"),
     )
-    html_url: str = Field(default="", alias="htmlUrl")
+    html_url: str = Field(
+        default="", validation_alias=AliasChoices("htmlUrl", "html_url")
+    )
 
 
 class PRComment(BaseModel):
@@ -137,26 +157,39 @@ class PRComment(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    id: int = Field(default=0, alias="databaseId")
+    id: int = Field(default=0, validation_alias=AliasChoices("databaseId", "id"))
     body: str = ""
-    user: PRUser | None = Field(default=None, alias="author")
+    user: PRUser | None = Field(
+        default=None, validation_alias=AliasChoices("author", "user")
+    )
     path: str = ""
     line: int | None = None
-    original_line: int | None = Field(default=None, alias="originalLine")
+    original_line: int | None = Field(
+        default=None, validation_alias=AliasChoices("originalLine", "original_line")
+    )
     side: str = ""
     created_at: datetime = Field(
-        default_factory=datetime_min_utc, alias="createdAt"
+        default_factory=datetime_min_utc,
+        validation_alias=AliasChoices("createdAt", "created_at"),
     )
     updated_at: datetime = Field(
-        default_factory=datetime_min_utc, alias="updatedAt"
+        default_factory=datetime_min_utc,
+        validation_alias=AliasChoices("updatedAt", "updated_at"),
     )
-    in_reply_to_id: int | None = Field(default=None, alias="replyTo")
-    diff_hunk: str = Field(default="", alias="diffHunk")
-    node_id: str = Field(default="", alias="nodeId")
+    in_reply_to_id: int | None = Field(
+        default=None, validation_alias=AliasChoices("replyTo", "in_reply_to_id")
+    )
+    diff_hunk: str = Field(
+        default="", validation_alias=AliasChoices("diffHunk", "diff_hunk")
+    )
+    node_id: str = Field(default="", validation_alias=AliasChoices("nodeId", "node_id"))
     subject_type: str = Field(
         default="line", validation_alias=AliasChoices("subjectType", "subject_type")
     )
-    pull_request_review_id: int | None = Field(default=None, alias="pullRequestReview")
+    pull_request_review_id: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("pullRequestReview", "pull_request_review_id"),
+    )
 
     @property
     def anchor_side(self) -> Literal["old", "new", "auto"]:
@@ -172,10 +205,12 @@ class PRComment(BaseModel):
 
     @property
     def anchor_line(self) -> int | None:
-        if self.anchor_side == "old":
+        if self.side == "LEFT":
             return self.original_line if self.original_line is not None else self.line
-        if self.anchor_side == "new":
+        if self.side == "RIGHT":
             return self.line if self.line is not None else self.original_line
+        if self.original_line is not None and self.line is None:
+            return self.original_line
         return self.line if self.line is not None else self.original_line
 
     @field_validator("in_reply_to_id", mode="before")
@@ -201,6 +236,7 @@ class PendingReviewComment(BaseModel):
     line: int = 0
     side: Literal["LEFT", "RIGHT"] = "RIGHT"
     is_diff_line: bool = True
+    review_comment_id: int = 0
 
     @property
     def anchor_side(self) -> Literal["old", "new"]:
@@ -217,7 +253,8 @@ class ReviewRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     requested_reviewer: PRUser | PRTeam | None = Field(
-        default=None, alias="requestedReviewer"
+        default=None,
+        validation_alias=AliasChoices("requestedReviewer", "requested_reviewer"),
     )
 
     @field_validator("requested_reviewer", mode="before")
@@ -251,18 +288,35 @@ class ReviewThread(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     id: str = ""  # GraphQL node ID for mutations
-    is_resolved: bool = Field(default=False, alias="isResolved")
+    is_resolved: bool = Field(
+        default=False, validation_alias=AliasChoices("isResolved", "is_resolved")
+    )
     path: str = ""
     line: int | None = None
-    original_line: int | None = Field(default=None, alias="originalLine")
-    start_line: int | None = Field(default=None, alias="startLine")
-    original_start_line: int | None = Field(default=None, alias="originalStartLine")
-    diff_side: str = Field(default="", alias="diffSide")
-    start_diff_side: str | None = Field(default=None, alias="startDiffSide")
-    subject_type: str = Field(default="LINE", alias="subjectType")
+    original_line: int | None = Field(
+        default=None, validation_alias=AliasChoices("originalLine", "original_line")
+    )
+    start_line: int | None = Field(
+        default=None, validation_alias=AliasChoices("startLine", "start_line")
+    )
+    original_start_line: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("originalStartLine", "original_start_line"),
+    )
+    diff_side: str = Field(
+        default="", validation_alias=AliasChoices("diffSide", "diff_side")
+    )
+    start_diff_side: str | None = Field(
+        default=None, validation_alias=AliasChoices("startDiffSide", "start_diff_side")
+    )
+    subject_type: str = Field(
+        default="LINE", validation_alias=AliasChoices("subjectType", "subject_type")
+    )
 
     comments_connection: NodeList[PRComment] = Field(
-        default_factory=NodeList, alias="comments", exclude=True
+        default_factory=lambda: NodeList[PRComment](),
+        validation_alias=AliasChoices("comments", "comments_connection"),
+        exclude=True,
     )
 
     @property
@@ -294,27 +348,41 @@ class ReviewThread(BaseModel):
 
     @property
     def anchor_line(self) -> int | None:
-        if self.anchor_side == "old":
+        if self.diff_side == "LEFT":
             return self.original_line if self.original_line is not None else self.line
-        if self.anchor_side == "new":
+        if self.diff_side == "RIGHT":
             return self.line if self.line is not None else self.original_line
+        root = self.root_comment
+        if root is not None:
+            root_side = root.anchor_side
+            if root_side == "old":
+                return (
+                    self.original_line if self.original_line is not None else self.line
+                )
+            if root_side == "new":
+                return self.line if self.line is not None else self.original_line
+        if self.original_line is not None and self.line is None:
+            return self.original_line
         return self.line if self.line is not None else self.original_line
 
 
 class PRReview(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    id: int = Field(default=0, alias="databaseId")
-    node_id: str = Field(
-        default="", validation_alias=AliasChoices("nodeId", "node_id")
+    id: int = Field(default=0, validation_alias=AliasChoices("databaseId", "id"))
+    node_id: str = Field(default="", validation_alias=AliasChoices("nodeId", "node_id"))
+    user: PRUser | None = Field(
+        default=None, validation_alias=AliasChoices("author", "user")
     )
-    user: PRUser | None = Field(default=None, alias="author")
     body: str = ""
     state: ReviewState = ReviewState.PENDING
     created_at: datetime = Field(
-        default_factory=datetime_min_utc, alias="createdAt"
+        default_factory=datetime_min_utc,
+        validation_alias=AliasChoices("createdAt", "created_at"),
     )
-    submitted_at: datetime | None = Field(default=None, alias="submittedAt")
+    submitted_at: datetime | None = Field(
+        default=None, validation_alias=AliasChoices("submittedAt", "submitted_at")
+    )
 
     @field_validator("state", mode="before")
     @classmethod
@@ -338,11 +406,18 @@ class PRFile(BaseModel):
     deletions: int = 0
     changes: int = 0
     patch: str = ""  # Unified diff patch - only available via REST API
-    previous_filename: str | None = Field(default=None, alias="previousFilename")
+    previous_filename: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("previousFilename", "previous_filename"),
+    )
     sha: str = ""
-    blob_url: str = Field(default="", alias="blobUrl")
-    raw_url: str = Field(default="", alias="rawUrl")
-    contents_url: str = Field(default="", alias="contentsUrl")
+    blob_url: str = Field(
+        default="", validation_alias=AliasChoices("blobUrl", "blob_url")
+    )
+    raw_url: str = Field(default="", validation_alias=AliasChoices("rawUrl", "raw_url"))
+    contents_url: str = Field(
+        default="", validation_alias=AliasChoices("contentsUrl", "contents_url")
+    )
 
     comments: list[PRComment] = Field(default_factory=list, exclude=True)
     viewer_viewed_state: FileViewedState = Field(
@@ -357,14 +432,7 @@ class PRFile(BaseModel):
 
     @property
     def status_icon(self) -> str:
-        icons = {
-            "added": "+",
-            "removed": "-",
-            "modified": "M",
-            "renamed": "R",
-            "copied": "C",
-        }
-        return icons.get(self.status, "?")
+        return _FILE_STATUS_ICONS.get(self.status, "?")
 
 
 class PR(BaseModel):
@@ -372,58 +440,101 @@ class PR(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    node_id: str = Field(default="", alias="id")
+    node_id: str = Field(default="", validation_alias=AliasChoices("id", "node_id"))
     number: int = 0
     title: str = ""
     body: str = ""
     state: str = "OPEN"  # GraphQL returns OPEN/CLOSED/MERGED
-    is_draft: bool = Field(default=False, alias="isDraft")
+    is_draft: bool = Field(
+        default=False, validation_alias=AliasChoices("isDraft", "is_draft")
+    )
 
-    user: PRUser | None = Field(default=None, alias="author")
+    user: PRUser | None = Field(
+        default=None, validation_alias=AliasChoices("author", "user")
+    )
 
     created_at: datetime = Field(
-        default_factory=datetime_min_utc, alias="createdAt"
+        default_factory=datetime_min_utc,
+        validation_alias=AliasChoices("createdAt", "created_at"),
     )
     updated_at: datetime = Field(
-        default_factory=datetime_min_utc, alias="updatedAt"
+        default_factory=datetime_min_utc,
+        validation_alias=AliasChoices("updatedAt", "updated_at"),
     )
-    merged_at: datetime | None = Field(default=None, alias="mergedAt")
-    closed_at: datetime | None = Field(default=None, alias="closedAt")
+    merged_at: datetime | None = Field(
+        default=None, validation_alias=AliasChoices("mergedAt", "merged_at")
+    )
+    closed_at: datetime | None = Field(
+        default=None, validation_alias=AliasChoices("closedAt", "closed_at")
+    )
 
-    head_ref: str = Field(default="", alias="headRefName")
-    base_ref: str = Field(default="", alias="baseRefName")
-    head_sha: str = Field(default="", alias="headRefOid")
-    base_sha: str = Field(default="", alias="baseRefOid")
+    head_ref: str = Field(
+        default="", validation_alias=AliasChoices("headRefName", "head_ref")
+    )
+    base_ref: str = Field(
+        default="", validation_alias=AliasChoices("baseRefName", "base_ref")
+    )
+    head_sha: str = Field(
+        default="", validation_alias=AliasChoices("headRefOid", "head_sha")
+    )
+    base_sha: str = Field(
+        default="", validation_alias=AliasChoices("baseRefOid", "base_sha")
+    )
 
     additions: int = 0
     deletions: int = 0
-    changed_files: int = Field(default=0, alias="changedFiles")
+    changed_files: int = Field(
+        default=0, validation_alias=AliasChoices("changedFiles", "changed_files")
+    )
     commits: int = 0
-    comments_count: int = Field(default=0, alias="commentsCount")
-    review_comments_count: int = Field(default=0, alias="reviewCommentsCount")
+    comments_count: int = Field(
+        default=0, validation_alias=AliasChoices("commentsCount", "comments_count")
+    )
+    review_comments_count: int = Field(
+        default=0,
+        validation_alias=AliasChoices("reviewCommentsCount", "review_comments_count"),
+    )
 
     assignees_connection: NodeList[PRUser] = Field(
-        default_factory=NodeList, alias="assignees", exclude=True
+        default_factory=lambda: NodeList[PRUser](),
+        validation_alias=AliasChoices("assignees", "assignees_connection"),
+        exclude=True,
     )
     labels_connection: NodeList[PRLabel] = Field(
-        default_factory=NodeList, alias="labels", exclude=True
+        default_factory=lambda: NodeList[PRLabel](),
+        validation_alias=AliasChoices("labels", "labels_connection"),
+        exclude=True,
     )
     review_requests_connection: NodeList[ReviewRequest] = Field(
-        default_factory=NodeList, alias="reviewRequests", exclude=True
+        default_factory=lambda: NodeList[ReviewRequest](),
+        validation_alias=AliasChoices("reviewRequests", "review_requests_connection"),
+        exclude=True,
     )
     reviews_connection: NodeList[PRReview] = Field(
-        default_factory=NodeList, alias="reviews", exclude=True
+        default_factory=lambda: NodeList[PRReview](),
+        validation_alias=AliasChoices("reviews", "reviews_connection"),
+        exclude=True,
     )
     review_threads_connection: NodeList[ReviewThread] = Field(
-        default_factory=NodeList, alias="reviewThreads", exclude=True
+        default_factory=lambda: NodeList[ReviewThread](),
+        validation_alias=AliasChoices("reviewThreads", "review_threads_connection"),
+        exclude=True,
     )
     issue_comments_connection: NodeList[PRIssueComment] = Field(
-        default_factory=NodeList, alias="comments", exclude=True
+        default_factory=lambda: NodeList[PRIssueComment](),
+        validation_alias=AliasChoices("comments", "issue_comments_connection"),
+        exclude=True,
     )
 
-    html_url: str = Field(default="", alias="htmlUrl")
-    diff_url: str = Field(default="", alias="diffUrl")
-    patch_url: str = Field(default="", alias="patchUrl")
+    html_url: str = Field(
+        default="", validation_alias=AliasChoices("htmlUrl", "html_url")
+    )
+    diff_url: str = Field(
+        default="", validation_alias=AliasChoices("diffUrl", "diff_url")
+    )
+    patch_url: str = Field(
+        default="", validation_alias=AliasChoices("patchUrl", "patch_url")
+    )
 
     draft: bool = False
     mergeable: bool | None = None
@@ -494,6 +605,20 @@ class CommentThread(BaseModel):
     is_resolved: bool = False
     thread_id: str = ""  # GraphQL node ID for resolve/unresolve mutations
 
+    @field_validator("replies")
+    @classmethod
+    def sort_replies(cls, replies: list[PRComment]) -> list[PRComment]:
+        if len(replies) < 2:
+            return replies
+        reply_iter = iter(replies)
+        previous_key = datetime_sort_key(next(reply_iter).created_at)
+        for reply in reply_iter:
+            key = datetime_sort_key(reply.created_at)
+            if key < previous_key:
+                return sorted(replies, key=lambda c: datetime_sort_key(c.created_at))
+            previous_key = key
+        return replies
+
     @property
     def file_path(self) -> str:
         return self.root_comment.path
@@ -504,21 +629,27 @@ class CommentThread(BaseModel):
 
     @property
     def all_comments(self) -> list[PRComment]:
-        return [self.root_comment] + sorted(
-            self.replies, key=lambda c: datetime_sort_key(c.created_at)
-        )
+        return [self.root_comment, *self.replies]
 
     @property
     def created_at(self) -> datetime:
         return self.root_comment.created_at
 
 
-def group_comments_into_threads(comments: list[PRComment]) -> list[CommentThread]:
-    comment_map: dict[int, PRComment] = {c.id: c for c in comments}
+def group_comments_into_threads(comments: Iterable[PRComment]) -> list[CommentThread]:
+    if isinstance(comments, Sequence):
+        comment_sequence = cast("Sequence[PRComment]", comments)
+        comment_count = len(comment_sequence)
+        if comment_count == 0:
+            return []
+        if comment_count == 1:
+            return [CommentThread(root_comment=comment_sequence[0])]
+
+    comment_map: dict[int, PRComment] = {comment.id: comment for comment in comments}
     root_comments: list[PRComment] = []
     replies_map: dict[int, list[PRComment]] = {}
 
-    for comment in comments:
+    for comment in comment_map.values():
         if comment.in_reply_to_id is None:
             root_comments.append(comment)
         elif comment.in_reply_to_id in comment_map:
@@ -544,6 +675,7 @@ def group_comments_into_threads(comments: list[PRComment]) -> list[CommentThread
         )
         threads.append(thread)
 
-    threads.sort(key=lambda t: datetime_sort_key(t.created_at))
+    if len(threads) > 1:
+        threads.sort(key=lambda t: datetime_sort_key(t.created_at))
 
     return threads

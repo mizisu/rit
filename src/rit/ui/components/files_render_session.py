@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from operator import attrgetter
 from typing import Literal
 
 from rit.core.types import FileDiff
@@ -18,6 +19,9 @@ __all__ = (
     "FullFilePreviewRestoreTarget",
     "PendingLocationJump",
 )
+
+
+_FILENAME_FOR_SIGNATURE: Callable[[PRFile], str] = attrgetter("filename")
 
 
 @dataclass(frozen=True)
@@ -67,7 +71,12 @@ class FilesRenderSession:
         return self._showing_combined_files
 
     def files_signature(self, files: Sequence[PRFile]) -> tuple[str, ...]:
-        return tuple(file.filename for file in files)
+        file_count = len(files)
+        if file_count == 0:
+            return ()
+        if file_count == 1:
+            return (files[0].filename,)
+        return tuple(map(_FILENAME_FOR_SIGNATURE, files))
 
     def uses_combined_files(self, files: Sequence[PRFile]) -> bool:
         return len(files) >= self._combined_threshold

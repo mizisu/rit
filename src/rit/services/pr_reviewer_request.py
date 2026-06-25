@@ -285,7 +285,12 @@ def assignee_candidates_request(repo_full_name: str) -> tuple[str, ...]:
 
 def parse_reviewer_user_candidates(result: str) -> list[PRUser]:
     """Parse paginated GitHub user candidate output."""
-    return _PRUserListAdapter.validate_python(parse_paginated_items(result))
+    items = parse_paginated_items(result)
+    if not items:
+        return []
+    if len(items) == 1:
+        return [PRUser.model_validate(items[0])]
+    return _PRUserListAdapter.validate_python(items)
 
 
 async def fetch_reviewer_user_candidates(
@@ -321,7 +326,12 @@ async def fetch_assignee_candidates(
 
 def parse_reviewer_team_candidates(result: str) -> list[PRTeam]:
     """Parse paginated GitHub team candidate output."""
-    return _PRTeamListAdapter.validate_python(parse_paginated_items(result))
+    items = parse_paginated_items(result)
+    if not items:
+        return []
+    if len(items) == 1:
+        return [PRTeam.model_validate(items[0])]
+    return _PRTeamListAdapter.validate_python(items)
 
 
 def should_treat_team_candidates_error_as_empty(message: str) -> bool:

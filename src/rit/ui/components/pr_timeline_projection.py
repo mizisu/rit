@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
@@ -45,13 +45,17 @@ def build_timeline_items(
     *,
     issue_comments: Sequence[PRIssueComment],
     reviews: Sequence[PRReview],
-    comments: Sequence[PRComment],
+    comments: Iterable[PRComment],
 ) -> list[TimelineItem]:
     """Return visible timeline items sorted by timeline time."""
     threads_by_review: dict[int, list[CommentThread]] = {}
     orphan_threads: list[CommentThread] = []
 
-    for thread in group_comments_into_threads(list(comments)):
+    comment_threads: Iterable[CommentThread] = (
+        () if isinstance(comments, Sequence) and not comments
+        else group_comments_into_threads(comments)
+    )
+    for thread in comment_threads:
         if not _has_body(thread.root_comment.body):
             continue
         review_id = thread.root_comment.pull_request_review_id
@@ -87,7 +91,8 @@ def build_timeline_items(
     for thread in orphan_threads:
         items.append(TimelineItem(when=thread.created_at, kind="thread", thread=thread))
 
-    items.sort(key=lambda item: datetime_sort_key(item.when))
+    if len(items) > 1:
+        items.sort(key=lambda item: datetime_sort_key(item.when))
     return items
 
 
@@ -101,15 +106,24 @@ def review_timeline_time(
     if not is_min_datetime(review.created_at):
         return review.created_at
 
-    thread_times = [
-        datetime_sort_key(thread.created_at)
-        for thread in threads
-        if not is_min_datetime(thread.created_at)
-    ]
-    if thread_times:
-        return min(thread_times)
-    return datetime_min_utc()
+    if isinstance(threads, Sequence):
+        thread_count = len(threads)
+        if thread_count == 0:
+            return datetime_min_utc()
+        if thread_count == 1:
+            created_at = threads[0].created_at
+            return created_at if not is_min_datetime(created_at) else datetime_min_utc()
+
+    earliest = datetime_min_utc()
+    for thread in threads:
+        created_at = thread.created_at
+        if is_min_datetime(created_at):
+            continue
+        sort_time = datetime_sort_key(created_at)
+        if is_min_datetime(earliest) or sort_time < earliest:
+            earliest = sort_time
+    return earliest
 
 
 def _has_body(body: str) -> bool:
-    return bool(body and body.strip())
+    return bool(body) and not body.isspace()

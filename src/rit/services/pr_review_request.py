@@ -159,7 +159,12 @@ def parse_issue_comment_response(result: str) -> PRIssueComment:
 
 def parse_review_comments_response(result: str) -> list[PRComment]:
     """Parse paginated PR review comment REST output."""
-    return _PRCommentListAdapter.validate_python(parse_paginated_items(result))
+    items = parse_paginated_items(result)
+    if not items:
+        return []
+    if len(items) == 1:
+        return [PRComment.model_validate(items[0])]
+    return _PRCommentListAdapter.validate_python(items)
 
 
 async def run_review_request(

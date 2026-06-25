@@ -185,7 +185,7 @@ def _graphql_errors(data: object) -> object | None:
     return _mapping(data).get("errors")
 
 
-def _mapping(data: object) -> dict[object, object]:
+def _mapping(data: object) -> Mapping:
     if not isinstance(data, Mapping):
         return {}
-    return {key: value for key, value in data.items()}
+    return data

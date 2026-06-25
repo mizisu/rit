@@ -16,19 +16,17 @@ from rit.core.diff import (
     ParsedFilePatchSummary,
     parse_multi_file_patch,
 )
-from rit.core.types import FileDiff
-from rit.services.pr_file_pagination import (
+from rit.core.pagination import (
     PR_FILES_PER_PAGE,
     PRFilePageProgress,
     collect_ordered_page_items,
 )
+from rit.core.types import FileDiff
 from rit.state.file_collection import (
-    append_file,
     apply_file_summary,
     apply_parsed_file,
 )
-from rit.state.models import LoadingState, PR, PRComment, PRFile
-
+from rit.state.models import PR, LoadingState, PRComment, PRFile
 
 __all__ = (
     "DiffSectionStreamer",
@@ -106,19 +104,31 @@ def append_file_batch(
     batch: Sequence[PRFile],
 ) -> int:
     """Append REST-loaded files and return the number newly inserted."""
+    if not batch:
+        return 0
+
+    files = state.files
+    files_by_filename = state.files_by_filename
+    comments_by_file = state.comments_by_file
+    total_count = state.files_total_count
     added_count = 0
+
     for file in batch:
-        result = append_file(
-            state.files,
-            state.files_by_filename,
-            state.comments_by_file,
-            file,
-            total_count=state.files_total_count,
+        filename = file.filename
+        if filename in files_by_filename:
+            continue
+
+        file.comments = comments_by_file.get(filename, [])
+        files.append(file)
+        files_by_filename[filename] = file
+        added_count += 1
+
+    loaded_count = len(files)
+    state.files_loaded_count = loaded_count
+    if added_count:
+        state.files_total_count = (
+            total_count if total_count >= loaded_count else loaded_count
         )
-        state.files_loaded_count = result.loaded_count
-        state.files_total_count = result.total_count
-        if result.added:
-            added_count += 1
     return added_count
 
 
@@ -200,15 +210,14 @@ async def load_rest_file_pages(
     append_file_batch(state, first_page)
     on_progress()
 
-    if file_page_progress(state).rest_limit_exceeded:
+    progress = file_page_progress(state)
+    if progress.rest_limit_exceeded:
         return False
 
-    remaining_pages = file_page_progress(state).initial_remaining_pages()
+    remaining_pages = progress.initial_remaining_pages()
     saw_last_page = len(first_page) < per_page
     while remaining_pages:
-        page_chunk, remaining_pages = file_page_progress(state).next_page_chunk(
-            remaining_pages
-        )
+        page_chunk, remaining_pages = progress.next_page_chunk(remaining_pages)
         if not page_chunk:
             break
 
@@ -228,14 +237,13 @@ async def load_rest_file_pages(
         )
         append_file_batch(state, collected.items)
         saw_last_page = collected.saw_last_page
+        progress = file_page_progress(state)
         if collected.saw_last_page:
             break
-        if file_page_progress(state).rest_limit_exceeded:
+        if progress.rest_limit_exceeded:
             return False
 
-    if not file_page_progress(state).rest_list_complete(
-        saw_last_page=saw_last_page
-    ):
+    if not progress.rest_list_complete(saw_last_page=saw_last_page):
         return False
 
     state.files_loading = LoadingState.LOADED

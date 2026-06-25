@@ -26,24 +26,17 @@ def build_unified_prefix_content(
     new_line_number_width: int,
 ) -> Content:
     """Build the prefix for a normal unified diff line."""
-    prefix_parts: list[Content] = []
-    if show_line_numbers:
-        old_no = str(line.old_line_no) if line.old_line_no else ""
-        new_no = str(line.new_line_no) if line.new_line_no else ""
-        prefix_parts.append(
-            Content.styled(f"{old_no:>{old_line_number_width}} ", "$text-disabled")
-        )
-        prefix_parts.append(
-            Content.styled(f"{new_no:>{new_line_number_width}} ", "$text-disabled")
-        )
+    prefix = _unified_change_prefix(line)
+    if not show_line_numbers:
+        return Content(prefix + " ")
 
-    prefix = " "
-    if line.is_added:
-        prefix = "+"
-    elif line.is_deleted:
-        prefix = "-"
-    prefix_parts.append(Content(prefix + " "))
-    return Content("").join(prefix_parts)
+    old_no = str(line.old_line_no) if line.old_line_no else ""
+    new_no = str(line.new_line_no) if line.new_line_no else ""
+    return Content.assemble(
+        (f"{old_no:>{old_line_number_width}} ", "$text-disabled"),
+        (f"{new_no:>{new_line_number_width}} ", "$text-disabled"),
+        prefix + " ",
+    )
 
 
 def build_preview_prefix_content(
@@ -53,22 +46,19 @@ def build_preview_prefix_content(
     new_line_number_width: int,
 ) -> Content:
     """Build the prefix for full-file preview lines."""
-    line_no = str(line.new_line_no) if line.new_line_no else ""
-    delete_marker = (
-        Content.styled("▸", "$error")
-        if line.preview_deleted_before
-        else Content(" ")
-    )
-    change_marker = preview_change_marker_content(line)
     if not show_line_numbers:
-        return Content("").join([delete_marker, change_marker, Content(" ")])
-    return Content("").join(
-        [
-            Content.styled(f"{line_no:>{new_line_number_width}} ", "$text-disabled"),
-            delete_marker,
-            change_marker,
-            Content(" "),
-        ]
+        return Content.assemble(
+            _preview_deleted_marker_part(line),
+            _preview_change_marker_part(line),
+            " ",
+        )
+
+    line_no = str(line.new_line_no) if line.new_line_no else ""
+    return Content.assemble(
+        (f"{line_no:>{new_line_number_width}} ", "$text-disabled"),
+        _preview_deleted_marker_part(line),
+        _preview_change_marker_part(line),
+        " ",
     )
 
 
@@ -89,14 +79,14 @@ def build_split_prefix(
     line_number_width: int,
 ) -> Content:
     """Build the prefix for one split diff side."""
-    parts: list[Content] = []
-    if show_line_numbers:
-        line_text = str(line_no) if line_no is not None else ""
-        parts.append(
-            Content.styled(f"{line_text:>{line_number_width}} ", "$text-disabled")
-        )
-    parts.append(Content(prefix + " "))
-    return Content("").join(parts)
+    if not show_line_numbers:
+        return Content(prefix + " ")
+
+    line_text = str(line_no) if line_no is not None else ""
+    return Content.assemble(
+        (f"{line_text:>{line_number_width}} ", "$text-disabled"),
+        prefix + " ",
+    )
 
 
 def build_split_prefix_content(
@@ -107,16 +97,9 @@ def build_split_prefix_content(
     line_number_width: int,
 ) -> Content:
     """Build the split prefix for a diff line side."""
-    if side == "old":
-        prefix = "-" if line.is_deleted or line.is_modified else " "
-        line_no = line.old_line_no
-    else:
-        prefix = "+" if line.is_added or line.is_modified else " "
-        line_no = line.new_line_no
-
     return build_split_prefix(
-        line_no,
-        prefix,
+        _split_line_number(line, side=side),
+        _split_prefix_marker(line, side=side),
         show_line_numbers=show_line_numbers,
         line_number_width=line_number_width,
     )
@@ -131,27 +114,57 @@ def build_unified_modified_prefix_content(
     new_line_number_width: int,
 ) -> Content:
     """Build the prefix for one side of a modified unified diff line."""
-    prefix_parts: list[Content] = []
-    if show_line_numbers:
-        if side == "old":
-            prefix_parts.append(
-                Content.styled(
-                    f"{line.old_line_no:>{old_line_number_width}} ",
-                    "$text-disabled",
-                )
-            )
-            prefix_parts.append(
-                Content.styled(" " * (new_line_number_width + 1), "$text-disabled")
-            )
-        else:
-            prefix_parts.append(
-                Content.styled(" " * (old_line_number_width + 1), "$text-disabled")
-            )
-            prefix_parts.append(
-                Content.styled(
-                    f"{line.new_line_no:>{new_line_number_width}} ",
-                    "$text-disabled",
-                )
-            )
-    prefix_parts.append(Content("- " if side == "old" else "+ "))
-    return Content("").join(prefix_parts)
+    prefix = "- " if side == "old" else "+ "
+    if not show_line_numbers:
+        return Content(prefix)
+
+    if side == "old":
+        return Content.assemble(
+            (f"{line.old_line_no:>{old_line_number_width}} ", "$text-disabled"),
+            (" " * (new_line_number_width + 1), "$text-disabled"),
+            prefix,
+        )
+
+    return Content.assemble(
+        (" " * (old_line_number_width + 1), "$text-disabled"),
+        (f"{line.new_line_no:>{new_line_number_width}} ", "$text-disabled"),
+        prefix,
+    )
+
+
+def _unified_change_prefix(line: DiffLine) -> str:
+    if line.is_added:
+        return "+"
+    if line.is_deleted:
+        return "-"
+    return " "
+
+
+def _preview_deleted_marker_part(line: DiffLine) -> tuple[str, str] | str:
+    return ("▸", "$error") if line.preview_deleted_before else " "
+
+
+def _preview_change_marker_part(line: DiffLine) -> tuple[str, str] | str:
+    if line.preview_change == "added":
+        return ("┃", "$success")
+    if line.preview_change == "modified":
+        return ("┃", "$warning")
+    return " "
+
+
+def _split_prefix_marker(
+    line: DiffLine,
+    *,
+    side: Literal["old", "new"],
+) -> str:
+    if side == "old":
+        return "-" if line.is_deleted or line.is_modified else " "
+    return "+" if line.is_added or line.is_modified else " "
+
+
+def _split_line_number(
+    line: DiffLine,
+    *,
+    side: Literal["old", "new"],
+) -> int | None:
+    return line.old_line_no if side == "old" else line.new_line_no

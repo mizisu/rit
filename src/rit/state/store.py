@@ -8,14 +8,9 @@ from typing import Callable, Iterable, Literal
 from textual.message import Message
 
 from rit.core.types import FileDiff
-from rit.services.github import (
-    GitHubService,
-    PRDiscussion,
-)
-from rit.services.pr_file_pagination import (
-    PR_FILES_PER_PAGE,
-)
+from rit.services import GitHubService
 from rit.state.discussion_projection import (
+    PRDiscussion,
     RecentDiscussion,
     project_discussion_state,
     remember_submitted_comment,
@@ -29,21 +24,18 @@ from rit.state.file_collection import (
     cache_file_diff,
     find_file,
     load_file_diff,
-    select_file as project_file_selection,
     sync_file_comments,
 )
-from rit.state.file_content import load_cached_file_content
-from rit.state.file_ingest import (
-    append_file_summaries,
-    begin_file_ingest,
-    load_raw_diff_text,
-    load_rest_file_pages,
-    load_streamed_diff_summaries,
+from rit.state.file_collection import (
+    select_file as project_file_selection,
 )
+from rit.state.file_content import load_cached_file_content
+from rit.state.file_ingest import append_file_summaries
 from rit.state.file_projection import (
     diff_from_file_patch,
     parse_file_patch_summaries,
 )
+from rit.state.file_workspace import load_file_workspace
 from rit.state.issue_comments import (
     apply_submitted_issue_comment,
     normalize_issue_comment_body,
@@ -59,32 +51,41 @@ from rit.state.models import (
     PRReview,
     PRTeam,
     PRUser,
-    ReviewThreadInfo,
     ReviewThread,
+    ReviewThreadInfo,
 )
 from rit.state.pending_review import (
+    PendingReviewProjection,
     PendingReviewSnapshot,
     UnsupportedInlineCommentTarget,
     apply_pending_review_projection,
     apply_pending_review_sync_result,
     clear_pending_review,
     delete_pending_comment,
-    get_pending_file_comments as collect_pending_file_comments,
-    get_pending_inline_comment as find_pending_inline_comment,
-    is_inline_comment_diff_line as is_pending_inline_comment_diff_line,
     load_pending_review_projection,
+    merge_pending_review_drafts,
     plan_inline_comment_submission,
-    plan_pending_review_sync,
     plan_review_submission,
     project_pending_review_sync_result,
-    restore_pending_review_snapshot as build_pending_review_restoration,
     save_pending_comment,
     should_restore_pending_review_snapshot,
+)
+from rit.state.pending_review import (
+    get_pending_inline_comment as find_pending_inline_comment,
+)
+from rit.state.pending_review import (
+    is_inline_comment_diff_line as is_pending_inline_comment_diff_line,
+)
+from rit.state.pending_review import (
+    restore_pending_review_snapshot as build_pending_review_restoration,
+)
+from rit.state.pending_review import (
     snapshot_pending_review as build_pending_review_snapshot,
 )
-from rit.state.pr_merge import merge_pr_discussion, merge_pr_summary
+from rit.state.pending_review_workspace import replace_pending_review
 from rit.state.pr_management import plan_assignee_selection, plan_reviewer_selection
-
+from rit.state.pr_merge import merge_pr_discussion, merge_pr_summary
+from rit.state.review_annotations import ReviewAnnotationIndex
 
 __all__ = (
     "PRStore",
@@ -233,6 +234,7 @@ class PRStore:
             )
 
     async def load_pr_discussion(self) -> None:
+        pending_review_version = self._pending_review_local_version
         full_discussion_task = asyncio.create_task(
             self._service.get_pr_discussion(self.pr_number)
         )
@@ -246,7 +248,10 @@ class PRStore:
             discussion = await full_discussion_task
             pr = self._merge_pr_discussion(discussion)
             self._apply_discussion_state(pr)
-            await self._load_pending_review(pr)
+            await self._load_pending_review(
+                pr,
+                loaded_at_version=pending_review_version,
+            )
             if (
                 previous_signature is not None
                 and previous_signature == discussion_render_signature(pr)
@@ -297,13 +302,17 @@ class PRStore:
 
     async def _load_pr_data(self) -> None:
         self._state.pr_loading = LoadingState.LOADING
+        pending_review_version = self._pending_review_local_version
         try:
             pr = await self._service.get_pr_all(self.pr_number)
             self._state.pr = pr
             self._state.files_total_count = pr.changed_files
             self._apply_discussion_state(pr)
             self._state.pr_loading = LoadingState.LOADED
-            await self._load_pending_review(pr)
+            await self._load_pending_review(
+                pr,
+                loaded_at_version=pending_review_version,
+            )
 
             self._post_message(self.PRLoaded(pr=pr))
             self._post_discussion_detail_messages()
@@ -315,69 +324,24 @@ class PRStore:
 
     async def load_files(self) -> None:
         """Load changed files quickly, falling back to raw diff streaming."""
-        begin_file_ingest(self._state)
-
-        try:
-            if await self._load_files_from_rest_pages():
-                return
-            if await self._load_files_from_streamed_raw_diff():
-                return
-            if await self._load_files_from_raw_diff():
-                return
-        except RuntimeError as e:
-            self._mark_files_load_error(str(e))
-            return
-
-        self._mark_files_load_error("No changed files could be loaded")
+        error = await load_file_workspace(
+            self._state,
+            pr_number=self.pr_number,
+            source=self._service,
+            parse_summaries=self._append_raw_diff_section_summaries,
+            on_progress=self._post_files_loaded,
+        )
+        if error is not None:
+            self._mark_files_load_error(error)
 
     def _mark_files_load_error(self, error: str) -> None:
         self._state.files_loading = LoadingState.ERROR
         self._state.error = error
         self._post_message(self.ErrorOccurred(error=error, source="load_files"))
 
-    async def _load_files_from_streamed_raw_diff(self) -> bool:
-        stream_sections = getattr(self._service, "iter_pr_diff_sections", None)
-        if stream_sections is None:
-            return False
-
-        return await load_streamed_diff_summaries(
-            self._state,
-            pr_number=self.pr_number,
-            stream_sections=stream_sections,
-            parse_summaries=self._append_raw_diff_section_summaries,
-            on_progress=self._post_files_loaded,
-        )
-
-    async def _load_files_from_raw_diff(self) -> bool:
-        get_diff_text = getattr(self._service, "get_pr_diff_text", None)
-        if get_diff_text is None:
-            return False
-
-        return await load_raw_diff_text(
-            self._state,
-            pr_number=self.pr_number,
-            get_diff_text=get_diff_text,
-            on_progress=self._post_files_loaded,
-        )
-
     async def _append_raw_diff_section_summaries(self, sections: list[str]) -> int:
         summaries = await asyncio.to_thread(parse_file_patch_summaries, sections)
         return append_file_summaries(self._state, summaries)
-
-    async def _load_files_from_rest_pages(self) -> bool:
-        get_page = getattr(self._service, "get_pr_files_page", None)
-        get_pages = getattr(self._service, "get_pr_file_pages", None)
-        if get_page is None or get_pages is None:
-            return False
-
-        return await load_rest_file_pages(
-            self._state,
-            pr_number=self.pr_number,
-            get_page=get_page,
-            get_pages=get_pages,
-            on_progress=self._post_files_loaded,
-            per_page=PR_FILES_PER_PAGE,
-        )
 
     def _post_files_loaded(self) -> None:
         self._post_message(
@@ -601,6 +565,7 @@ class PRStore:
         path: str,
         line: int,
         side: Literal["LEFT", "RIGHT"],
+        draft_index: int | None = None,
     ) -> PendingReviewComment:
         result = save_pending_comment(
             self._state.pending_review_comments,
@@ -614,6 +579,8 @@ class PRStore:
                 side=side,
             ),
             current_version=self._pending_review_local_version,
+            replace_existing=False,
+            draft_index=draft_index,
         )
         self._state.pending_review_comments = result.comments
         self._pending_review_local_version = result.version
@@ -644,6 +611,12 @@ class PRStore:
         self._state.pending_review_comments = restored.pending_review_comments
         self._pending_review_local_version = restored.version
 
+    def review_annotations(self) -> ReviewAnnotationIndex:
+        return ReviewAnnotationIndex.from_parts(
+            pending_comments=self._state.pending_review_comments,
+            review_threads=self._state.review_threads,
+        )
+
     def get_pending_inline_comment(
         self,
         *,
@@ -659,10 +632,10 @@ class PRStore:
         )
 
     def get_pending_file_comments(self, filename: str) -> list[PendingReviewComment]:
-        return collect_pending_file_comments(
-            self._state.pending_review_comments,
-            filename,
-        )
+        return self.review_annotations().pending_for_file(filename)
+
+    def count_pending_file_comments(self, filename: str) -> int:
+        return self.review_annotations().count_pending_for_file(filename)
 
     def is_inline_comment_diff_line(
         self,
@@ -680,35 +653,43 @@ class PRStore:
     async def _replace_pending_review(
         self,
         comments: list[PendingReviewComment],
+        *,
+        removed_comment: PendingReviewComment | None = None,
     ) -> PRReview | None:
         pr = self._state.pr
-        plan = plan_pending_review_sync(
-            comments,
+        replacement = await replace_pending_review(
+            adapter=self._service,
+            pr_number=self.pr_number,
+            comments=comments,
             pending_review_id=self._state.pending_review_id,
             pending_review_body=self._state.pending_review_body,
             head_sha=pr.head_sha if pr is not None else "",
+            removed_comment=removed_comment,
         )
-        if plan.delete_review_id is not None:
-            await self._service.delete_pending_review(
-                self.pr_number,
-                plan.delete_review_id,
-            )
-        if not plan.should_create:
-            return None
+        self._state.pending_review_comments = replacement.comments
+        return replacement.review
 
-        return await self._service.create_pending_review(
-            self.pr_number,
-            comments=plan.comments,
-            body=plan.body,
-            commit_id=plan.commit_id,
+    async def _load_pending_review(
+        self,
+        pr: PR,
+        *,
+        loaded_at_version: int | None = None,
+    ) -> None:
+        expected_version = (
+            self._pending_review_local_version
+            if loaded_at_version is None
+            else loaded_at_version
         )
-
-    async def _load_pending_review(self, pr: PR) -> None:
         projection = await load_pending_review_projection(
             pr.reviews,
             pr_number=self.pr_number,
             list_review_comments=getattr(self._service, "list_review_comments", None),
         )
+        if expected_version != self._pending_review_local_version:
+            return
+        if self._preserve_pending_review_projection(projection):
+            return
+
         applied = apply_pending_review_projection(
             projection,
             current_version=self._pending_review_local_version,
@@ -718,12 +699,37 @@ class PRStore:
         self._state.pending_review_comments = applied.comments
         self._pending_review_local_version = applied.version
 
+    def _preserve_pending_review_projection(
+        self,
+        projection: PendingReviewProjection,
+    ) -> bool:
+        current_comments = self._state.pending_review_comments
+        if not current_comments:
+            return False
+
+        comments = merge_pending_review_drafts(current_comments, projection.comments)
+        review_id = projection.review_id or self._state.pending_review_id
+        body = projection.body or self._state.pending_review_body
+        if (
+            review_id == self._state.pending_review_id
+            and body == self._state.pending_review_body
+            and comments == current_comments
+        ):
+            return True
+
+        self._state.pending_review_id = review_id
+        self._state.pending_review_body = body
+        self._state.pending_review_comments = comments
+        self._pending_review_local_version += 1
+        return True
+
     def delete_pending_inline_comment(
         self,
         *,
         path: str,
         line: int,
         side: Literal["LEFT", "RIGHT"],
+        draft_index: int | None = None,
     ) -> bool:
         result = delete_pending_comment(
             self._state.pending_review_comments,
@@ -731,11 +737,45 @@ class PRStore:
             line=line,
             side=side,
             current_version=self._pending_review_local_version,
+            draft_index=draft_index,
         )
         if result.deleted:
             self._state.pending_review_comments = result.comments
             self._pending_review_local_version = result.version
         return result.deleted
+
+    async def queue_pending_inline_comment(
+        self,
+        body: str,
+        *,
+        path: str,
+        line: int,
+        side: Literal["LEFT", "RIGHT"],
+        draft_index: int | None = None,
+    ) -> PendingReviewComment:
+        normalized = body.strip()
+        if not normalized:
+            raise ValueError("Comment cannot be empty")
+
+        removed_comment = (
+            self._pending_review_comment_for_sync(path, line, side, draft_index)
+            if draft_index is not None
+            else None
+        )
+        snapshot = self.snapshot_pending_review()
+        draft = self.save_pending_inline_comment(
+            normalized,
+            path=path,
+            line=line,
+            side=side,
+            draft_index=draft_index,
+        )
+        await self.sync_pending_review(
+            rollback_to=snapshot,
+            rollback_if_version=self._pending_review_local_version,
+            removed_comment=removed_comment,
+        )
+        return draft
 
     async def upsert_pending_inline_comment(
         self,
@@ -745,33 +785,52 @@ class PRStore:
         line: int,
         side: Literal["LEFT", "RIGHT"],
     ) -> PendingReviewComment:
-        normalized = body.strip()
-        if not normalized:
-            raise ValueError("Comment cannot be empty")
+        return await self.queue_pending_inline_comment(
+            body,
+            path=path,
+            line=line,
+            side=side,
+            draft_index=self._pending_review_comment_index(path, line, side),
+        )
 
-        snapshot = self.snapshot_pending_review()
-        draft = self.save_pending_inline_comment(
-            normalized,
+    async def post_inline_comment(
+        self,
+        body: str,
+        *,
+        path: str,
+        line: int,
+        side: Literal["LEFT", "RIGHT"],
+        draft_index: int | None = None,
+    ) -> PRComment:
+        comment = await self.submit_inline_comment(
+            body,
             path=path,
             line=line,
             side=side,
         )
-        await self.sync_pending_review(
-            rollback_to=snapshot,
-            rollback_if_version=self._pending_review_local_version,
-        )
-        return draft
+        if draft_index is not None:
+            await self.remove_pending_inline_comment(
+                path=path,
+                line=line,
+                side=side,
+                draft_index=draft_index,
+            )
+        return comment
 
     async def sync_pending_review(
         self,
         *,
         rollback_to: PendingReviewSnapshot | None = None,
         rollback_if_version: int | None = None,
+        removed_comment: PendingReviewComment | None = None,
     ) -> PRReview | None:
         try:
             async with self._pending_review_sync_lock:
                 comments = list(self._state.pending_review_comments)
-                review = await self._replace_pending_review(comments)
+                review = await self._replace_pending_review(
+                    comments,
+                    removed_comment=removed_comment,
+                )
                 result = project_pending_review_sync_result(
                     review,
                     current_body=self._state.pending_review_body,
@@ -800,12 +859,20 @@ class PRStore:
         path: str,
         line: int,
         side: Literal["LEFT", "RIGHT"],
+        draft_index: int | None = None,
     ) -> bool:
         snapshot = self.snapshot_pending_review()
+        removed_comment = self._pending_review_comment_for_sync(
+            path,
+            line,
+            side,
+            draft_index,
+        )
         deleted = self.delete_pending_inline_comment(
             path=path,
             line=line,
             side=side,
+            draft_index=draft_index,
         )
         if not deleted:
             return False
@@ -813,8 +880,35 @@ class PRStore:
         await self.sync_pending_review(
             rollback_to=snapshot,
             rollback_if_version=self._pending_review_local_version,
+            removed_comment=removed_comment,
         )
         return True
+
+    def _pending_review_comment_index(
+        self,
+        path: str,
+        line: int,
+        side: Literal["LEFT", "RIGHT"],
+    ) -> int | None:
+        return self.review_annotations().pending_index(
+            path=path,
+            line=line,
+            side=side,
+        )
+
+    def _pending_review_comment_for_sync(
+        self,
+        path: str,
+        line: int,
+        side: Literal["LEFT", "RIGHT"],
+        draft_index: int | None,
+    ) -> PendingReviewComment | None:
+        return self.review_annotations().pending_for_sync(
+            path=path,
+            line=line,
+            side=side,
+            draft_index=draft_index,
+        )
 
     async def submit_review(
         self,

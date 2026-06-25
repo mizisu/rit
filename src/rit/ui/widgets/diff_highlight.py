@@ -353,6 +353,8 @@ async def _highlight_diff_range_async(
             end_line,
             include_word_diff=use_word_diff,
             dark_mode=_current_highlight_dark_mode(view),
+            hunk_start_line_indices=view._hunk_start_line_indices,
+            hunk_end_line_indices=view._hunk_end_line_indices,
         )
     finally:
         if view._hl_state.window_inflight == (
@@ -382,18 +384,19 @@ def _refresh_rendered_highlight_range(view, start_line: int, end_line: int) -> N
     if not view.is_mounted or start_line > end_line:
         return
 
-    dirty_lines = {
+    dirty_line_order = [
         line_idx
         for line_idx in range(start_line, end_line + 1)
         if view._is_line_rendered(line_idx)
-    }
+    ]
+    dirty_lines = set(dirty_line_order)
     if not dirty_lines:
         return
 
     view._invalidate_base_code_content_cache(dirty_lines)
     _blocks._refresh_grouped_blocks_for_lines(view, dirty_lines)
 
-    for line_idx in sorted(dirty_lines):
+    for line_idx in dirty_line_order:
         if (
             line_idx in view._unified_blocks_by_line
             or line_idx in view._split_blocks_by_line

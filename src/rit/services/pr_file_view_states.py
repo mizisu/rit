@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from typing import cast
 
 from rit.services.graphql_mutations import (
     GraphQLMutationError,
@@ -101,7 +102,7 @@ def file_view_states_page_request(
     cursor: str | None,
 ) -> tuple[str, ...]:
     """Build gh args for one file viewed-state GraphQL page."""
-    args = [
+    args = (
         "api",
         "graphql",
         "-f",
@@ -112,10 +113,10 @@ def file_view_states_page_request(
         f"repo={repo}",
         "-F",
         f"number={pr_number}",
-    ]
+    )
     if cursor:
-        args.extend(["-f", f"after={cursor}"])
-    return tuple(args)
+        return (*args, "-f", f"after={cursor}")
+    return args
 
 
 def file_view_mutation_request(
@@ -145,10 +146,7 @@ def file_view_mutation_request(
 def _mapping_value(data: object, key: str) -> object | None:
     if not isinstance(data, Mapping):
         return None
-    for item_key, item_value in data.items():
-        if item_key == key:
-            return item_value
-    return None
+    return cast(Mapping[object, object], data).get(key)
 
 
 def parse_file_view_states_page(
@@ -171,13 +169,19 @@ def parse_file_view_states_page(
 
     states: dict[str, str] = {}
     nodes = _mapping_value(files_data, "nodes")
-    if not isinstance(nodes, list):
-        nodes = []
-    for node in nodes:
-        path = _mapping_value(node, "path")
-        viewed_state = _mapping_value(node, "viewerViewedState")
-        if isinstance(path, str) and isinstance(viewed_state, str):
-            states[path] = viewed_state
+    if isinstance(nodes, list):
+        node_count = len(nodes)
+        if node_count == 1:
+            state = _file_view_state_from_node(nodes[0])
+            if state is not None:
+                path, viewed_state = state
+                states[path] = viewed_state
+        elif node_count > 1:
+            for node in nodes:
+                state = _file_view_state_from_node(node)
+                if state is not None:
+                    path, viewed_state = state
+                    states[path] = viewed_state
 
     page_info = _mapping_value(files_data, "pageInfo")
     if page_info is None:
@@ -189,6 +193,14 @@ def parse_file_view_states_page(
         has_next_page=_mapping_value(page_info, "hasNextPage") is True,
         next_cursor=next_cursor if isinstance(next_cursor, str) else None,
     )
+
+
+def _file_view_state_from_node(node: object) -> tuple[str, str] | None:
+    path = _mapping_value(node, "path")
+    viewed_state = _mapping_value(node, "viewerViewedState")
+    if isinstance(path, str) and isinstance(viewed_state, str):
+        return path, viewed_state
+    return None
 
 
 def parse_file_view_states_result(result: str) -> FileViewStatesPage:

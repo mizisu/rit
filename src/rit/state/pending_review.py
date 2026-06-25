@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Iterable, Sequence
 from dataclasses import dataclass
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
 
-from rit.core.types import FileDiff
+from rit.core.types import DiffHunk, FileDiff
 from rit.state.models import PendingReviewComment, PRComment, PRReview, ReviewState
-
 
 PendingCommentSide = Literal["LEFT", "RIGHT"]
 ReviewSubmissionEvent = Literal["APPROVE", "COMMENT", "REQUEST_CHANGES"]
@@ -32,12 +31,15 @@ __all__ = (
     "apply_pending_review_projection",
     "apply_pending_review_sync_result",
     "clear_pending_review",
+    "count_pending_file_comments",
     "delete_pending_comment",
     "first_unsupported_comment",
     "get_pending_file_comments",
     "get_pending_inline_comment",
     "is_inline_comment_diff_line",
     "load_pending_review_projection",
+    "merge_pending_review_comments",
+    "merge_pending_review_drafts",
     "plan_inline_comment_submission",
     "plan_pending_review_sync",
     "plan_review_submission",
@@ -209,8 +211,10 @@ def upsert_pending_comment(
     line: int,
     side: PendingCommentSide,
     is_diff_line: bool,
+    replace_existing: bool = True,
+    draft_index: int | None = None,
 ) -> tuple[list[PendingReviewComment], PendingReviewComment]:
-    """Return comments with one draft added or replaced for an anchor."""
+    """Return comments with one draft added or replaced."""
     draft = PendingReviewComment(
         body=body,
         path=path,
@@ -218,13 +222,34 @@ def upsert_pending_comment(
         side=side,
         is_diff_line=is_diff_line,
     )
-    updated = list(comments)
-    for index, existing in enumerate(updated):
-        if _same_anchor(existing, path=path, line=line, side=side):
-            updated[index] = draft
-            break
+    if not comments:
+        return [draft], draft
+
+    if (
+        draft_index is not None
+        and 0 <= draft_index < len(comments)
+        and _same_anchor(comments[draft_index], path=path, line=line, side=side)
+    ):
+        updated = list(comments)
+        updated[draft_index] = draft
+        return updated, draft
+
+    if replace_existing:
+        for index, existing in enumerate(comments):
+            if _same_anchor(existing, path=path, line=line, side=side):
+                if len(comments) == 1:
+                    return [draft], draft
+                updated = list(comments)
+                updated[index] = draft
+                break
+        else:
+            if _sort_key(comments[-1]) <= _sort_key(draft):
+                return [*comments, draft], draft
+            updated = [*comments, draft]
+    elif _sort_key(comments[-1]) <= _sort_key(draft):
+        return [*comments, draft], draft
     else:
-        updated.append(draft)
+        updated = [*comments, draft]
     updated.sort(key=_sort_key)
     return updated, draft
 
@@ -235,14 +260,29 @@ def remove_pending_comment(
     path: str,
     line: int,
     side: PendingCommentSide,
+    draft_index: int | None = None,
 ) -> tuple[list[PendingReviewComment], bool]:
     """Return comments with a matching draft removed."""
-    updated = list(comments)
-    for index, draft in enumerate(updated):
+    if not comments:
+        return [], False
+
+    if (
+        draft_index is not None
+        and 0 <= draft_index < len(comments)
+        and _same_anchor(comments[draft_index], path=path, line=line, side=side)
+    ):
+        updated = list(comments)
+        del updated[draft_index]
+        return updated, True
+
+    for index, draft in enumerate(comments):
         if _same_anchor(draft, path=path, line=line, side=side):
+            updated = list(comments)
             del updated[index]
             return updated, True
-    return updated, False
+    if isinstance(comments, list):
+        return cast(list[PendingReviewComment], comments), False
+    return list(comments), False
 
 
 def get_pending_inline_comment(
@@ -263,6 +303,20 @@ def get_pending_file_comments(
     filename: str,
 ) -> list[PendingReviewComment]:
     return [draft for draft in comments if draft.path == filename]
+
+
+def count_pending_file_comments(
+    comments: Iterable[PendingReviewComment],
+    filename: str,
+) -> int:
+    if isinstance(comments, Sequence):
+        comment_sequence = cast("Sequence[PendingReviewComment]", comments)
+        comment_count = len(comment_sequence)
+        if comment_count == 0:
+            return 0
+        if comment_count == 1:
+            return 1 if comment_sequence[0].path == filename else 0
+    return sum(1 for draft in comments if draft.path == filename)
 
 
 def syncable_comments(
@@ -286,6 +340,8 @@ def save_pending_comment(
     side: PendingCommentSide,
     is_diff_line: bool,
     current_version: int,
+    replace_existing: bool = True,
+    draft_index: int | None = None,
 ) -> PendingCommentSaveResult:
     """Return local draft state after saving one pending inline comment."""
     normalized = body.strip()
@@ -299,6 +355,8 @@ def save_pending_comment(
         line=line,
         side=side,
         is_diff_line=is_diff_line,
+        replace_existing=replace_existing,
+        draft_index=draft_index,
     )
     return PendingCommentSaveResult(
         comments=updated,
@@ -314,6 +372,7 @@ def delete_pending_comment(
     line: int,
     side: PendingCommentSide,
     current_version: int,
+    draft_index: int | None = None,
 ) -> PendingCommentDeleteResult:
     """Return local draft state after deleting one pending inline comment."""
     updated, deleted = remove_pending_comment(
@@ -321,6 +380,7 @@ def delete_pending_comment(
         path=path,
         line=line,
         side=side,
+        draft_index=draft_index,
     )
     return PendingCommentDeleteResult(
         comments=updated,
@@ -423,8 +483,7 @@ def plan_review_submission(
 ) -> ReviewSubmissionPlan:
     """Return validated review submission data."""
     normalized_body = body.strip()
-    pending_comments = list(comments)
-    unsupported_comment = first_unsupported_comment(pending_comments)
+    pending_comments, unsupported_comment = _submission_comments(comments)
     if unsupported_comment is not None:
         raise UnsupportedInlineCommentTarget.from_comment(unsupported_comment)
 
@@ -444,11 +503,7 @@ def plan_review_submission(
 def select_pending_review(reviews: Sequence[PRReview]) -> PRReview | None:
     """Return the newest pending review from a PR review list."""
     return next(
-        (
-            review
-            for review in reversed(reviews)
-            if review.state == ReviewState.PENDING
-        ),
+        (review for review in reversed(reviews) if review.state == ReviewState.PENDING),
         None,
     )
 
@@ -565,6 +620,8 @@ def is_inline_comment_diff_line(
         return True
 
     for hunk in diff.hunks:
+        if not _hunk_contains_line(hunk, line=line, side=side):
+            continue
         for diff_line in hunk.lines:
             if side == "RIGHT" and diff_line.new_line_no == line:
                 return True
@@ -600,6 +657,82 @@ def _sort_key(comment: PendingReviewComment) -> tuple[str, int, str]:
     return (comment.path, comment.line, comment.side)
 
 
+def merge_pending_review_comments(
+    local_comments: Sequence[PendingReviewComment],
+    review_comments: Iterable[PRComment],
+    *,
+    removed_comment: PendingReviewComment | None = None,
+) -> list[PendingReviewComment]:
+    """Return local drafts plus any server drafts not already present."""
+    return merge_pending_review_drafts(
+        local_comments,
+        _pending_comments_from_review_comments(review_comments),
+        removed_comment=removed_comment,
+    )
+
+
+def merge_pending_review_drafts(
+    local_comments: Sequence[PendingReviewComment],
+    server_comments: Iterable[PendingReviewComment],
+    *,
+    removed_comment: PendingReviewComment | None = None,
+) -> list[PendingReviewComment]:
+    """Return local drafts plus any projected server drafts not already present."""
+    merged = list(local_comments)
+    local_ids = {
+        comment.review_comment_id for comment in merged if comment.review_comment_id
+    }
+    local_keys = {_comment_content_key(comment) for comment in merged}
+    removed_id = removed_comment.review_comment_id if removed_comment is not None else 0
+    removed_key = None
+    if removed_comment is not None:
+        removed_key = _comment_content_key(removed_comment)
+
+    for server_comment in server_comments:
+        key = _comment_content_key(server_comment)
+        if removed_id and server_comment.review_comment_id == removed_id:
+            continue
+        if removed_key is not None and key == removed_key:
+            continue
+        if key in local_keys:
+            _remember_server_comment_id(merged, server_comment)
+            if server_comment.review_comment_id:
+                local_ids.add(server_comment.review_comment_id)
+            continue
+        if server_comment.review_comment_id in local_ids:
+            continue
+        merged.append(server_comment)
+        if server_comment.review_comment_id:
+            local_ids.add(server_comment.review_comment_id)
+        local_keys.add(key)
+
+    if len(merged) > 1:
+        merged.sort(key=_sort_key)
+    return merged
+
+
+def _submission_comments(
+    comments: Iterable[PendingReviewComment],
+) -> tuple[list[PendingReviewComment], PendingReviewComment | None]:
+    pending_comments: list[PendingReviewComment] = []
+    for comment in comments:
+        if not comment.is_diff_line:
+            return pending_comments, comment
+        pending_comments.append(comment)
+    return pending_comments, None
+
+
+def _hunk_contains_line(
+    hunk: DiffHunk,
+    *,
+    line: int,
+    side: PendingCommentSide,
+) -> bool:
+    if side == "RIGHT":
+        return hunk.new_start <= line < hunk.new_start + hunk.new_count
+    return hunk.old_start <= line < hunk.old_start + hunk.old_count
+
+
 def _pending_comments_from_review_comments(
     review_comments: Iterable[PRComment],
 ) -> list[PendingReviewComment]:
@@ -615,10 +748,33 @@ def _pending_comments_from_review_comments(
                 path=comment.path,
                 line=anchor_line,
                 side=side,
+                review_comment_id=comment.id,
             )
         )
     pending_comments.sort(key=_sort_key)
     return pending_comments
+
+
+def _remember_server_comment_id(
+    comments: list[PendingReviewComment],
+    server_comment: PendingReviewComment,
+) -> None:
+    if not server_comment.review_comment_id:
+        return
+    server_key = _comment_content_key(server_comment)
+    for index, comment in enumerate(comments):
+        if comment.review_comment_id or _comment_content_key(comment) != server_key:
+            continue
+        comments[index] = comment.model_copy(
+            update={"review_comment_id": server_comment.review_comment_id}
+        )
+        return
+
+
+def _comment_content_key(
+    comment: PendingReviewComment,
+) -> tuple[str, int, PendingCommentSide, str]:
+    return (comment.path, comment.line, comment.side, comment.body)
 
 
 def _pending_comment_side(side: str) -> PendingCommentSide | None:

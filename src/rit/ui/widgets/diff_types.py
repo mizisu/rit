@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import builtins
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, cast
 
 if TYPE_CHECKING:
     from textual.widgets import Static
@@ -19,6 +21,8 @@ from rit.ui.widgets.diff_visual import (
     LineContent,
     SyncedCodeScroll,
 )
+
+_TUPLE_TYPE = builtins.tuple
 
 __all__ = (
     "CursorUIState",
@@ -76,15 +80,21 @@ class DiffLayout:
 DEFAULT_DIFF_LAYOUT = DiffLayout()
 
 
+def _line_indices_tuple(line_indices: Iterable[int]) -> tuple[int, ...]:
+    if isinstance(line_indices, _TUPLE_TYPE):
+        return cast(_TUPLE_TYPE[int, ...], line_indices)
+    return _TUPLE_TYPE(line_indices)
+
+
 class UnifiedDiffBlock(Horizontal):
     def __init__(
         self,
-        line_indices: list[int],
+        line_indices: Iterable[int],
         *,
         id: str | None = None,
         classes: str | None = None,
     ) -> None:
-        self.line_indices = tuple(line_indices)
+        self.line_indices = _line_indices_tuple(line_indices)
         self._annotations = LineAnnotations([], classes="line-prefix")
         self._code = DiffCode(classes="code-content")
         super().__init__(
@@ -109,12 +119,12 @@ class UnifiedDiffBlock(Horizontal):
 class SplitDiffBlock(Horizontal):
     def __init__(
         self,
-        line_indices: list[int],
+        line_indices: Iterable[int],
         *,
         id: str | None = None,
         classes: str | None = None,
     ) -> None:
-        self.line_indices = tuple(line_indices)
+        self.line_indices = _line_indices_tuple(line_indices)
         self._left_annotations = LineAnnotations([], classes="line-prefix")
         self._left_code = DiffCode(classes="code-content -old-side")
         self._left_scroll = SyncedCodeScroll(

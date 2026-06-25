@@ -36,6 +36,13 @@ def insert_issue_comment(
     comment: PRIssueComment,
 ) -> list[PRIssueComment]:
     """Return issue comments with a new comment inserted in created order."""
+    if not comments:
+        return [comment]
+    if datetime_sort_key(comments[-1].created_at) <= datetime_sort_key(
+        comment.created_at
+    ):
+        return [*comments, comment]
+
     updated = [*comments, comment]
     updated.sort(key=lambda item: datetime_sort_key(item.created_at))
     return updated

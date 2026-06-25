@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import dataclass
 
 from pydantic import TypeAdapter
 
@@ -15,10 +14,10 @@ from rit.services.pr_graphql_response import (
     fetch_pull_request_graphql_pr,
     parse_pull_request_graphql_result,
 )
-from rit.services.pr_review_request import pull_request_review_comments_request
 from rit.services.pr_review_comment_threads import review_threads_from_rest_comments
-from rit.state.models import PR, PRComment, PRIssueComment, PRReview, ReviewThread
-
+from rit.services.pr_review_request import pull_request_review_comments_request
+from rit.state.discussion_projection import PRDiscussion
+from rit.state.models import PR, PRComment
 
 __all__ = (
     "PRDiscussion",
@@ -32,16 +31,6 @@ __all__ = (
 
 
 _PRCommentListAdapter: TypeAdapter[list[PRComment]] = TypeAdapter(list[PRComment])
-
-
-@dataclass
-class PRDiscussion:
-    """Discussion timeline data loaded from GitHub."""
-
-    body: str
-    reviews: list[PRReview]
-    issue_comments: list[PRIssueComment]
-    review_threads: list[ReviewThread]
 
 
 def discussion_from_pr(pr: PR) -> PRDiscussion:
@@ -79,7 +68,17 @@ def fast_discussion_from_data(
 ) -> PRDiscussion:
     """Project fast GraphQL PR data and REST review comments into discussion data."""
     pr = PR.model_validate(pr_data)
-    review_comments = _PRCommentListAdapter.validate_python(rest_review_comments_data)
+    if rest_review_comments_data == []:
+        review_comments = []
+    elif (
+        isinstance(rest_review_comments_data, list)
+        and len(rest_review_comments_data) == 1
+    ):
+        review_comments = [PRComment.model_validate(rest_review_comments_data[0])]
+    else:
+        review_comments = _PRCommentListAdapter.validate_python(
+            rest_review_comments_data
+        )
     return PRDiscussion(
         body=pr.body,
         reviews=pr.reviews,
@@ -95,7 +94,11 @@ def fast_discussion_from_result(
     """Project fast PR data and a REST comments JSON result into discussion data."""
     return fast_discussion_from_data(
         pr_data,
-        json.loads(rest_review_comments_result),
+        (
+            []
+            if rest_review_comments_result == "[]"
+            else json.loads(rest_review_comments_result)
+        ),
     )
 
 
