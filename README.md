@@ -2,28 +2,29 @@
 
 A terminal UI for reviewing GitHub pull requests.
 
-<!--
-![rit demo](docs/assets/rit-demo.gif)
--->
+| Demo 1 | Demo 2 |
+| --- | --- |
+| ![rit demo 1](docs/assets/demo_1.gif) | ![rit demo 2](docs/assets/demo_2.gif) |
+
+## Requirements
+
+- Python 3.14+
+- uv
+- GitHub CLI (`gh`)
+
+## Installation
+
+```bash
+uv tool install --python 3.14 git+https://github.com/mizisu/rit.git
+gh auth login
+```
 
 ## Usage
 
 ```bash
-# authenticate with GitHub CLI
-gh auth login
-
-# open a pull request
-uv run rit 123
-uv run rit owner/repo#123
-uv run rit https://github.com/owner/repo/pull/123
+rit 123
+rit owner/repo#123
+rit https://github.com/owner/repo/pull/123
 ```
 
-Or run it as a Python module:
 
-```bash
-uv run python -m rit 123
-```
-
-## Git
-
-TODO: Add Git workflow notes.
