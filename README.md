@@ -4,7 +4,7 @@ A terminal UI for reviewing GitHub pull requests.
 
 | Demo 1 | Demo 2 |
 | --- | --- |
-| ![rit demo 1](docs/assets/demo_1.gif) | ![rit demo 2](docs/assets/demo_2.gif) |
+| ![rit demo 1](docs/assets/demo_1.gif) | ![rit demo 2 (with [gh-dash](https://www.gh-dash.dev/)) ](docs/assets/demo_2.gif) |
 
 ## Requirements
 
