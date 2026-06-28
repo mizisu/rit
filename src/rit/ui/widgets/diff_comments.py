@@ -111,7 +111,10 @@ def build_comment_map(view: DiffView) -> None:
         return
 
     for thread in threads:
-        if thread.path in file_paths:
+        if thread.path in file_paths and not _pending_review_thread_is_draft(
+            view,
+            thread,
+        ):
             _add_thread_to_comment_map(view, thread)
 
     view._comment_line_indices = _comment_line_indices_for_keys(
@@ -173,6 +176,46 @@ def _add_thread_to_comment_map(view: DiffView, thread: ReviewThread) -> None:
         view._comment_side_by_line[line_index] = root_side
     elif root_side != "auto" and existing_side != root_side:
         view._comment_side_by_line[line_index] = "auto"
+
+
+def _pending_review_thread_is_draft(view: DiffView, thread: ReviewThread) -> bool:
+    state = getattr(view.store, "state", None)
+    pending_review_id = getattr(state, "pending_review_id", None)
+    if not pending_review_id:
+        return False
+
+    drafts = getattr(state, "pending_review_comments", [])
+    if not isinstance(drafts, list) or not drafts:
+        return False
+
+    draft_ids = {draft.review_comment_id for draft in drafts if draft.review_comment_id}
+    for comment in thread.comments:
+        if comment.pull_request_review_id != pending_review_id:
+            continue
+        if comment.id in draft_ids:
+            return True
+        if any(
+            _pending_draft_matches_review_comment(draft, comment, thread=thread)
+            for draft in drafts
+        ):
+            return True
+    return False
+
+
+def _pending_draft_matches_review_comment(
+    draft: PendingReviewComment,
+    comment: PRComment,
+    *,
+    thread: ReviewThread,
+) -> bool:
+    if draft.path != comment.path or draft.body != comment.body:
+        return False
+
+    target_side = _comment_target_side(comment, thread=thread)
+    if draft.anchor_side != target_side:
+        return False
+
+    return _anchor_line_for_side(comment, target_side, thread=thread) == draft.line
 
 
 def _update_mounted_thread_widget(
@@ -931,9 +974,8 @@ def _build_pending_draft_widget(
     index: int,
 ) -> CommentCard:
     side = "left" if draft.side == "LEFT" else "right"
-    side_label = "LEFT" if draft.side == "LEFT" else "RIGHT"
     return CommentCard(
-        f"Pending comment ({side_label}) • c edit • d delete",
+        f"{draft.path}:{draft.line} (pending)",
         draft.body,
         id=f"pending-draft-{line_index}-{side}-{index}",
         classes="pending-draft --pending-draft",

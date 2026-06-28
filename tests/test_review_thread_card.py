@@ -162,6 +162,7 @@ def test_pending_drafts_keep_the_shared_comment_card_surface() -> None:
     assert "background:" not in pending_block
     assert "border-left: thick #8aadf4;" in cursor_block
     assert "tint:" not in cursor_block
+    assert "CommentCard.pending-draft .comment-header" not in css
 
 
 def test_timeline_thread_contents_keep_padding_without_affecting_inline_threads() -> None:

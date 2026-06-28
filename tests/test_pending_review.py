@@ -2,7 +2,13 @@ import pytest
 
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.state import pending_review
-from rit.state.models import PendingReviewComment, PRComment, PRReview, ReviewState
+from rit.state.models import (
+    PendingReviewComment,
+    PRComment,
+    PRReview,
+    ReviewState,
+    ReviewThread,
+)
 from rit.state.pending_review import (
     UnsupportedInlineCommentTarget,
     count_pending_file_comments,
@@ -731,6 +737,70 @@ async def test_load_pending_review_projection_fetches_comments_for_latest_pendin
     assert projection.body == "latest"
     assert projection.comments == [
         PendingReviewComment(body="note", path="a.py", line=7, side="RIGHT")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_load_pending_review_projection_uses_review_threads_before_rest_comments() -> (
+    None
+):
+    pending = PRReview(id=91, state=ReviewState.PENDING, body="pending body")
+    thread = ReviewThread.model_validate(
+        {
+            "path": "src/app.py",
+            "line": 13,
+            "originalLine": 13,
+            "diffSide": "RIGHT",
+            "comments": {
+                "nodes": [
+                    {
+                        "databaseId": 5,
+                        "body": "server draft",
+                        "path": "src/app.py",
+                        "pullRequestReview": {"databaseId": 91},
+                    }
+                ]
+            },
+        }
+    )
+    calls: list[tuple[int, int]] = []
+
+    async def list_review_comments(
+        pr_number: int,
+        review_id: int,
+    ) -> list[PRComment]:
+        calls.append((pr_number, review_id))
+        return [
+            PRComment.model_validate(
+                {
+                    "id": 5,
+                    "body": "server draft",
+                    "path": "src/app.py",
+                    "position": 13,
+                    "original_position": 13,
+                    "diff_hunk": "@@ -0,0 +1,3 @@\n+one\n+two\n+three",
+                }
+            )
+        ]
+
+    projection = await pending_review.load_pending_review_projection(
+        [pending],
+        pr_number=123,
+        review_threads=[thread],
+        list_review_comments=list_review_comments,
+    )
+
+    assert calls == []
+    assert projection.review_id == 91
+    assert projection.body == "pending body"
+    assert projection.comments == [
+        PendingReviewComment(
+            body="server draft",
+            path="src/app.py",
+            line=13,
+            side="RIGHT",
+            review_comment_id=5,
+        )
     ]
 
 

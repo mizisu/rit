@@ -10,6 +10,7 @@ from textual.containers import Vertical
 from textual.css.query import NoMatches
 
 import rit.ui.markdown_images as markdown_images_module
+from tests.conftest import wait_until
 from rit.ui.components.collapsible_markdown import (
     CopyableCodeBlock,
     DetailsBlock,
@@ -480,19 +481,17 @@ async def test_markdown_image_block_loads_image_from_in_memory_bytes() -> None:
 
     app = TestApp()
     async with app.run_test() as pilot:
-        image_widget = None
-        for _ in range(10):
-            await pilot.pause(0.1)
+        def image_widget_with_size():
             try:
-                image_widget = app.query_one(".markdown-terminal-image")
+                widget = app.query_one(".markdown-terminal-image")
             except NoMatches:
-                continue
-            if fetched_urls:
-                break
+                return None
+            return widget if fetched_urls and widget.size.height > 0 else None
+
+        image_widget = await wait_until(image_widget_with_size, timeout=1.0)
 
         assert fetched_urls == ["https://example.com/tiny.png"]
         assert app.query_one(MarkdownImageBlock).image.alt == "Tiny"
-        assert image_widget is not None
         assert image_widget.size.height > 0
 
         assert len(app.query(".markdown-image-header")) == 0

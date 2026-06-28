@@ -34,6 +34,18 @@ class FakePendingReviewAdapter:
                 for comment in comments
             ]
         )
+        self.server_comments = [
+            PRComment.model_validate(
+                {
+                    "id": 200 + index,
+                    "body": comment.body,
+                    "path": comment.path,
+                    "line": comment.line,
+                    "side": comment.side,
+                }
+            )
+            for index, comment in enumerate(comments)
+        ]
         return PRReview.model_validate(
             {"id": 100, "state": ReviewState.PENDING, "body": body or ""}
         )
@@ -74,6 +86,7 @@ async def test_replace_pending_review_merges_server_comments_before_delete() -> 
         "server draft",
         "local draft",
     ]
+    assert [comment.review_comment_id for comment in result.comments] == [200, 201]
 
 
 @pytest.mark.asyncio

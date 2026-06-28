@@ -67,11 +67,6 @@ class CommentCard(Vertical):
         border-left: thick #8aadf4;
     }
 
-    CommentCard.pending-draft .comment-header {
-        color: $warning;
-        text-style: bold;
-    }
-
     CommentCard.review-submit-pending-item {
         margin: 0 0 1 0;
     }

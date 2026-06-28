@@ -237,6 +237,120 @@ def test_build_comment_map_skips_sort_for_single_thread_line(
     assert view._comment_line_indices == [4]
 
 
+def test_build_comment_map_skips_pending_review_thread_already_rendered_as_draft() -> (
+    None
+):
+    root = PRComment(
+        id=5,
+        body="comment",
+        path="test.py",
+        line=13,
+        side="RIGHT",
+        pull_request_review_id=91,
+    )
+    thread = ReviewThread(
+        path="test.py",
+        line=13,
+        diff_side="RIGHT",
+        comments_connection=NodeList(nodes=[root]),
+    )
+    draft = PendingReviewComment(
+        body="comment",
+        path="test.py",
+        line=13,
+        side="RIGHT",
+        review_comment_id=5,
+    )
+    view = SimpleNamespace(
+        store=SimpleNamespace(
+            state=SimpleNamespace(
+                pending_review_id=91,
+                pending_review_comments=[draft],
+                review_threads=[thread],
+            ),
+            get_pending_file_comments=lambda _filename: [draft],
+        ),
+        current_file="test.py",
+        _diff_file_paths=frozenset({"test.py"}),
+        _all_lines=[],
+        _line_index_by_new_number={13: 4},
+        _line_index_by_old_number={},
+        _line_index_by_file_new_number={("test.py", 13): 4},
+        _line_index_by_file_old_number={},
+        _comment_threads_by_line={},
+        _comment_line_indices=[],
+        _comment_widgets_by_line={},
+        _comment_layout_widgets_by_line={},
+        _comment_side_by_line={},
+        _pending_comment_drafts_by_line={},
+        _pending_comment_widgets_by_line={},
+        _pending_comment_layout_widgets_by_line={},
+    )
+
+    _comments.build_comment_map(view)
+
+    assert view._pending_comment_drafts_by_line == {4: [draft]}
+    assert view._comment_threads_by_line == {}
+    assert view._comment_line_indices == [4]
+
+
+def test_build_comment_map_skips_pending_review_thread_when_server_reissues_id() -> (
+    None
+):
+    root = PRComment(
+        id=99,
+        body="comment",
+        path="test.py",
+        line=13,
+        side="RIGHT",
+        pull_request_review_id=91,
+    )
+    thread = ReviewThread(
+        path="test.py",
+        line=13,
+        diff_side="RIGHT",
+        comments_connection=NodeList(nodes=[root]),
+    )
+    draft = PendingReviewComment(
+        body="comment",
+        path="test.py",
+        line=13,
+        side="RIGHT",
+        review_comment_id=5,
+    )
+    view = SimpleNamespace(
+        store=SimpleNamespace(
+            state=SimpleNamespace(
+                pending_review_id=91,
+                pending_review_comments=[draft],
+                review_threads=[thread],
+            ),
+            get_pending_file_comments=lambda _filename: [draft],
+        ),
+        current_file="test.py",
+        _diff_file_paths=frozenset({"test.py"}),
+        _all_lines=[],
+        _line_index_by_new_number={13: 4},
+        _line_index_by_old_number={},
+        _line_index_by_file_new_number={("test.py", 13): 4},
+        _line_index_by_file_old_number={},
+        _comment_threads_by_line={},
+        _comment_line_indices=[],
+        _comment_widgets_by_line={},
+        _comment_layout_widgets_by_line={},
+        _comment_side_by_line={},
+        _pending_comment_drafts_by_line={},
+        _pending_comment_widgets_by_line={},
+        _pending_comment_layout_widgets_by_line={},
+    )
+
+    _comments.build_comment_map(view)
+
+    assert view._pending_comment_drafts_by_line == {4: [draft]}
+    assert view._comment_threads_by_line == {}
+    assert view._comment_line_indices == [4]
+
+
 def test_pending_comments_for_current_diff_skips_empty_state_scan() -> None:
     class EmptyDrafts(list):
         def __iter__(self):
@@ -369,6 +483,7 @@ def test_pending_draft_widget_builds_side_id_without_lower_call() -> None:
     widget = _comments._build_pending_draft_widget(draft, line_index=3, index=0)
 
     assert widget.id == "pending-draft-3-left-0"
+    assert widget._header == "test.py:7 (pending)"
 
 
 def test_nearest_line_index_in_hunk_scans_lines_once() -> None:
