@@ -44,7 +44,7 @@ def file_from_diff(diff: FileDiff) -> PRFile:
         additions=additions,
         deletions=deletions,
         changes=additions + deletions,
-        previousFilename=old_filename,
+        previous_filename=old_filename,
     )
 
 
@@ -64,7 +64,7 @@ def file_from_summary(summary: ParsedFilePatchSummary) -> PRFile:
         deletions=deletions,
         changes=additions + deletions,
         patch=summary.patch,
-        previousFilename=old_filename,
+        previous_filename=old_filename,
     )
 
 

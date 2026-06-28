@@ -91,4 +91,11 @@ async def replace_pending_review(
         body=plan.body,
         commit_id=plan.commit_id,
     )
+    list_created_comments = getattr(adapter, "list_review_comments", None)
+    if review.id and callable(list_created_comments):
+        created_comments = await list_created_comments(pr_number, review.id)
+        replacement_comments = merge_pending_review_comments(
+            replacement_comments,
+            created_comments,
+        )
     return PendingReviewReplacement(review=review, comments=replacement_comments)

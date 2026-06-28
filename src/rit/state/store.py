@@ -683,6 +683,7 @@ class PRStore:
         projection = await load_pending_review_projection(
             pr.reviews,
             pr_number=self.pr_number,
+            review_threads=pr.review_threads,
             list_review_comments=getattr(self._service, "list_review_comments", None),
         )
         if expected_version != self._pending_review_local_version:

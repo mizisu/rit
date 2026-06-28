@@ -4,8 +4,15 @@ from collections.abc import Awaitable, Iterable, Sequence
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
+from rit.core.diff import parse_patch
 from rit.core.types import DiffHunk, FileDiff
-from rit.state.models import PendingReviewComment, PRComment, PRReview, ReviewState
+from rit.state.models import (
+    PendingReviewComment,
+    PRComment,
+    PRReview,
+    ReviewState,
+    ReviewThread,
+)
 
 PendingCommentSide = Literal["LEFT", "RIGHT"]
 ReviewSubmissionEvent = Literal["APPROVE", "COMMENT", "REQUEST_CHANGES"]
@@ -527,11 +534,24 @@ async def load_pending_review_projection(
     reviews: Sequence[PRReview],
     *,
     pr_number: int,
+    review_threads: Sequence[ReviewThread] = (),
     list_review_comments: ReviewCommentsLoader | None = None,
 ) -> PendingReviewProjection:
     """Return pending-review state after loading any review comments."""
     review = select_pending_review(reviews)
     review_comments: Sequence[PRComment] = ()
+
+    if review is not None:
+        thread_comments = _pending_comments_from_review_threads(
+            review.id,
+            review_threads,
+        )
+        if thread_comments:
+            return PendingReviewProjection(
+                review_id=review.id or None,
+                body=review.body,
+                comments=thread_comments,
+            )
 
     if (
         review is not None
@@ -738,21 +758,131 @@ def _pending_comments_from_review_comments(
 ) -> list[PendingReviewComment]:
     pending_comments: list[PendingReviewComment] = []
     for comment in review_comments:
-        side = _pending_comment_side(comment.side)
-        anchor_line = comment.anchor_line
-        if side is None or not comment.path or anchor_line is None:
+        draft = _pending_comment_from_review_comment(comment)
+        if draft is None:
             continue
-        pending_comments.append(
-            PendingReviewComment(
-                body=comment.body,
-                path=comment.path,
-                line=anchor_line,
-                side=side,
-                review_comment_id=comment.id,
-            )
-        )
+        pending_comments.append(draft)
     pending_comments.sort(key=_sort_key)
     return pending_comments
+
+
+def _pending_comments_from_review_threads(
+    review_id: int,
+    review_threads: Iterable[ReviewThread],
+) -> list[PendingReviewComment]:
+    pending_comments: list[PendingReviewComment] = []
+    for thread in review_threads:
+        for comment in thread.comments:
+            if comment.pull_request_review_id != review_id:
+                continue
+            draft = _pending_comment_from_review_thread_comment(thread, comment)
+            if draft is None:
+                continue
+            pending_comments.append(draft)
+    pending_comments.sort(key=_sort_key)
+    return pending_comments
+
+
+def _pending_comment_from_review_thread_comment(
+    thread: ReviewThread,
+    comment: PRComment,
+) -> PendingReviewComment | None:
+    path = comment.path or thread.path
+    side = _pending_comment_side(thread.diff_side) or _pending_comment_side(
+        comment.side
+    )
+    if side is None:
+        if thread.anchor_side == "old":
+            side = "LEFT"
+        elif thread.anchor_side == "new":
+            side = "RIGHT"
+    if not path or side is None:
+        return None
+
+    anchor_line = _thread_anchor_line(thread, comment, side)
+    if anchor_line is None:
+        return None
+
+    return PendingReviewComment(
+        body=comment.body,
+        path=path,
+        line=anchor_line,
+        side=side,
+        review_comment_id=comment.id,
+    )
+
+
+def _thread_anchor_line(
+    thread: ReviewThread,
+    comment: PRComment,
+    side: PendingCommentSide,
+) -> int | None:
+    if side == "LEFT":
+        return (
+            thread.original_line
+            if thread.original_line is not None
+            else comment.original_line
+            if comment.original_line is not None
+            else thread.line
+            if thread.line is not None
+            else comment.line
+        )
+    return (
+        thread.line
+        if thread.line is not None
+        else comment.line
+        if comment.line is not None
+        else thread.original_line
+        if thread.original_line is not None
+        else comment.original_line
+    )
+
+
+def _pending_comment_from_review_comment(
+    comment: PRComment,
+) -> PendingReviewComment | None:
+    if not comment.path:
+        return None
+
+    side = _pending_comment_side(comment.side)
+    anchor_line = comment.anchor_line
+    if side is None or anchor_line is None:
+        anchor = _pending_comment_anchor_from_position(comment)
+        if anchor is None:
+            return None
+        side, anchor_line = anchor
+
+    return PendingReviewComment(
+        body=comment.body,
+        path=comment.path,
+        line=anchor_line,
+        side=side,
+        review_comment_id=comment.id,
+    )
+
+
+def _pending_comment_anchor_from_position(
+    comment: PRComment,
+) -> tuple[PendingCommentSide, int] | None:
+    position = comment.position or comment.original_position
+    if position is None or position <= 0 or not comment.diff_hunk or not comment.path:
+        return None
+
+    diff = parse_patch(comment.diff_hunk, comment.path, refine="never")
+    seen = 0
+    for hunk in diff.hunks:
+        for line in hunk.lines:
+            seen += 1
+            if seen != position:
+                continue
+            if line.is_deleted and line.old_line_no is not None:
+                return "LEFT", line.old_line_no
+            if line.new_line_no is not None:
+                return "RIGHT", line.new_line_no
+            if line.old_line_no is not None:
+                return "LEFT", line.old_line_no
+            return None
+    return None
 
 
 def _remember_server_comment_id(
@@ -763,7 +893,7 @@ def _remember_server_comment_id(
         return
     server_key = _comment_content_key(server_comment)
     for index, comment in enumerate(comments):
-        if comment.review_comment_id or _comment_content_key(comment) != server_key:
+        if _comment_content_key(comment) != server_key:
             continue
         comments[index] = comment.model_copy(
             update={"review_comment_id": server_comment.review_comment_id}

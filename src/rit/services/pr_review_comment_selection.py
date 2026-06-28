@@ -40,7 +40,7 @@ class ReviewCommentTarget:
             path=self.path,
             line=self.line,
             side=self.side,
-            pullRequestReview=review_id,
+            pull_request_review_id=review_id,
         )
 
 

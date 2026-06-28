@@ -182,6 +182,11 @@ class PRComment(BaseModel):
     diff_hunk: str = Field(
         default="", validation_alias=AliasChoices("diffHunk", "diff_hunk")
     )
+    position: int | None = None
+    original_position: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("originalPosition", "original_position"),
+    )
     node_id: str = Field(default="", validation_alias=AliasChoices("nodeId", "node_id"))
     subject_type: str = Field(
         default="line", validation_alias=AliasChoices("subjectType", "subject_type")
