@@ -11,14 +11,14 @@ from rit.ui.widgets.diff_geometry import (
     hunk_lines_for_window,
     line_index_at_vertical_offset,
     merge_line_ranges,
-    row_vertical_bounds,
     row_is_visible,
+    row_vertical_bounds,
     scroll_target_for_row_viewport_offset,
     scroll_target_for_span,
     should_render_hunk_header,
+    viewport_center_line,
     virtual_bottom_buffer_height,
     virtual_top_buffer_height,
-    viewport_center_line,
 )
 from rit.ui.widgets.diff_plan import build_diff_plan
 
@@ -231,8 +231,7 @@ def test_scroll_target_for_span_respects_vertical_scrolloff() -> None:
     )
 
     assert (
-        scroll_target_for_span(top=10, bottom=11, viewport=viewport, scrolloff=2)
-        == 4
+        scroll_target_for_span(top=10, bottom=11, viewport=viewport, scrolloff=2) == 4
     )
 
     scrolled_viewport = ViewportGeometry(
