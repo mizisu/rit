@@ -30,6 +30,15 @@ def test_pull_request_graphql_request_builds_gh_args_for_named_view() -> None:
     )
 
 
+def test_fast_discussion_query_uses_graphql_review_threads() -> None:
+    query = pull_request_query(PullRequestGraphQLView.FAST_DISCUSSION)
+
+    assert "reviewThreads(first: 100)" in query
+    assert "startLine" in query
+    assert "startDiffSide" in query
+    assert "/pulls/" not in query
+
+
 def test_pull_request_node_id_view_requests_only_identity_data() -> None:
     query = pull_request_query(PullRequestGraphQLView.NODE_ID)
 
