@@ -309,7 +309,7 @@ def test_file_header_width_for_layout_prefers_visible_viewport() -> None:
             new_split_prefix_width=5,
             new_split_code_width=11,
         )
-        == 72
+        == 80
     )
     assert (
         file_header_width_for_layout(

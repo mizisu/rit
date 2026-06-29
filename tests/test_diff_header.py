@@ -102,11 +102,11 @@ def test_build_file_header_text_preserves_rename_styles_when_untruncated() -> No
         path_budget=40,
     )
 
-    assert text.plain == "▾ -2 +3 old.py -> new.py"
+    assert text.plain == "▾ old.py -> new.py  -2 +3"
     spans = [(span.start, span.end, span.style) for span in text.spans]
-    assert (8, 14, "dim") in spans
-    assert (14, 18, "dim") in spans
-    assert (18, 24, "bold #cad3f5") in spans
+    assert (2, 8, "dim") in spans
+    assert (8, 12, "dim") in spans
+    assert (12, 18, "bold #cad3f5") in spans
 
 
 def test_build_file_header_text_truncates_display_path_within_budget() -> None:
@@ -118,11 +118,11 @@ def test_build_file_header_text_truncates_display_path_within_budget() -> None:
         path_budget=14,
     )
 
-    display_path = text.plain.removeprefix("▾ +1 ")
+    display_path = text.plain.removeprefix("▾ ").removesuffix("  +1")
 
     assert cell_len(display_path) <= 14
     assert "..." in display_path
-    assert text.spans[-1].style == "bold #cad3f5"
+    assert text.spans[1].style == "bold #cad3f5"
 
 
 def test_file_header_min_width_accounts_for_rename_path() -> None:

@@ -717,6 +717,11 @@ async def test_combined_diff_uses_prominent_file_headers_without_hunk_headers() 
         assert "split" not in header_text.lower()
         assert "hunk" not in header_text.lower()
 
+        first_header.styles.width = 20
+        await pilot.pause()
+
+        assert first_header.outer_size.width == file_changes.diff_view.outer_size.width
+
 
 def test_file_header_prefers_current_file_stats_over_stale_hunk_metadata() -> None:
     store = PRStore()
@@ -881,7 +886,7 @@ def test_file_header_width_accounts_for_rename_display_path_without_viewport() -
 
     assert isinstance(header, Static)
     header_text = str(getattr(header.content, "plain", header.content))
-    assert header_text == "▾ +1 old/location.py -> new.py"
+    assert header_text == "▾ old/location.py -> new.py  +1"
 
 
 @pytest.mark.asyncio
@@ -943,7 +948,8 @@ async def test_file_header_keeps_change_counts_visible_in_narrow_panes() -> None
         header_text = str(getattr(header.content, "plain", header.content))
 
         assert header.outer_size.height == 1
-        assert header_text.startswith("▾ -100 +95 ")
+        assert header_text.startswith("▾ ")
+        assert "-100 +95" in header_text
         assert "openapi.py" in header_text
 
 

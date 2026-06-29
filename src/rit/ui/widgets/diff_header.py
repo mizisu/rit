@@ -119,14 +119,14 @@ def build_file_header_text(
     text = Text()
     text.append("▾", style="#6e738d")
     text.append(" ")
-    append_change_stats(text, additions, deletions)
-    text.append(" ")
     if old_path and old_path != path and display_path == full_path:
         text.append(old_path, style="dim")
         text.append(" -> ", style="dim")
         text.append(path, style="bold #cad3f5")
     else:
         text.append(display_path, style="bold #cad3f5")
+    text.append("  ")
+    append_change_stats(text, additions, deletions)
     return text
 
 

@@ -163,7 +163,7 @@ def file_header_width_for_layout(
 ) -> int:
     """Return the rendered file header width for the active diff layout."""
     if viewport_width > 0:
-        return max(fallback_width, viewport_width - 8)
+        return max(fallback_width, viewport_width)
     if not split:
         return max(fallback_width, unified_content_width)
     split_content_width = (

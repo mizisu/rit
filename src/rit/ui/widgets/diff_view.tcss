@@ -28,13 +28,27 @@ DiffView .placeholder {
 }
 
 DiffView .file-diff-header {
-    background: #11111b;
+    background: #1e2030;
     color: $foreground;
-    padding: 0 1;
+    padding: 0 2;
     height: 1;
     min-height: 1;
+    min-width: 100%;
     margin: 0;
     content-align: left middle;
+    outline-left: thick #8aadf4;
+}
+
+DiffView .file-diff-header.-added {
+    outline-left: thick #a6da95;
+}
+
+DiffView .file-diff-header.-removed {
+    outline-left: thick #ed8796;
+}
+
+DiffView .file-diff-header.-renamed {
+    outline-left: thick #f5bde6;
 }
 
 DiffView .split-file-diff-header-scroll {
