@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, Literal
+from typing import Awaitable, Callable, Iterable, Literal
 
 from textual.message import Message
 
@@ -51,6 +51,7 @@ from rit.state.models import (
     PRReview,
     PRTeam,
     PRUser,
+    ReviewState,
     ReviewThread,
     ReviewThreadInfo,
 )
@@ -82,6 +83,12 @@ from rit.state.pending_review import (
 from rit.state.pending_review import (
     snapshot_pending_review as build_pending_review_snapshot,
 )
+from rit.state.pending_review_visibility import (
+    pending_review_hidden_ids,
+    review_thread_is_pending_draft,
+    visible_timeline_comments,
+    visible_timeline_reviews,
+)
 from rit.state.pending_review_workspace import replace_pending_review
 from rit.state.pr_management import plan_assignee_selection, plan_reviewer_selection
 from rit.state.pr_merge import merge_pr_discussion, merge_pr_summary
@@ -109,6 +116,8 @@ class PRStoreState:
     pending_review_id: int | None = None
     pending_review_body: str = ""
     pending_review_comments: list[PendingReviewComment] = field(default_factory=list)
+    pending_review_drafts_are_canonical: bool = False
+    obsolete_pending_review_ids: set[int] = field(default_factory=set)
 
     file_diffs: dict[str, FileDiff] = field(default_factory=dict)
     comments_by_file: dict[str, list[PRComment]] = field(default_factory=dict)
@@ -394,6 +403,23 @@ class PRStore:
         sync_file_comments(self._state.files, projection.comments_by_file)
         self._state.thread_info_cache = projection.thread_info_cache
         self._state.thread_cache = projection.thread_cache
+        self._prune_obsolete_pending_review_ids()
+
+    def _prune_obsolete_pending_review_ids(self) -> None:
+        if not self._state.obsolete_pending_review_ids:
+            return
+
+        present_ids: set[int] = set()
+        for comment in self._state.comments:
+            review_id = comment.pull_request_review_id
+            if review_id:
+                present_ids.add(review_id)
+        for thread in self._state.review_threads:
+            for comment in thread.comments:
+                review_id = comment.pull_request_review_id
+                if review_id:
+                    present_ids.add(review_id)
+        self._state.obsolete_pending_review_ids.intersection_update(present_ids)
 
     def select_file(self, filename: str) -> None:
         selection = project_file_selection(
@@ -535,6 +561,8 @@ class PRStore:
         path: str,
         line: int,
         side: str,
+        start_line: int | None = None,
+        start_side: Literal["LEFT", "RIGHT"] | None = None,
     ) -> PRComment:
         """Submit a single inline comment on the current diff line."""
         pr = self._state.pr
@@ -545,16 +573,30 @@ class PRStore:
             path=path,
             line=line,
             side=side,
+            start_line=start_line,
+            start_side=start_side,
         )
 
-        comment = await self._service.create_review_comment(
-            self.pr_number,
-            body=plan.body,
-            commit_id=plan.commit_id,
-            path=path,
-            line=line,
-            side=plan.side,
-        )
+        if plan.start_line is not None:
+            comment = await self._service.create_review_comment(
+                self.pr_number,
+                body=plan.body,
+                commit_id=plan.commit_id,
+                path=path,
+                line=line,
+                side=plan.side,
+                start_line=plan.start_line,
+                start_side=plan.start_side or plan.side,
+            )
+        else:
+            comment = await self._service.create_review_comment(
+                self.pr_number,
+                body=plan.body,
+                commit_id=plan.commit_id,
+                path=path,
+                line=line,
+                side=plan.side,
+            )
         self._remember_submitted_comment(comment)
         return comment
 
@@ -565,6 +607,8 @@ class PRStore:
         path: str,
         line: int,
         side: Literal["LEFT", "RIGHT"],
+        start_line: int | None = None,
+        start_side: Literal["LEFT", "RIGHT"] | None = None,
         draft_index: int | None = None,
     ) -> PendingReviewComment:
         result = save_pending_comment(
@@ -577,12 +621,17 @@ class PRStore:
                 path=path,
                 line=line,
                 side=side,
+                start_line=start_line,
+                start_side=start_side,
             ),
             current_version=self._pending_review_local_version,
+            start_line=start_line,
+            start_side=start_side,
             replace_existing=False,
             draft_index=draft_index,
         )
         self._state.pending_review_comments = result.comments
+        self._state.pending_review_drafts_are_canonical = True
         self._pending_review_local_version = result.version
         return result.draft
 
@@ -609,6 +658,9 @@ class PRStore:
         self._state.pending_review_id = restored.pending_review_id
         self._state.pending_review_body = restored.pending_review_body
         self._state.pending_review_comments = restored.pending_review_comments
+        self._state.pending_review_drafts_are_canonical = bool(
+            restored.pending_review_comments
+        )
         self._pending_review_local_version = restored.version
 
     def review_annotations(self) -> ReviewAnnotationIndex:
@@ -634,6 +686,61 @@ class PRStore:
     def get_pending_file_comments(self, filename: str) -> list[PendingReviewComment]:
         return self.review_annotations().pending_for_file(filename)
 
+    def pending_review_hidden_ids(self) -> tuple[int, ...]:
+        """Return pending review ids whose raw threads are local draft mirrors."""
+        local_workspace_active = (
+            self._state.pending_review_drafts_are_canonical
+            or bool(self._state.pending_review_comments)
+        )
+        return pending_review_hidden_ids(
+            pending_review_id=(
+                self._state.pending_review_id if local_workspace_active else None
+            ),
+            reviews=self._state.reviews if local_workspace_active else (),
+            obsolete_pending_review_ids=self._state.obsolete_pending_review_ids,
+        )
+
+    def visible_review_threads_for_paths(
+        self,
+        file_paths: Iterable[str],
+    ) -> list[ReviewThread]:
+        """Return non-pending raw review threads for the provided file paths."""
+        paths = set(file_paths)
+        if not paths:
+            return []
+
+        hidden_ids = self.pending_review_hidden_ids()
+        return [
+            thread
+            for thread in self._state.review_threads
+            if thread.path in paths
+            and not review_thread_is_pending_draft(
+                thread,
+                drafts=self._state.pending_review_comments,
+                hidden_review_ids=hidden_ids,
+                reviews=self._state.reviews,
+            )
+        ]
+
+    def visible_timeline_reviews(self) -> list[PRReview]:
+        """Return timeline reviews using pending review local state as canonical."""
+        return visible_timeline_reviews(
+            self._state.reviews,
+            pending_review_id=self._state.pending_review_id,
+            pending_review_body=self._state.pending_review_body,
+        )
+
+    def visible_timeline_comments(self) -> list[PRComment]:
+        """Return timeline comments with pending drafts rendered exactly once."""
+        reviews = self.visible_timeline_reviews()
+        return visible_timeline_comments(
+            self._state.comments,
+            drafts=self._state.pending_review_comments,
+            pending_review_id=self._state.pending_review_id,
+            hidden_review_ids=self.pending_review_hidden_ids(),
+            reviews=reviews,
+        )
+
     def count_pending_file_comments(self, filename: str) -> int:
         return self.review_annotations().count_pending_for_file(filename)
 
@@ -643,11 +750,15 @@ class PRStore:
         path: str,
         line: int,
         side: Literal["LEFT", "RIGHT"],
+        start_line: int | None = None,
+        start_side: Literal["LEFT", "RIGHT"] | None = None,
     ) -> bool:
         return is_pending_inline_comment_diff_line(
             self._state.file_diffs.get(path),
             line=line,
             side=side,
+            start_line=start_line,
+            start_side=start_side,
         )
 
     async def _replace_pending_review(
@@ -667,7 +778,63 @@ class PRStore:
             removed_comment=removed_comment,
         )
         self._state.pending_review_comments = replacement.comments
+        self._state.pending_review_drafts_are_canonical = bool(replacement.comments)
         return replacement.review
+
+    def _remember_pending_review_sync_review(
+        self,
+        *,
+        previous_review_id: int | None,
+        review: PRReview | None,
+    ) -> None:
+        next_review_id = review.id if review is not None and review.id else None
+        if previous_review_id and previous_review_id != next_review_id:
+            self._state.obsolete_pending_review_ids.add(previous_review_id)
+        if next_review_id:
+            self._state.obsolete_pending_review_ids.discard(next_review_id)
+
+        if review is None:
+            if previous_review_id:
+                self._remove_pending_review(previous_review_id)
+            return
+
+        self._upsert_pending_review(review, previous_review_id=previous_review_id)
+
+    def _upsert_pending_review(
+        self,
+        review: PRReview,
+        *,
+        previous_review_id: int | None,
+    ) -> None:
+        insert_at: int | None = None
+        reviews: list[PRReview] = []
+        for existing in self._state.reviews:
+            should_replace = existing.id == review.id or (
+                previous_review_id is not None
+                and existing.id == previous_review_id
+                and existing.state == ReviewState.PENDING
+            )
+            should_drop_stale_pending = (
+                existing.state == ReviewState.PENDING and existing.id != review.id
+            )
+            if should_replace or should_drop_stale_pending:
+                if insert_at is None:
+                    insert_at = len(reviews)
+                continue
+            reviews.append(existing)
+
+        if insert_at is None or insert_at >= len(reviews):
+            reviews.append(review)
+        else:
+            reviews.insert(insert_at, review)
+        self._state.reviews = reviews
+
+    def _remove_pending_review(self, review_id: int) -> None:
+        self._state.reviews = [
+            review
+            for review in self._state.reviews
+            if not (review.id == review_id and review.state == ReviewState.PENDING)
+        ]
 
     async def _load_pending_review(
         self,
@@ -698,6 +865,7 @@ class PRStore:
         self._state.pending_review_id = applied.review_id
         self._state.pending_review_body = applied.body
         self._state.pending_review_comments = applied.comments
+        self._state.pending_review_drafts_are_canonical = bool(applied.comments)
         self._pending_review_local_version = applied.version
 
     def _preserve_pending_review_projection(
@@ -721,6 +889,7 @@ class PRStore:
         self._state.pending_review_id = review_id
         self._state.pending_review_body = body
         self._state.pending_review_comments = comments
+        self._state.pending_review_drafts_are_canonical = bool(comments)
         self._pending_review_local_version += 1
         return True
 
@@ -742,6 +911,7 @@ class PRStore:
         )
         if result.deleted:
             self._state.pending_review_comments = result.comments
+            self._state.pending_review_drafts_are_canonical = True
             self._pending_review_local_version = result.version
         return result.deleted
 
@@ -752,7 +922,10 @@ class PRStore:
         path: str,
         line: int,
         side: Literal["LEFT", "RIGHT"],
+        start_line: int | None = None,
+        start_side: Literal["LEFT", "RIGHT"] | None = None,
         draft_index: int | None = None,
+        after_local_save: Callable[[], Awaitable[None]] | None = None,
     ) -> PendingReviewComment:
         normalized = body.strip()
         if not normalized:
@@ -769,8 +942,13 @@ class PRStore:
             path=path,
             line=line,
             side=side,
+            start_line=start_line,
+            start_side=start_side,
             draft_index=draft_index,
         )
+        if after_local_save is not None:
+            await after_local_save()
+
         await self.sync_pending_review(
             rollback_to=snapshot,
             rollback_if_version=self._pending_review_local_version,
@@ -785,12 +963,16 @@ class PRStore:
         path: str,
         line: int,
         side: Literal["LEFT", "RIGHT"],
+        start_line: int | None = None,
+        start_side: Literal["LEFT", "RIGHT"] | None = None,
     ) -> PendingReviewComment:
         return await self.queue_pending_inline_comment(
             body,
             path=path,
             line=line,
             side=side,
+            start_line=start_line,
+            start_side=start_side,
             draft_index=self._pending_review_comment_index(path, line, side),
         )
 
@@ -801,6 +983,8 @@ class PRStore:
         path: str,
         line: int,
         side: Literal["LEFT", "RIGHT"],
+        start_line: int | None = None,
+        start_side: Literal["LEFT", "RIGHT"] | None = None,
         draft_index: int | None = None,
     ) -> PRComment:
         comment = await self.submit_inline_comment(
@@ -808,6 +992,8 @@ class PRStore:
             path=path,
             line=line,
             side=side,
+            start_line=start_line,
+            start_side=start_side,
         )
         if draft_index is not None:
             await self.remove_pending_inline_comment(
@@ -827,6 +1013,7 @@ class PRStore:
     ) -> PRReview | None:
         try:
             async with self._pending_review_sync_lock:
+                previous_review_id = self._state.pending_review_id
                 comments = list(self._state.pending_review_comments)
                 review = await self._replace_pending_review(
                     comments,
@@ -843,6 +1030,10 @@ class PRStore:
                 self._state.pending_review_id = applied.pending_review_id
                 self._state.pending_review_body = applied.pending_review_body
                 self._pending_review_local_version = applied.version
+                self._remember_pending_review_sync_review(
+                    previous_review_id=previous_review_id,
+                    review=review,
+                )
                 return review
         except Exception:
             if should_restore_pending_review_snapshot(
@@ -861,6 +1052,7 @@ class PRStore:
         line: int,
         side: Literal["LEFT", "RIGHT"],
         draft_index: int | None = None,
+        after_local_delete: Callable[[], Awaitable[None]] | None = None,
     ) -> bool:
         snapshot = self.snapshot_pending_review()
         removed_comment = self._pending_review_comment_for_sync(
@@ -877,6 +1069,8 @@ class PRStore:
         )
         if not deleted:
             return False
+        if after_local_delete is not None:
+            await after_local_delete()
 
         await self.sync_pending_review(
             rollback_to=snapshot,
@@ -946,6 +1140,7 @@ class PRStore:
         self._state.pending_review_id = cleared.pending_review_id
         self._state.pending_review_body = cleared.pending_review_body
         self._state.pending_review_comments = cleared.pending_review_comments
+        self._state.pending_review_drafts_are_canonical = False
         self._pending_review_local_version = cleared.version
 
     async def _remember_submitted_review(self, review: PRReview | None) -> None:

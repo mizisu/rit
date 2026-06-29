@@ -167,7 +167,17 @@ class PRComment(BaseModel):
     original_line: int | None = Field(
         default=None, validation_alias=AliasChoices("originalLine", "original_line")
     )
+    start_line: int | None = Field(
+        default=None, validation_alias=AliasChoices("startLine", "start_line")
+    )
+    original_start_line: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("originalStartLine", "original_start_line"),
+    )
     side: str = ""
+    start_side: str = Field(
+        default="", validation_alias=AliasChoices("startSide", "start_side")
+    )
     created_at: datetime = Field(
         default_factory=datetime_min_utc,
         validation_alias=AliasChoices("createdAt", "created_at"),
@@ -240,6 +250,8 @@ class PendingReviewComment(BaseModel):
     path: str = ""
     line: int = 0
     side: Literal["LEFT", "RIGHT"] = "RIGHT"
+    start_line: int | None = None
+    start_side: Literal["LEFT", "RIGHT"] | None = None
     is_diff_line: bool = True
     review_comment_id: int = 0
 

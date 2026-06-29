@@ -705,6 +705,8 @@ class MainScreen(Screen[None]):
         diff_view = self.file_changes.diff_view
         target = diff_view.inline_comment_target()
         draft_index = diff_view.inline_comment_draft_index()
+        start_line = diff_view.inline_comment_start_line()
+        start_side = diff_view.inline_comment_start_side()
         if target is None:
             self.post_message(
                 Flash("No diff line selected", style="warning", duration=2.0)
@@ -719,6 +721,8 @@ class MainScreen(Screen[None]):
                     path=path,
                     line=line,
                     side=side,
+                    start_line=start_line,
+                    start_side=start_side,
                     draft_index=draft_index,
                 ),
                 exclusive=False,
@@ -731,6 +735,8 @@ class MainScreen(Screen[None]):
                 path=path,
                 line=line,
                 side=side,
+                start_line=start_line,
+                start_side=start_side,
                 draft_index=draft_index,
             ),
             exclusive=False,
@@ -869,6 +875,8 @@ class MainScreen(Screen[None]):
         path: str,
         line: int,
         side: Literal["LEFT", "RIGHT"],
+        start_line: int | None = None,
+        start_side: Literal["LEFT", "RIGHT"] | None = None,
         draft_index: int | None = None,
     ) -> bool:
         diff_view = self.file_changes.diff_view
@@ -881,6 +889,8 @@ class MainScreen(Screen[None]):
             path=path,
             line=line,
             side=side,
+            start_line=start_line,
+            start_side=start_side,
             draft_index=draft_index,
         )
         await diff_view.close_inline_comment_editor()
@@ -906,12 +916,23 @@ class MainScreen(Screen[None]):
         path: str,
         line: int,
         side: Literal["LEFT", "RIGHT"],
+        start_line: int | None = None,
+        start_side: Literal["LEFT", "RIGHT"] | None = None,
         draft_index: int | None = None,
     ) -> bool:
         diff_view = self.file_changes.diff_view
         current_file = diff_view.current_file
         current_line = diff_view.cursor_line
         current_pane = diff_view.active_pane
+
+        async def refresh_current_diff() -> None:
+            self.file_changes.file_tree.refresh_files()
+            await self._refresh_diff_preserving_cursor(
+                current_file,
+                current_line,
+                current_pane,
+                focus_diff=True,
+            )
 
         await diff_view.close_inline_comment_editor()
         try:
@@ -920,16 +941,14 @@ class MainScreen(Screen[None]):
                 path=path,
                 line=line,
                 side=side,
+                start_line=start_line,
+                start_side=start_side,
                 draft_index=draft_index,
+                after_local_save=refresh_current_diff,
             )
-        finally:
-            self.file_changes.file_tree.refresh_files()
-            await self._refresh_diff_preserving_cursor(
-                current_file,
-                current_line,
-                current_pane,
-                focus_diff=True,
-            )
+        except Exception:
+            await refresh_current_diff()
+            raise
 
         return True
 
@@ -942,16 +961,7 @@ class MainScreen(Screen[None]):
         if current_file is None or target is None:
             return False
 
-        path, line, side = target
-        draft_index = diff_view.active_pending_draft_index()
-        try:
-            deleted = await self.store.remove_pending_inline_comment(
-                path=path,
-                line=line,
-                side=side,
-                draft_index=draft_index,
-            )
-        finally:
+        async def refresh_current_diff() -> None:
             self.file_changes.file_tree.refresh_files()
             await self._refresh_diff_preserving_cursor(
                 current_file,
@@ -959,6 +969,23 @@ class MainScreen(Screen[None]):
                 current_pane,
                 focus_diff=True,
             )
+
+        path, line, side = target
+        draft_index = diff_view.active_pending_draft_index()
+        if draft_index is None:
+            return False
+
+        try:
+            deleted = await self.store.remove_pending_inline_comment(
+                path=path,
+                line=line,
+                side=side,
+                draft_index=draft_index,
+                after_local_delete=refresh_current_diff,
+            )
+        except Exception:
+            await refresh_current_diff()
+            raise
         return deleted
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
@@ -1078,7 +1105,7 @@ class MainScreen(Screen[None]):
                     )
                 else:
                     self.post_message(
-                        Flash("No draft on this line", style="warning", duration=2.0)
+                        Flash("Select a draft to delete", style="warning", duration=2.0)
                     )
             elif event.state == WorkerState.ERROR:
                 self.notify("Failed to delete draft", severity="error")

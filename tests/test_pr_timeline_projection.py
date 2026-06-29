@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+import rit.ui.components.pr_timeline_projection as timeline_projection_module
 from rit.core.datetime_utils import datetime_min_utc
 from rit.state.models import (
     CommentThread,
@@ -9,7 +10,6 @@ from rit.state.models import (
     PRUser,
     ReviewState,
 )
-import rit.ui.components.pr_timeline_projection as timeline_projection_module
 from rit.ui.components.pr_timeline_projection import (
     build_timeline_items,
     review_timeline_time,
@@ -20,7 +20,9 @@ def _dt(hour: int, minute: int = 0) -> datetime:
     return datetime(2026, 6, 18, hour, minute, tzinfo=timezone.utc)
 
 
-def test_review_timeline_time_prefers_submitted_then_created_then_thread_time() -> None:
+def test_review_timeline_time_prefers_submitted_then_pending_thread_then_created() -> (
+    None
+):
     thread = build_timeline_items(
         issue_comments=[],
         reviews=[],
@@ -36,27 +38,34 @@ def test_review_timeline_time_prefers_submitted_then_created_then_thread_time() 
     )[0].thread
     assert thread is not None
 
-    assert (
-        review_timeline_time(
-            PRReview(created_at=_dt(6, 10), submitted_at=_dt(6, 30)),
-            [thread],
-        )
-        == _dt(6, 30)
-    )
-    assert (
-        review_timeline_time(
-            PRReview(created_at=_dt(6, 10), submitted_at=None),
-            [thread],
-        )
-        == _dt(6, 10)
-    )
-    assert (
-        review_timeline_time(
-            PRReview(created_at=datetime_min_utc(), submitted_at=None),
-            [thread],
-        )
-        == _dt(6, 25)
-    )
+    assert review_timeline_time(
+        PRReview(created_at=_dt(6, 10), submitted_at=_dt(6, 30)),
+        [thread],
+    ) == _dt(6, 30)
+    assert review_timeline_time(
+        PRReview(
+            state=ReviewState.PENDING,
+            created_at=_dt(6, 10),
+            submitted_at=None,
+        ),
+        [thread],
+    ) == _dt(6, 25)
+    assert review_timeline_time(
+        PRReview(
+            state=ReviewState.COMMENTED,
+            created_at=_dt(6, 10),
+            submitted_at=None,
+        ),
+        [thread],
+    ) == _dt(6, 10)
+    assert review_timeline_time(
+        PRReview(
+            state=ReviewState.COMMENTED,
+            created_at=datetime_min_utc(),
+            submitted_at=None,
+        ),
+        [thread],
+    ) == _dt(6, 25)
 
 
 def test_review_timeline_time_scans_thread_times_without_min_list(
@@ -92,13 +101,55 @@ def test_review_timeline_time_scans_thread_times_without_min_list(
         raising=False,
     )
 
-    assert (
-        review_timeline_time(
-            PRReview(created_at=datetime_min_utc(), submitted_at=None),
-            threads,
-        )
-        == _dt(6)
+    assert review_timeline_time(
+        PRReview(
+            state=ReviewState.COMMENTED,
+            created_at=datetime_min_utc(),
+            submitted_at=None,
+        ),
+        threads,
+    ) == _dt(6)
+
+
+def test_pending_review_timeline_time_uses_latest_thread_time(monkeypatch) -> None:
+    threads = [
+        CommentThread(
+            root_comment=PRComment(
+                id=100,
+                body="later",
+                path="app.py",
+                line=12,
+                created_at=_dt(8),
+            )
+        ),
+        CommentThread(
+            root_comment=PRComment(
+                id=101,
+                body="earlier",
+                path="app.py",
+                line=20,
+                created_at=_dt(6),
+            )
+        ),
+    ]
+
+    monkeypatch.setattr(
+        timeline_projection_module,
+        "max",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("pending thread time should scan without building a list")
+        ),
+        raising=False,
     )
+
+    assert review_timeline_time(
+        PRReview(
+            state=ReviewState.PENDING,
+            created_at=_dt(5),
+            submitted_at=None,
+        ),
+        threads,
+    ) == _dt(8)
 
 
 def test_review_timeline_time_single_thread_skips_sort_key(monkeypatch) -> None:
@@ -119,13 +170,10 @@ def test_review_timeline_time_single_thread_skips_sort_key(monkeypatch) -> None:
         ),
     )
 
-    assert (
-        review_timeline_time(
-            PRReview(created_at=datetime_min_utc(), submitted_at=None),
-            [thread],
-        )
-        == _dt(6)
-    )
+    assert review_timeline_time(
+        PRReview(created_at=datetime_min_utc(), submitted_at=None),
+        [thread],
+    ) == _dt(6)
 
 
 def test_build_timeline_items_filters_blank_comments_and_groups_review_threads() -> (

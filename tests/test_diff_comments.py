@@ -5,7 +5,14 @@ from textual.app import App, ComposeResult
 
 from rit.core.diff import parse_patch
 from rit.core.types import DiffHunk, DiffLine
-from rit.state.models import NodeList, PendingReviewComment, PRComment, ReviewThread
+from rit.state.models import (
+    NodeList,
+    PendingReviewComment,
+    PRComment,
+    PRReview,
+    ReviewState,
+    ReviewThread,
+)
 from rit.ui.messages import Flash
 from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets.diff_view import DiffView
@@ -349,6 +356,229 @@ def test_build_comment_map_skips_pending_review_thread_when_server_reissues_id()
     assert view._pending_comment_drafts_by_line == {4: [draft]}
     assert view._comment_threads_by_line == {}
     assert view._comment_line_indices == [4]
+
+
+def test_build_comment_map_skips_stale_pending_review_thread_after_resync() -> None:
+    root = PRComment(
+        id=5,
+        body="comment",
+        path="test.py",
+        line=13,
+        side="RIGHT",
+        pull_request_review_id=91,
+    )
+    thread = ReviewThread(
+        path="test.py",
+        line=13,
+        diff_side="RIGHT",
+        comments_connection=NodeList(nodes=[root]),
+    )
+    draft = PendingReviewComment(
+        body="comment",
+        path="test.py",
+        line=13,
+        side="RIGHT",
+        review_comment_id=100001,
+    )
+    view = SimpleNamespace(
+        store=SimpleNamespace(
+            state=SimpleNamespace(
+                pending_review_id=100,
+                pending_review_comments=[draft],
+                reviews=[PRReview(id=91, state=ReviewState.PENDING)],
+                review_threads=[thread],
+            ),
+            get_pending_file_comments=lambda _filename: [draft],
+        ),
+        current_file="test.py",
+        _diff_file_paths=frozenset({"test.py"}),
+        _all_lines=[],
+        _line_index_by_new_number={13: 4},
+        _line_index_by_old_number={},
+        _line_index_by_file_new_number={("test.py", 13): 4},
+        _line_index_by_file_old_number={},
+        _comment_threads_by_line={},
+        _comment_line_indices=[],
+        _comment_widgets_by_line={},
+        _comment_layout_widgets_by_line={},
+        _comment_side_by_line={},
+        _pending_comment_drafts_by_line={},
+        _pending_comment_widgets_by_line={},
+        _pending_comment_layout_widgets_by_line={},
+    )
+
+    _comments.build_comment_map(view)
+
+    assert view._pending_comment_drafts_by_line == {4: [draft]}
+    assert view._comment_threads_by_line == {}
+    assert view._comment_line_indices == [4]
+
+
+def test_build_comment_map_hides_replaced_pending_thread_matching_remaining_draft() -> (
+    None
+):
+    root = PRComment(
+        id=91001,
+        body="remaining draft",
+        path="test.py",
+        line=13,
+        side="RIGHT",
+        pull_request_review_id=91,
+    )
+    thread = ReviewThread(
+        path="test.py",
+        line=13,
+        diff_side="RIGHT",
+        comments_connection=NodeList(nodes=[root]),
+    )
+    draft = PendingReviewComment(
+        body="remaining draft",
+        path="test.py",
+        line=13,
+        side="RIGHT",
+        review_comment_id=100001,
+    )
+    view = SimpleNamespace(
+        store=SimpleNamespace(
+            state=SimpleNamespace(
+                pending_review_id=100,
+                pending_review_comments=[draft],
+                reviews=[PRReview(id=100, state=ReviewState.PENDING)],
+                review_threads=[thread],
+                obsolete_pending_review_ids={91},
+            ),
+            get_pending_file_comments=lambda _filename: [draft],
+        ),
+        current_file="test.py",
+        _diff_file_paths=frozenset({"test.py"}),
+        _all_lines=[],
+        _line_index_by_new_number={13: 4},
+        _line_index_by_old_number={},
+        _line_index_by_file_new_number={("test.py", 13): 4},
+        _line_index_by_file_old_number={},
+        _comment_threads_by_line={},
+        _comment_line_indices=[],
+        _comment_widgets_by_line={},
+        _comment_layout_widgets_by_line={},
+        _comment_side_by_line={},
+        _pending_comment_drafts_by_line={},
+        _pending_comment_widgets_by_line={},
+        _pending_comment_layout_widgets_by_line={},
+    )
+
+    _comments.build_comment_map(view)
+
+    assert view._pending_comment_drafts_by_line == {4: [draft]}
+    assert view._comment_threads_by_line == {}
+    assert view._comment_line_indices == [4]
+
+
+def test_build_comment_map_keeps_submitted_thread_matching_draft_content() -> None:
+    root = PRComment(
+        id=91001,
+        body="same text",
+        path="test.py",
+        line=13,
+        side="RIGHT",
+        pull_request_review_id=91,
+    )
+    thread = ReviewThread(
+        path="test.py",
+        line=13,
+        diff_side="RIGHT",
+        comments_connection=NodeList(nodes=[root]),
+    )
+    draft = PendingReviewComment(
+        body="same text",
+        path="test.py",
+        line=13,
+        side="RIGHT",
+        review_comment_id=100001,
+    )
+    view = SimpleNamespace(
+        store=SimpleNamespace(
+            state=SimpleNamespace(
+                pending_review_id=100,
+                pending_review_comments=[draft],
+                reviews=[
+                    PRReview(id=91, state=ReviewState.COMMENTED),
+                    PRReview(id=100, state=ReviewState.PENDING),
+                ],
+                review_threads=[thread],
+            ),
+            get_pending_file_comments=lambda _filename: [draft],
+        ),
+        current_file="test.py",
+        _diff_file_paths=frozenset({"test.py"}),
+        _all_lines=[],
+        _line_index_by_new_number={13: 4},
+        _line_index_by_old_number={},
+        _line_index_by_file_new_number={("test.py", 13): 4},
+        _line_index_by_file_old_number={},
+        _comment_threads_by_line={},
+        _comment_line_indices=[],
+        _comment_widgets_by_line={},
+        _comment_layout_widgets_by_line={},
+        _comment_side_by_line={},
+        _pending_comment_drafts_by_line={},
+        _pending_comment_widgets_by_line={},
+        _pending_comment_layout_widgets_by_line={},
+    )
+
+    _comments.build_comment_map(view)
+
+    assert view._pending_comment_drafts_by_line == {4: [draft]}
+    assert view._comment_threads_by_line == {4: [thread]}
+    assert view._comment_line_indices == [4]
+
+
+def test_build_comment_map_hides_pending_review_thread_after_local_delete() -> None:
+    root = PRComment(
+        id=5,
+        body="deleted draft",
+        path="test.py",
+        line=13,
+        side="RIGHT",
+        pull_request_review_id=91,
+    )
+    thread = ReviewThread(
+        path="test.py",
+        line=13,
+        diff_side="RIGHT",
+        comments_connection=NodeList(nodes=[root]),
+    )
+    view = SimpleNamespace(
+        store=SimpleNamespace(
+            state=SimpleNamespace(
+                pending_review_id=91,
+                pending_review_comments=[],
+                reviews=[PRReview(id=91, state=ReviewState.PENDING)],
+                review_threads=[thread],
+            ),
+            get_pending_file_comments=lambda _filename: [],
+        ),
+        current_file="test.py",
+        _diff_file_paths=frozenset({"test.py"}),
+        _all_lines=[],
+        _line_index_by_new_number={13: 4},
+        _line_index_by_old_number={},
+        _line_index_by_file_new_number={("test.py", 13): 4},
+        _line_index_by_file_old_number={},
+        _comment_threads_by_line={},
+        _comment_line_indices=[],
+        _comment_widgets_by_line={},
+        _comment_layout_widgets_by_line={},
+        _comment_side_by_line={},
+        _pending_comment_drafts_by_line={},
+        _pending_comment_widgets_by_line={},
+        _pending_comment_layout_widgets_by_line={},
+    )
+
+    _comments.build_comment_map(view)
+
+    assert view._pending_comment_drafts_by_line == {}
+    assert view._comment_threads_by_line == {}
+    assert view._comment_line_indices == []
 
 
 def test_pending_comments_for_current_diff_skips_empty_state_scan() -> None:

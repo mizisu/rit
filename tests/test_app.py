@@ -4,13 +4,12 @@ import asyncio
 from typing import cast
 
 import pytest
-from textual.widgets import Static, Tree
+from textual.widgets import Static
 
 from rit.app import RitApp
 from rit.cli import parse_pr_reference
 from rit.core.diff import parse_patch
-from rit.state.models import PR, FileViewedState, LoadingState, PRFile, PRReview
-from rit.ui.screens.file_picker import FilePickerScreen
+from rit.state.models import PR, LoadingState, PRComment, PRFile, PRReview
 from rit.ui.screens.settings import SettingsScreen
 
 
@@ -184,18 +183,26 @@ class TestRitApp:
             await pilot.pause()
 
             assert isinstance(app.screen, SettingsScreen)
-            assert _static_text(
-                app.screen.query_one("#setting-ui-theme", Static)
-            ) == "Theme: Catppuccin Macchiato"
-            assert _static_text(
-                app.screen.query_one("#setting-ui-diff-mode", Static)
-            ) == "Diff View Mode: Auto (based on width)"
-            assert _static_text(
-                app.screen.query_one("#setting-keybindings-vim-mode", Static)
-            ) == "Enable Vim keybindings?: On"
-            assert _static_text(
-                app.screen.query_one("#setting-github-auto-resolve", Static)
-            ) == "Auto-resolve threads?: Off"
+            assert (
+                _static_text(app.screen.query_one("#setting-ui-theme", Static))
+                == "Theme: Catppuccin Macchiato"
+            )
+            assert (
+                _static_text(app.screen.query_one("#setting-ui-diff-mode", Static))
+                == "Diff View Mode: Auto (based on width)"
+            )
+            assert (
+                _static_text(
+                    app.screen.query_one("#setting-keybindings-vim-mode", Static)
+                )
+                == "Enable Vim keybindings?: On"
+            )
+            assert (
+                _static_text(
+                    app.screen.query_one("#setting-github-auto-resolve", Static)
+                )
+                == "Auto-resolve threads?: Off"
+            )
 
     def test_flash_uses_plain_text_for_markup_like_errors(
         self, monkeypatch: pytest.MonkeyPatch
@@ -522,6 +529,213 @@ class TestRitApp:
 
             draft = diff_view.query_one("#pending-draft-1-right-0", CommentCard)
             assert draft._body == "hello draft"
+
+    async def test_update_inline_comment_draft_renders_before_sync_finishes(
+        self,
+        app: RitApp,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from rit.ui.screens.main import MainScreen
+        from rit.ui.widgets.comment_card import CommentCard
+
+        patch = """@@ -2,2 +2,3 @@
+ line 2
++line 3 added
+ line 4"""
+        source_diff = parse_patch(patch, "preview.py")
+
+        class BlockingDraftService:
+            def __init__(self) -> None:
+                self.create_started = asyncio.Event()
+                self.allow_create = asyncio.Event()
+
+            async def create_pending_review(self, *args, **kwargs) -> PRReview:
+                self.create_started.set()
+                await self.allow_create.wait()
+                return PRReview(id=88)
+
+        service = BlockingDraftService()
+
+        async with app.run_test() as pilot:
+            screen = cast(MainScreen, app.screen)
+            screen.current_tab = 1
+            screen.store.state.pr = PR(number=123, head_sha="deadbeef")
+            screen.store.state.file_diffs = {"preview.py": source_diff}
+            screen.store._service = service  # type: ignore[assignment]
+            diff_view = screen.file_changes.diff_view
+            await diff_view.show_diff("preview.py", source_diff)
+            await pilot.pause()
+            current_line = diff_view._line_index_by_new_number[3]
+            diff_view.cursor_line = current_line
+            refresh_calls = 0
+            original_refresh = screen._refresh_diff_preserving_cursor
+
+            async def count_refresh(*args, **kwargs) -> None:
+                nonlocal refresh_calls
+                refresh_calls += 1
+                await original_refresh(*args, **kwargs)
+
+            monkeypatch.setattr(
+                screen, "_refresh_diff_preserving_cursor", count_refresh
+            )
+
+            task = asyncio.create_task(
+                screen._save_inline_comment_draft(
+                    "hello draft",
+                    path="preview.py",
+                    line=3,
+                    side="RIGHT",
+                )
+            )
+            await asyncio.wait_for(service.create_started.wait(), timeout=1)
+            await pilot.pause()
+
+            draft = diff_view.query_one("#pending-draft-1-right-0", CommentCard)
+            assert draft._body == "hello draft"
+            assert not task.done()
+
+            service.allow_create.set()
+            assert await task is True
+            assert refresh_calls == 1
+
+    async def test_delete_inline_comment_draft_requires_selected_draft(
+        self,
+        app: RitApp,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from rit.ui.screens.main import MainScreen
+
+        patch = """@@ -2,2 +2,3 @@
+ line 2
++line 3 added
+ line 4"""
+        source_diff = parse_patch(patch, "preview.py")
+
+        class DeleteService:
+            def __init__(self) -> None:
+                self.delete_called = False
+
+            async def delete_pending_review(self, *args, **kwargs) -> None:
+                self.delete_called = True
+
+        service = DeleteService()
+
+        async with app.run_test() as pilot:
+            screen = cast(MainScreen, app.screen)
+            screen.current_tab = 1
+            screen.store.state.pr = PR(number=123, head_sha="deadbeef")
+            screen.store.state.pending_review_id = 88
+            screen.store.state.file_diffs = {"preview.py": source_diff}
+            screen.store.save_pending_inline_comment(
+                "hello draft",
+                path="preview.py",
+                line=3,
+                side="RIGHT",
+            )
+            screen.store._service = service  # type: ignore[assignment]
+            diff_view = screen.file_changes.diff_view
+            await diff_view.show_diff("preview.py", source_diff)
+            await pilot.pause()
+            current_line = diff_view._line_index_by_new_number[3]
+            diff_view.cursor_line = current_line
+            assert diff_view._comment_cursor_index == 0
+            refresh_calls = 0
+
+            async def count_refresh(*args, **kwargs) -> None:
+                nonlocal refresh_calls
+                refresh_calls += 1
+
+            monkeypatch.setattr(
+                screen,
+                "_refresh_diff_preserving_cursor",
+                count_refresh,
+            )
+
+            assert await screen._delete_pending_inline_comment() is False
+
+            assert screen.store.state.pending_review_comments[0].body == "hello draft"
+            assert service.delete_called is False
+            assert refresh_calls == 0
+
+    async def test_delete_inline_comment_draft_renders_immediately(
+        self,
+        app: RitApp,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from rit.ui.screens.main import MainScreen
+
+        patch = """@@ -2,2 +2,3 @@
+ line 2
++line 3 added
+ line 4"""
+        source_diff = parse_patch(patch, "preview.py")
+
+        class BlockingDeleteService:
+            def __init__(self) -> None:
+                self.delete_started = asyncio.Event()
+                self.allow_delete = asyncio.Event()
+
+            async def list_review_comments(self, *args, **kwargs) -> list[PRComment]:
+                return [
+                    PRComment(
+                        id=5,
+                        body="hello draft",
+                        path="preview.py",
+                        line=3,
+                        side="RIGHT",
+                        pull_request_review_id=88,
+                    )
+                ]
+
+            async def delete_pending_review(self, *args, **kwargs) -> None:
+                self.delete_started.set()
+                await self.allow_delete.wait()
+
+        service = BlockingDeleteService()
+
+        async with app.run_test() as pilot:
+            screen = cast(MainScreen, app.screen)
+            screen.current_tab = 1
+            screen.store.state.pr = PR(number=123, head_sha="deadbeef")
+            screen.store.state.pending_review_id = 88
+            screen.store.state.file_diffs = {"preview.py": source_diff}
+            screen.store.save_pending_inline_comment(
+                "hello draft",
+                path="preview.py",
+                line=3,
+                side="RIGHT",
+            )
+            screen.store._service = service  # type: ignore[assignment]
+            diff_view = screen.file_changes.diff_view
+            await diff_view.show_diff("preview.py", source_diff)
+            await pilot.pause()
+            current_line = diff_view._line_index_by_new_number[3]
+            diff_view.cursor_line = current_line
+            diff_view._comment_cursor_index = 1
+            refresh_calls = 0
+            original_refresh = screen._refresh_diff_preserving_cursor
+
+            async def count_refresh(*args, **kwargs) -> None:
+                nonlocal refresh_calls
+                refresh_calls += 1
+                await original_refresh(*args, **kwargs)
+
+            monkeypatch.setattr(
+                screen,
+                "_refresh_diff_preserving_cursor",
+                count_refresh,
+            )
+
+            task = asyncio.create_task(screen._delete_pending_inline_comment())
+            await pilot.pause()
+            await pilot.pause()
+
+            assert len(diff_view.query("CommentCard.pending-draft")) == 0
+            assert not task.done()
+
+            service.allow_delete.set()
+            assert await task is True
+            assert refresh_calls == 1
 
     async def test_save_full_file_preview_draft_outside_diff_renders_locally(
         self,

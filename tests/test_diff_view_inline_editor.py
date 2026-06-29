@@ -34,6 +34,39 @@ async def test_open_inline_comment_editor_mounts_below_current_line() -> None:
 
 
 @pytest.mark.asyncio
+async def test_open_inline_comment_editor_uses_visual_selection_range() -> None:
+    patch = """@@ -1,3 +1,4 @@
+ line1
+ line2
++line2.5
+ line3"""
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+
+        await diff_view.show_diff("test.py", parse_patch(patch, "test.py"))
+        await pilot.pause()
+        diff_view.visual_mode = True
+        diff_view.visual_type = "line"
+        diff_view.visual_anchor_line = 0
+        diff_view.cursor_line = 3
+        diff_view.focus()
+        await pilot.pause()
+
+        assert await diff_view.open_inline_comment_editor() is True
+        await pilot.pause()
+
+        assert diff_view.inline_comment_target() == ("test.py", 4, "RIGHT")
+        assert diff_view.inline_comment_start_line() == 1
+        assert diff_view.inline_comment_start_side() == "RIGHT"
+
+
+@pytest.mark.asyncio
 async def test_open_inline_comment_editor_uses_left_side_for_deleted_line() -> None:
     patch = "@@ -5,1 +5,0 @@\n-old"
 

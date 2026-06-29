@@ -680,7 +680,7 @@ async def test_timeline_sorts_review_threads_with_missing_and_aware_dates() -> N
 
 
 @pytest.mark.asyncio
-async def test_timeline_sorts_pending_review_threads_by_review_created_at() -> None:
+async def test_timeline_sorts_pending_review_threads_by_comment_created_at() -> None:
     store = PRStore()
     store.state.issue_comments = [
         PRIssueComment(
@@ -689,7 +689,32 @@ async def test_timeline_sorts_pending_review_threads_by_review_created_at() -> N
             user=PRUser(login="sonarqubecloud"),
             created_at=datetime(2026, 6, 18, 5, 25, tzinfo=timezone.utc),
             updated_at=datetime(2026, 6, 18, 5, 25, tzinfo=timezone.utc),
-        )
+        ),
+        PRIssueComment(
+            id=2,
+            body="Middle issue comment",
+            user=PRUser(login="sonarqubecloud"),
+            created_at=datetime(
+                2026,
+                6,
+                18,
+                6,
+                25,
+                36,
+                500000,
+                tzinfo=timezone.utc,
+            ),
+            updated_at=datetime(
+                2026,
+                6,
+                18,
+                6,
+                25,
+                36,
+                500000,
+                tzinfo=timezone.utc,
+            ),
+        ),
     ]
     store.state.reviews = [
         PRReview.model_validate(
@@ -731,8 +756,9 @@ async def test_timeline_sorts_pending_review_threads_by_review_created_at() -> N
         rendered = list(app.query_one("#comments-container").children)
         assert isinstance(rendered[0], CommentCard)
         assert isinstance(rendered[1], CommentCard)
-        assert rendered[1].has_class("pending-review-summary")
-        assert isinstance(rendered[2], ReviewThreadItem)
+        assert isinstance(rendered[2], CommentCard)
+        assert rendered[2].has_class("pending-review-summary")
+        assert isinstance(rendered[3], ReviewThreadItem)
         assert len(app.query("Collapsible.pending-review-group")) == 0
 
 

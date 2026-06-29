@@ -325,8 +325,8 @@ class PRTimeline(Vertical):
         state = self.store.state
         return _timeline_render_signature(
             issue_comments=state.issue_comments,
-            reviews=state.reviews,
-            comments=state.comments,
+            reviews=self.store.visible_timeline_reviews(),
+            comments=self.store.visible_timeline_comments(),
         )
 
     async def _build_timeline_async(self) -> None:
@@ -342,8 +342,8 @@ class PRTimeline(Vertical):
 
             timeline_items = build_timeline_items(
                 issue_comments=state.issue_comments,
-                reviews=state.reviews,
-                comments=state.comments,
+                reviews=self.store.visible_timeline_reviews(),
+                comments=self.store.visible_timeline_comments(),
             )
 
             if not timeline_items:

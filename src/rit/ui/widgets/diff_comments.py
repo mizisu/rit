@@ -21,7 +21,11 @@ from textual.widgets import Collapsible, Static
 
 from rit.core.diff import parse_patch
 from rit.core.types import DiffHunk, DiffLine
-from rit.state.models import PendingReviewComment, PRComment, ReviewThread
+from rit.state.models import PendingReviewComment, PRComment, PRReview, ReviewThread
+from rit.state.pending_review_visibility import (
+    pending_review_hidden_ids,
+    review_thread_is_pending_draft,
+)
 from rit.ui.icons import get_file_icon
 from rit.ui.messages import Flash
 from rit.ui.widgets.comment_card import CommentCard
@@ -103,7 +107,7 @@ def build_comment_map(view: DiffView) -> None:
                 draft
             )
 
-    threads = view.store.state.review_threads
+    threads = _visible_review_threads_for_current_diff(view, file_paths)
     if not threads:
         view._comment_line_indices = _comment_line_indices_for_keys(
             view._pending_comment_drafts_by_line.keys()
@@ -111,11 +115,7 @@ def build_comment_map(view: DiffView) -> None:
         return
 
     for thread in threads:
-        if thread.path in file_paths and not _pending_review_thread_is_draft(
-            view,
-            thread,
-        ):
-            _add_thread_to_comment_map(view, thread)
+        _add_thread_to_comment_map(view, thread)
 
     view._comment_line_indices = _comment_line_indices_for_keys(
         view._comment_threads_by_line.keys()
@@ -178,44 +178,55 @@ def _add_thread_to_comment_map(view: DiffView, thread: ReviewThread) -> None:
         view._comment_side_by_line[line_index] = "auto"
 
 
+def _visible_review_threads_for_current_diff(
+    view: DiffView,
+    file_paths: AbstractSet[str],
+) -> list[ReviewThread]:
+    selector = getattr(view.store, "visible_review_threads_for_paths", None)
+    if callable(selector):
+        threads = selector(file_paths)
+        if isinstance(threads, list):
+            return threads
+
+    state = getattr(view.store, "state", None)
+    raw_threads = getattr(state, "review_threads", [])
+    if not isinstance(raw_threads, list):
+        return []
+
+    return [
+        thread
+        for thread in raw_threads
+        if isinstance(thread, ReviewThread)
+        and thread.path in file_paths
+        and not _pending_review_thread_is_draft(view, thread)
+    ]
+
+
 def _pending_review_thread_is_draft(view: DiffView, thread: ReviewThread) -> bool:
     state = getattr(view.store, "state", None)
-    pending_review_id = getattr(state, "pending_review_id", None)
-    if not pending_review_id:
+    raw_reviews = getattr(state, "reviews", [])
+    if not isinstance(raw_reviews, list):
+        raw_reviews = []
+    reviews = [review for review in raw_reviews if isinstance(review, PRReview)]
+
+    raw_drafts = getattr(state, "pending_review_comments", [])
+    if not isinstance(raw_drafts, list):
+        raw_drafts = []
+    drafts = [draft for draft in raw_drafts if isinstance(draft, PendingReviewComment)]
+    obsolete_ids = getattr(state, "obsolete_pending_review_ids", ())
+    if not drafts and not reviews and not obsolete_ids:
         return False
 
-    drafts = getattr(state, "pending_review_comments", [])
-    if not isinstance(drafts, list) or not drafts:
-        return False
-
-    draft_ids = {draft.review_comment_id for draft in drafts if draft.review_comment_id}
-    for comment in thread.comments:
-        if comment.pull_request_review_id != pending_review_id:
-            continue
-        if comment.id in draft_ids:
-            return True
-        if any(
-            _pending_draft_matches_review_comment(draft, comment, thread=thread)
-            for draft in drafts
-        ):
-            return True
-    return False
-
-
-def _pending_draft_matches_review_comment(
-    draft: PendingReviewComment,
-    comment: PRComment,
-    *,
-    thread: ReviewThread,
-) -> bool:
-    if draft.path != comment.path or draft.body != comment.body:
-        return False
-
-    target_side = _comment_target_side(comment, thread=thread)
-    if draft.anchor_side != target_side:
-        return False
-
-    return _anchor_line_for_side(comment, target_side, thread=thread) == draft.line
+    return review_thread_is_pending_draft(
+        thread,
+        drafts=drafts,
+        hidden_review_ids=pending_review_hidden_ids(
+            pending_review_id=getattr(state, "pending_review_id", None),
+            reviews=reviews,
+            obsolete_pending_review_ids=obsolete_ids,
+        ),
+        reviews=reviews,
+    )
 
 
 def _update_mounted_thread_widget(
@@ -354,6 +365,55 @@ def _new_anchor_line(
     if thread is not None and thread.line is not None:
         return thread.line
     return comment.line
+
+
+def _start_line_for_side(
+    comment: PRComment,
+    target_side: Literal["old", "new", "auto"],
+    *,
+    thread: ReviewThread | None = None,
+) -> int | None:
+    if target_side == "old":
+        if thread is not None and thread.original_start_line is not None:
+            return thread.original_start_line
+        if comment.original_start_line is not None:
+            return comment.original_start_line
+        if thread is not None and thread.start_line is not None:
+            return thread.start_line
+        return comment.start_line
+    if target_side == "new":
+        if thread is not None and thread.start_line is not None:
+            return thread.start_line
+        if comment.start_line is not None:
+            return comment.start_line
+        if thread is not None and thread.original_start_line is not None:
+            return thread.original_start_line
+        return comment.original_start_line
+    if thread is not None:
+        return thread.start_line or thread.original_start_line
+    return comment.start_line or comment.original_start_line
+
+
+def _start_side_for_side(
+    comment: PRComment,
+    target_side: Literal["old", "new", "auto"],
+    *,
+    thread: ReviewThread | None = None,
+) -> Literal["LEFT", "RIGHT"] | None:
+    if thread is not None:
+        if thread.start_diff_side == "LEFT":
+            return "LEFT"
+        if thread.start_diff_side == "RIGHT":
+            return "RIGHT"
+    if comment.start_side == "LEFT":
+        return "LEFT"
+    if comment.start_side == "RIGHT":
+        return "RIGHT"
+    if target_side == "old":
+        return "LEFT"
+    if target_side == "new":
+        return "RIGHT"
+    return None
 
 
 def _anchor_line_for_side(
@@ -975,11 +1035,17 @@ def _build_pending_draft_widget(
 ) -> CommentCard:
     side = "left" if draft.side == "LEFT" else "right"
     return CommentCard(
-        f"{draft.path}:{draft.line} (pending)",
+        f"{draft.path}:{_pending_draft_line_label(draft)} (pending)",
         draft.body,
         id=f"pending-draft-{line_index}-{side}-{index}",
         classes="pending-draft --pending-draft",
     )
+
+
+def _pending_draft_line_label(draft: PendingReviewComment) -> str:
+    if draft.start_line is None:
+        return str(draft.line)
+    return f"{draft.start_line}-{draft.line}"
 
 
 def _inline_thread_title(thread: ReviewThread) -> str:

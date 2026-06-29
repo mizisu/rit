@@ -805,6 +805,74 @@ async def test_load_pending_review_projection_uses_review_threads_before_rest_co
 
 
 @pytest.mark.asyncio
+async def test_load_pending_review_projection_drops_thread_single_line_shadow() -> None:
+    pending = PRReview(id=91, state=ReviewState.PENDING, body="pending body")
+    range_thread = ReviewThread.model_validate(
+        {
+            "path": "src/app.py",
+            "line": 12,
+            "originalLine": 12,
+            "startLine": 4,
+            "originalStartLine": 4,
+            "diffSide": "RIGHT",
+            "startDiffSide": "RIGHT",
+            "comments": {
+                "nodes": [
+                    {
+                        "databaseId": 5,
+                        "body": "range draft",
+                        "path": "src/app.py",
+                        "line": 12,
+                        "originalLine": 12,
+                        "startLine": 4,
+                        "originalStartLine": 4,
+                        "pullRequestReview": {"databaseId": 91},
+                    }
+                ]
+            },
+        }
+    )
+    single_line_shadow = ReviewThread.model_validate(
+        {
+            "path": "src/app.py",
+            "line": 12,
+            "originalLine": 12,
+            "diffSide": "RIGHT",
+            "comments": {
+                "nodes": [
+                    {
+                        "databaseId": 6,
+                        "body": "range draft",
+                        "path": "src/app.py",
+                        "line": 12,
+                        "originalLine": 12,
+                        "pullRequestReview": {"databaseId": 91},
+                    }
+                ]
+            },
+        }
+    )
+
+    projection = await pending_review.load_pending_review_projection(
+        [pending],
+        pr_number=123,
+        review_threads=[range_thread, single_line_shadow],
+    )
+
+    assert projection.comments == [
+        PendingReviewComment(
+            body="range draft",
+            path="src/app.py",
+            line=12,
+            side="RIGHT",
+            start_line=4,
+            start_side="RIGHT",
+            review_comment_id=5,
+        )
+    ]
+
+
+@pytest.mark.asyncio
 async def test_load_pending_review_projection_uses_empty_comments_when_fetch_fails() -> (
     None
 ):
@@ -868,9 +936,7 @@ async def test_load_pending_review_projection_skips_fetch_without_pending_review
     assert projection.comments == []
 
 
-def test_apply_pending_review_projection_advances_version_and_copies_comments() -> (
-    None
-):
+def test_apply_pending_review_projection_advances_version_and_copies_comments() -> None:
     draft = PendingReviewComment(
         body="draft",
         path="a.py",
@@ -895,6 +961,113 @@ def test_apply_pending_review_projection_advances_version_and_copies_comments() 
     assert projection.comments == [draft]
 
 
+def test_project_pending_review_preserves_multiline_comment_range() -> None:
+    review = PRReview(id=91, state=ReviewState.PENDING)
+    comment = PRComment(
+        id=5,
+        body="range draft",
+        path="a.py",
+        start_line=5,
+        line=7,
+        start_side="RIGHT",
+        side="RIGHT",
+        pull_request_review_id=91,
+    )
+
+    projection = pending_review.project_pending_review(review, [comment])
+
+    assert len(projection.comments) == 1
+    assert projection.comments[0].start_line == 5
+    assert projection.comments[0].start_side == "RIGHT"
+
+
+def test_project_pending_review_drops_single_line_shadow_of_range_comment() -> None:
+    review = PRReview(id=91, state=ReviewState.PENDING)
+    projection = pending_review.project_pending_review(
+        review,
+        [
+            PRComment(
+                id=5,
+                body="range draft",
+                path="a.py",
+                start_line=5,
+                line=7,
+                start_side="RIGHT",
+                side="RIGHT",
+                pull_request_review_id=91,
+            ),
+            PRComment(
+                id=6,
+                body="range draft",
+                path="a.py",
+                line=7,
+                side="RIGHT",
+                pull_request_review_id=91,
+            ),
+        ],
+    )
+
+    assert projection.comments == [
+        PendingReviewComment(
+            body="range draft",
+            path="a.py",
+            line=7,
+            side="RIGHT",
+            start_line=5,
+            start_side="RIGHT",
+            review_comment_id=5,
+        )
+    ]
+
+
+def test_merge_pending_review_drafts_uses_local_range_when_server_omits_range() -> None:
+    local = PendingReviewComment(
+        body="range draft",
+        path="a.py",
+        line=7,
+        side="RIGHT",
+        start_line=5,
+        start_side="RIGHT",
+    )
+    server = PendingReviewComment(
+        body="range draft",
+        path="a.py",
+        line=7,
+        side="RIGHT",
+        review_comment_id=99,
+    )
+
+    merged = pending_review.merge_pending_review_drafts([local], [server])
+
+    assert merged == [local.model_copy(update={"review_comment_id": 99})]
+
+
+def test_merge_pending_review_drafts_skips_removed_range_when_server_omits_range() -> None:
+    removed = PendingReviewComment(
+        body="range draft",
+        path="a.py",
+        line=7,
+        side="RIGHT",
+        start_line=5,
+        start_side="RIGHT",
+    )
+    server = PendingReviewComment(
+        body="range draft",
+        path="a.py",
+        line=7,
+        side="RIGHT",
+        review_comment_id=99,
+    )
+
+    merged = pending_review.merge_pending_review_drafts(
+        [],
+        [server],
+        removed_comment=removed,
+    )
+
+    assert merged == []
+
+
 def test_inline_comment_diff_line_allows_unknown_diff() -> None:
     assert pending_review.is_inline_comment_diff_line(None, line=99, side="RIGHT")
 
@@ -906,6 +1079,41 @@ def test_inline_comment_diff_line_matches_side_specific_line_numbers() -> None:
     assert pending_review.is_inline_comment_diff_line(diff, line=4, side="LEFT")
     assert not pending_review.is_inline_comment_diff_line(diff, line=7, side="LEFT")
     assert not pending_review.is_inline_comment_diff_line(diff, line=4, side="RIGHT")
+
+
+def test_inline_comment_diff_line_matches_multiline_range_in_same_hunk() -> None:
+    diff = FileDiff(
+        filename="a.py",
+        hunks=[
+            DiffHunk(
+                old_start=1,
+                old_count=3,
+                new_start=1,
+                new_count=4,
+                lines=[
+                    DiffLine(old_line_no=1, new_line_no=1),
+                    DiffLine(old_line_no=2, new_line_no=2),
+                    DiffLine(old_line_no=None, new_line_no=3, is_added=True),
+                    DiffLine(old_line_no=3, new_line_no=4),
+                ],
+            )
+        ],
+    )
+
+    assert pending_review.is_inline_comment_diff_line(
+        diff,
+        start_line=1,
+        line=4,
+        start_side="RIGHT",
+        side="RIGHT",
+    )
+    assert not pending_review.is_inline_comment_diff_line(
+        diff,
+        start_line=99,
+        line=4,
+        start_side="RIGHT",
+        side="RIGHT",
+    )
 
 
 def test_inline_comment_diff_line_skips_hunk_lines_outside_anchor_range() -> None:
@@ -965,6 +1173,22 @@ def test_inline_comment_submission_plan_normalizes_inputs() -> None:
     assert plan.body == "hello"
     assert plan.commit_id == "deadbeef"
     assert plan.side == "RIGHT"
+
+
+def test_inline_comment_submission_plan_keeps_multiline_range() -> None:
+    plan = pending_review.plan_inline_comment_submission(
+        "hello",
+        head_sha="deadbeef",
+        diff=None,
+        path="a.py",
+        start_line=5,
+        line=7,
+        start_side="RIGHT",
+        side="RIGHT",
+    )
+
+    assert plan.start_line == 5
+    assert plan.start_side == "RIGHT"
 
 
 def test_inline_comment_submission_plan_rejects_empty_body() -> None:

@@ -287,6 +287,8 @@ class DiffView(VerticalScroll):
         self._inline_comment_editor_layout_widget: Widget | None = None
         self._inline_comment_editor_initial_body: str = ""
         self._inline_comment_editor_draft_index: int | None = None
+        self._inline_comment_editor_start_line: int | None = None
+        self._inline_comment_editor_start_side: Literal["LEFT", "RIGHT"] | None = None
         self._pending_comment_jump: str | None = None  # "first" or "last"
 
         self.mode = mode
@@ -664,6 +666,12 @@ class DiffView(VerticalScroll):
     def inline_comment_draft_index(self) -> int | None:
         return self._inline_comment_editor_draft_index
 
+    def inline_comment_start_line(self) -> int | None:
+        return self._inline_comment_editor_start_line
+
+    def inline_comment_start_side(self) -> Literal["LEFT", "RIGHT"] | None:
+        return self._inline_comment_editor_start_side
+
     def active_pending_draft_index(self) -> int | None:
         draft = _comments.active_pending_draft(self, self.cursor_line)
         return self._pending_draft_index(draft)
@@ -754,6 +762,59 @@ class DiffView(VerticalScroll):
             return filename, line.old_line_no, "LEFT"
         return None
 
+    def _inline_comment_target_for_visual_selection(
+        self,
+    ) -> (
+        tuple[str, int, Literal["LEFT", "RIGHT"], int, Literal["LEFT", "RIGHT"], int]
+        | None
+    ):
+        if not self.visual_mode or self.visual_anchor_line is None:
+            return None
+        if self.visual_anchor_line == self.cursor_line:
+            return None
+        if not self.current_file:
+            return None
+
+        current_line = self._current_line()
+        if current_line is None:
+            return None
+
+        target_path = current_line.file_path or self.current_file
+        target_side: Literal["LEFT", "RIGHT"] = (
+            "LEFT" if self._current_cursor_side() == "old" else "RIGHT"
+        )
+        selected_start = min(self.visual_anchor_line, self.cursor_line)
+        selected_end = max(self.visual_anchor_line, self.cursor_line)
+        selected_numbers: list[tuple[int, int]] = []
+        for line_index in range(selected_start, selected_end + 1):
+            if not (0 <= line_index < len(self._all_lines)):
+                continue
+            line = self._all_lines[line_index]
+            line_path = line.file_path or self.current_file
+            if line_path != target_path:
+                return None
+            line_number = (
+                line.old_line_no if target_side == "LEFT" else line.new_line_no
+            )
+            if line_number is not None:
+                selected_numbers.append((line_number, line.line_index))
+
+        if len(selected_numbers) < 2:
+            return None
+
+        start_line, _ = min(selected_numbers, key=lambda item: item[0])
+        end_line, end_line_index = max(selected_numbers, key=lambda item: item[0])
+        if start_line == end_line:
+            return None
+        return (
+            target_path,
+            end_line,
+            target_side,
+            start_line,
+            target_side,
+            end_line_index,
+        )
+
     def _inline_comment_editor_height(self) -> int:
         return self.INLINE_COMMENT_EDITOR_HEIGHT
 
@@ -797,6 +858,7 @@ class DiffView(VerticalScroll):
         if line is None or target is None:
             return False
 
+        editor_line_index = line.line_index
         selected_draft = _comments.active_pending_draft(self, line.line_index)
         if selected_draft is not None:
             target = (selected_draft.path, selected_draft.line, selected_draft.side)
@@ -804,11 +866,24 @@ class DiffView(VerticalScroll):
             self._inline_comment_editor_draft_index = self._pending_draft_index(
                 selected_draft
             )
+            self._inline_comment_editor_start_line = selected_draft.start_line
+            self._inline_comment_editor_start_side = selected_draft.start_side
         else:
+            visual_target = self._inline_comment_target_for_visual_selection()
+            if visual_target is not None:
+                path, end_line, side, start_line, start_side, editor_line_index = (
+                    visual_target
+                )
+                target = (path, end_line, side)
+                self._inline_comment_editor_start_line = start_line
+                self._inline_comment_editor_start_side = start_side
+            else:
+                self._inline_comment_editor_start_line = None
+                self._inline_comment_editor_start_side = None
             self._inline_comment_editor_initial_body = ""
             self._inline_comment_editor_draft_index = None
 
-        self._inline_comment_editor_line_index = line.line_index
+        self._inline_comment_editor_line_index = editor_line_index
         self._inline_comment_editor_target = target
         _virtual._rebuild_virtual_layout(self)
         await self._render_diff()
@@ -828,6 +903,8 @@ class DiffView(VerticalScroll):
         self._inline_comment_editor_layout_widget = None
         self._inline_comment_editor_initial_body = ""
         self._inline_comment_editor_draft_index = None
+        self._inline_comment_editor_start_line = None
+        self._inline_comment_editor_start_side = None
         _virtual._rebuild_virtual_layout(self)
         await self._render_diff()
         self.call_after_refresh(self.focus)
@@ -1094,6 +1171,8 @@ class DiffView(VerticalScroll):
                 self._inline_comment_editor_layout_widget = None
                 self._inline_comment_editor_initial_body = ""
                 self._inline_comment_editor_draft_index = None
+                self._inline_comment_editor_start_line = None
+                self._inline_comment_editor_start_side = None
 
             self.current_file = filename
             self._diff = diff

@@ -2,33 +2,35 @@ import json
 
 import pytest
 
-import rit.services.pr_discussion as pr_discussion
 from rit.services.pr_discussion import (
     discussion_from_pr,
     fast_discussion_from_data,
     fast_discussion_from_result,
-    fast_discussion_from_results,
     fetch_pr_discussion,
     fetch_pr_discussion_fast,
 )
 from rit.state.models import PR, ReviewState, ReviewThread
 
 
-def test_discussion_from_pr_projects_full_graphql_discussion() -> None:
-    pr = PR(
-        body="PR body",
-        reviews={
+def _graphql_pr_data() -> dict[str, object]:
+    return {
+        "body": "PR body",
+        "reviews": {
             "nodes": [
-                {"databaseId": 200, "body": "review body", "state": "COMMENTED"}
+                {
+                    "databaseId": 200,
+                    "body": "review body",
+                    "state": "COMMENTED",
+                }
             ]
         },
-        comments={"nodes": [{"databaseId": 100, "body": "issue comment"}]},
-        reviewThreads={
+        "reviewThreads": {
             "nodes": [
                 {
                     "id": "thread-300",
                     "path": "app.py",
                     "line": 12,
+                    "diffSide": "RIGHT",
                     "comments": {
                         "nodes": [
                             {
@@ -36,21 +38,36 @@ def test_discussion_from_pr_projects_full_graphql_discussion() -> None:
                                 "body": "thread comment",
                                 "path": "app.py",
                                 "line": 12,
-                                "side": "RIGHT",
+                                "pullRequestReview": {"databaseId": 200},
                             }
                         ]
                     },
                 }
             ]
         },
+        "comments": {"nodes": [{"databaseId": 100, "body": "issue comment"}]},
+    }
+
+
+def _graphql_result() -> str:
+    return json.dumps(
+        {
+            "data": {
+                "repository": {
+                    "pullRequest": _graphql_pr_data(),
+                }
+            }
+        }
     )
 
-    discussion = discussion_from_pr(pr)
+
+def test_discussion_from_pr_projects_full_graphql_discussion() -> None:
+    discussion = discussion_from_pr(PR.model_validate(_graphql_pr_data()))
 
     assert discussion.body == "PR body"
-    assert [(review.id, review.body, review.state) for review in discussion.reviews] == [
-        (200, "review body", ReviewState.COMMENTED)
-    ]
+    assert [
+        (review.id, review.body, review.state) for review in discussion.reviews
+    ] == [(200, "review body", ReviewState.COMMENTED)]
     assert [(comment.id, comment.body) for comment in discussion.issue_comments] == [
         (100, "issue comment")
     ]
@@ -58,262 +75,33 @@ def test_discussion_from_pr_projects_full_graphql_discussion() -> None:
     assert discussion.review_threads[0].root_comment_id == 300
 
 
-def test_fast_discussion_from_data_builds_threads_from_rest_comments() -> None:
-    discussion = fast_discussion_from_data(
-        {
-            "body": "PR body",
-            "reviews": {
-                "nodes": [
-                    {"databaseId": 200, "body": "review body", "state": "COMMENTED"}
-                ]
-            },
-            "comments": {"nodes": [{"databaseId": 100, "body": "issue comment"}]},
-        },
-        [
-            {
-                "id": 300,
-                "body": "root",
-                "user": {"login": "coderabbitai[bot]"},
-                "path": "app.py",
-                "line": 12,
-                "side": "RIGHT",
-                "pull_request_review_id": 200,
-            },
-            {
-                "id": 301,
-                "body": "reply",
-                "path": "app.py",
-                "line": 12,
-                "side": "RIGHT",
-                "in_reply_to_id": 300,
-                "pull_request_review_id": 200,
-            },
-        ],
-    )
+def test_fast_discussion_from_data_uses_graphql_review_threads() -> None:
+    discussion = fast_discussion_from_data(_graphql_pr_data())
 
     assert discussion.body == "PR body"
-    assert [(review.id, review.body, review.state) for review in discussion.reviews] == [
-        (200, "review body", ReviewState.COMMENTED)
-    ]
-    assert [(comment.id, comment.body) for comment in discussion.issue_comments] == [
-        (100, "issue comment")
-    ]
     assert len(discussion.review_threads) == 1
     thread: ReviewThread = discussion.review_threads[0]
     assert thread.path == "app.py"
-    assert [comment.id for comment in thread.comments] == [300, 301]
-    assert thread.comments[0].user is not None
-    assert thread.comments[0].user.login == "coderabbitai"
+    assert thread.diff_side == "RIGHT"
+    assert thread.root_comment_id == 300
+    assert thread.comments[0].pull_request_review_id == 200
 
 
-def test_fast_discussion_from_data_empty_rest_comments_skips_model_adapter(
-    monkeypatch,
-) -> None:
-    class Adapter:
-        def validate_python(self, _data: object) -> list[object]:
-            raise AssertionError("empty REST review comments should skip validation")
-
-    monkeypatch.setattr(pr_discussion, "_PRCommentListAdapter", Adapter())
-
-    discussion = fast_discussion_from_data(
-        {
-            "body": "PR body",
-            "reviews": {"nodes": []},
-            "comments": {"nodes": []},
-        },
-        [],
-    )
+def test_fast_discussion_from_result_decodes_graphql_pr() -> None:
+    discussion = fast_discussion_from_result(_graphql_result(), pr_number=123)
 
     assert discussion.body == "PR body"
-    assert discussion.reviews == []
-    assert discussion.issue_comments == []
-    assert discussion.review_threads == []
-
-
-def test_fast_discussion_from_data_single_rest_comment_skips_model_adapter(
-    monkeypatch,
-) -> None:
-    class Adapter:
-        def validate_python(self, _data: object) -> list[object]:
-            raise AssertionError("single REST review comment should skip list validation")
-
-    monkeypatch.setattr(pr_discussion, "_PRCommentListAdapter", Adapter())
-
-    discussion = fast_discussion_from_data(
-        {
-            "body": "PR body",
-            "reviews": {"nodes": []},
-            "comments": {"nodes": []},
-        },
-        [
-            {
-                "id": 300,
-                "body": "root",
-                "path": "app.py",
-                "line": 12,
-                "side": "RIGHT",
-            }
-        ],
-    )
-
-    assert len(discussion.review_threads) == 1
-    assert discussion.review_threads[0].root_comment_id == 300
-
-
-def test_fast_discussion_from_result_empty_rest_comments_skips_json_decode(
-    monkeypatch,
-) -> None:
-    def loads(_result: str) -> object:
-        raise AssertionError("empty REST review comments should skip JSON decode")
-
-    monkeypatch.setattr(pr_discussion.json, "loads", loads)
-
-    discussion = fast_discussion_from_result(
-        {
-            "body": "PR body",
-            "reviews": {"nodes": []},
-            "comments": {"nodes": []},
-        },
-        "[]",
-    )
-
-    assert discussion.review_threads == []
-
-
-def test_fast_discussion_from_result_decodes_rest_review_comments() -> None:
-    discussion = fast_discussion_from_result(
-        {
-            "body": "PR body",
-            "reviews": {
-                "nodes": [
-                    {"databaseId": 200, "body": "review body", "state": "COMMENTED"}
-                ]
-            },
-            "comments": {"nodes": [{"databaseId": 100, "body": "issue comment"}]},
-        },
-        json.dumps(
-            [
-                {
-                    "id": 300,
-                    "body": "root",
-                    "path": "app.py",
-                    "line": 12,
-                    "side": "RIGHT",
-                    "pull_request_review_id": 200,
-                }
-            ]
-        ),
-    )
-
-    assert discussion.body == "PR body"
-    assert len(discussion.review_threads) == 1
-    assert discussion.review_threads[0].root_comment_id == 300
-
-
-def test_fast_discussion_from_results_decodes_graphql_pr_and_rest_comments() -> None:
-    discussion = fast_discussion_from_results(
-        json.dumps(
-            {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "body": "PR body",
-                            "reviews": {
-                                "nodes": [
-                                    {
-                                        "databaseId": 200,
-                                        "body": "review body",
-                                        "state": "COMMENTED",
-                                    }
-                                ]
-                            },
-                            "comments": {
-                                "nodes": [
-                                    {"databaseId": 100, "body": "issue comment"}
-                                ]
-                            },
-                        }
-                    }
-                }
-            }
-        ),
-        json.dumps(
-            [
-                {
-                    "id": 300,
-                    "body": "root",
-                    "path": "app.py",
-                    "line": 12,
-                    "side": "RIGHT",
-                    "pull_request_review_id": 200,
-                }
-            ]
-        ),
-        pr_number=123,
-    )
-
-    assert discussion.body == "PR body"
-    assert [(review.id, review.body, review.state) for review in discussion.reviews] == [
-        (200, "review body", ReviewState.COMMENTED)
-    ]
-    assert [(comment.id, comment.body) for comment in discussion.issue_comments] == [
-        (100, "issue comment")
-    ]
     assert len(discussion.review_threads) == 1
     assert discussion.review_threads[0].root_comment_id == 300
 
 
 @pytest.mark.asyncio
-async def test_fetch_pr_discussion_runs_full_graphql_discussion_request() -> None:
+async def test_fetch_pr_discussion_runs_full_graphql_request() -> None:
     calls: list[tuple[list[str], str | None]] = []
 
     async def runner(args: list[str], *, input_text: str | None = None) -> str:
         calls.append((args, input_text))
-        return json.dumps(
-            {
-                "data": {
-                    "repository": {
-                        "pullRequest": {
-                            "body": "PR body",
-                            "reviews": {
-                                "nodes": [
-                                    {
-                                        "databaseId": 200,
-                                        "body": "review body",
-                                        "state": "COMMENTED",
-                                    }
-                                ]
-                            },
-                            "comments": {
-                                "nodes": [
-                                    {"databaseId": 100, "body": "issue comment"}
-                                ]
-                            },
-                            "reviewThreads": {
-                                "nodes": [
-                                    {
-                                        "id": "thread-300",
-                                        "path": "app.py",
-                                        "line": 12,
-                                        "comments": {
-                                            "nodes": [
-                                                {
-                                                    "databaseId": 300,
-                                                    "body": "thread comment",
-                                                    "path": "app.py",
-                                                    "line": 12,
-                                                    "side": "RIGHT",
-                                                }
-                                            ]
-                                        },
-                                    }
-                                ]
-                            },
-                        }
-                    }
-                }
-            }
-        )
+        return _graphql_result()
 
     discussion = await fetch_pr_discussion(
         owner="owner",
@@ -323,14 +111,7 @@ async def test_fetch_pr_discussion_runs_full_graphql_discussion_request() -> Non
     )
 
     assert discussion.body == "PR body"
-    assert [(review.id, review.body, review.state) for review in discussion.reviews] == [
-        (200, "review body", ReviewState.COMMENTED)
-    ]
-    assert [(comment.id, comment.body) for comment in discussion.issue_comments] == [
-        (100, "issue comment")
-    ]
     assert len(discussion.review_threads) == 1
-    assert discussion.review_threads[0].root_comment_id == 300
     assert len(calls) == 1
     args, input_text = calls[0]
     assert args[:2] == ["api", "graphql"]
@@ -341,52 +122,12 @@ async def test_fetch_pr_discussion_runs_full_graphql_discussion_request() -> Non
 
 
 @pytest.mark.asyncio
-async def test_fetch_pr_discussion_fast_runs_graphql_and_rest_requests() -> None:
+async def test_fetch_pr_discussion_fast_runs_one_graphql_request() -> None:
     calls: list[tuple[list[str], str | None]] = []
 
     async def runner(args: list[str], *, input_text: str | None = None) -> str:
         calls.append((args, input_text))
-        if args[:2] == ["api", "graphql"]:
-            return json.dumps(
-                {
-                    "data": {
-                        "repository": {
-                            "pullRequest": {
-                                "body": "PR body",
-                                "reviews": {
-                                    "nodes": [
-                                        {
-                                            "databaseId": 200,
-                                            "body": "review body",
-                                            "state": "COMMENTED",
-                                        }
-                                    ]
-                                },
-                                "comments": {
-                                    "nodes": [
-                                        {
-                                            "databaseId": 100,
-                                            "body": "issue comment",
-                                        }
-                                    ]
-                                },
-                            }
-                        }
-                    }
-                }
-            )
-        return json.dumps(
-            [
-                {
-                    "id": 300,
-                    "body": "root",
-                    "path": "app.py",
-                    "line": 12,
-                    "side": "RIGHT",
-                    "pull_request_review_id": 200,
-                }
-            ]
-        )
+        return _graphql_result()
 
     discussion = await fetch_pr_discussion_fast(
         owner="owner",
@@ -396,27 +137,10 @@ async def test_fetch_pr_discussion_fast_runs_graphql_and_rest_requests() -> None
     )
 
     assert discussion.body == "PR body"
-    assert [(review.id, review.body, review.state) for review in discussion.reviews] == [
-        (200, "review body", ReviewState.COMMENTED)
-    ]
-    assert [(comment.id, comment.body) for comment in discussion.issue_comments] == [
-        (100, "issue comment")
-    ]
     assert len(discussion.review_threads) == 1
-    assert discussion.review_threads[0].root_comment_id == 300
-    assert len(calls) == 2
-    assert any(
-        call[0][:2] == ["api", "graphql"]
-        and "owner=owner" in call[0]
-        and "repo=repo" in call[0]
-        and "number=123" in call[0]
-        for call in calls
-    )
-    assert any(
-        call[0] == [
-            "api",
-            "/repos/owner/repo/pulls/123/comments?per_page=100",
-        ]
-        for call in calls
-    )
-    assert all(input_text is None for _, input_text in calls)
+    assert len(calls) == 1
+    assert calls[0][0][:2] == ["api", "graphql"]
+    assert "owner=owner" in calls[0][0]
+    assert "repo=repo" in calls[0][0]
+    assert "number=123" in calls[0][0]
+    assert calls[0][1] is None

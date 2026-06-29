@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol, cast
 
 from rit.core.diff import parse_patch
-from rit.core.types import DiffHunk, FileDiff
+from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.state.models import (
     PendingReviewComment,
     PRComment,
@@ -93,6 +93,8 @@ class InlineCommentSubmissionPlan:
     body: str
     commit_id: str
     side: PendingCommentSide
+    start_line: int | None = None
+    start_side: PendingCommentSide | None = None
 
 
 @dataclass(frozen=True)
@@ -218,15 +220,20 @@ def upsert_pending_comment(
     line: int,
     side: PendingCommentSide,
     is_diff_line: bool,
+    start_line: int | None = None,
+    start_side: PendingCommentSide | None = None,
     replace_existing: bool = True,
     draft_index: int | None = None,
 ) -> tuple[list[PendingReviewComment], PendingReviewComment]:
     """Return comments with one draft added or replaced."""
+    normalized_start_line = _normalized_start_line(line, start_line)
     draft = PendingReviewComment(
         body=body,
         path=path,
         line=line,
         side=side,
+        start_line=normalized_start_line,
+        start_side=(start_side or side) if normalized_start_line is not None else None,
         is_diff_line=is_diff_line,
     )
     if not comments:
@@ -347,6 +354,8 @@ def save_pending_comment(
     side: PendingCommentSide,
     is_diff_line: bool,
     current_version: int,
+    start_line: int | None = None,
+    start_side: PendingCommentSide | None = None,
     replace_existing: bool = True,
     draft_index: int | None = None,
 ) -> PendingCommentSaveResult:
@@ -362,6 +371,8 @@ def save_pending_comment(
         line=line,
         side=side,
         is_diff_line=is_diff_line,
+        start_line=start_line,
+        start_side=start_side,
         replace_existing=replace_existing,
         draft_index=draft_index,
     )
@@ -604,6 +615,8 @@ def plan_inline_comment_submission(
     path: str,
     line: int,
     side: str,
+    start_line: int | None = None,
+    start_side: str | None = None,
 ) -> InlineCommentSubmissionPlan:
     """Return validated single inline comment submission data."""
     normalized_body = body.strip()
@@ -616,16 +629,27 @@ def plan_inline_comment_submission(
     if target_side is None:
         raise ValueError(f"Unsupported inline comment side: {side}")
 
+    normalized_start_line = _normalized_start_line(line, start_line)
+    target_start_side = None
+    if normalized_start_line is not None:
+        target_start_side = _pending_comment_side(start_side or side)
+        if target_start_side is None:
+            raise ValueError(f"Unsupported inline comment start side: {start_side}")
+
     require_inline_comment_diff_line(
         diff,
         path=path,
         line=line,
         side=target_side,
+        start_line=normalized_start_line,
+        start_side=target_start_side,
     )
     return InlineCommentSubmissionPlan(
         body=normalized_body,
         commit_id=head_sha,
         side=target_side,
+        start_line=normalized_start_line,
+        start_side=target_start_side,
     )
 
 
@@ -634,18 +658,46 @@ def is_inline_comment_diff_line(
     *,
     line: int,
     side: PendingCommentSide,
+    start_line: int | None = None,
+    start_side: PendingCommentSide | None = None,
 ) -> bool:
     """Return whether a target can be sent as a GitHub inline diff comment."""
     if diff is None:
         return True
 
+    normalized_start_line = _normalized_start_line(line, start_line)
+    target_start_side = (
+        (start_side or side) if normalized_start_line is not None else None
+    )
+
     for hunk in diff.hunks:
         if not _hunk_contains_line(hunk, line=line, side=side):
             continue
+        range_start_line = normalized_start_line
+        if target_start_side is not None:
+            if range_start_line is None:
+                continue
+            if not _hunk_contains_line(
+                hunk,
+                line=range_start_line,
+                side=target_start_side,
+            ):
+                continue
+
+        has_end = False
+        has_start = target_start_side is None
         for diff_line in hunk.lines:
-            if side == "RIGHT" and diff_line.new_line_no == line:
-                return True
-            if side == "LEFT" and diff_line.old_line_no == line:
+            if _diff_line_matches_side_line(diff_line, line=line, side=side):
+                has_end = True
+            if target_start_side is not None:
+                assert range_start_line is not None
+                if _diff_line_matches_side_line(
+                    diff_line,
+                    line=range_start_line,
+                    side=target_start_side,
+                ):
+                    has_start = True
+            if has_end and has_start:
                 return True
     return False
 
@@ -656,11 +708,36 @@ def require_inline_comment_diff_line(
     path: str,
     line: int,
     side: PendingCommentSide,
+    start_line: int | None = None,
+    start_side: PendingCommentSide | None = None,
 ) -> None:
     """Raise when GitHub cannot create a line comment at the target."""
-    if is_inline_comment_diff_line(diff, line=line, side=side):
+    if is_inline_comment_diff_line(
+        diff,
+        line=line,
+        side=side,
+        start_line=start_line,
+        start_side=start_side,
+    ):
         return
     raise UnsupportedInlineCommentTarget(path=path, line=line, side=side)
+
+
+def _normalized_start_line(line: int, start_line: int | None) -> int | None:
+    if start_line is None or start_line == line:
+        return None
+    return start_line
+
+
+def _diff_line_matches_side_line(
+    diff_line: DiffLine,
+    *,
+    line: int,
+    side: PendingCommentSide,
+) -> bool:
+    if side == "RIGHT":
+        return diff_line.new_line_no == line
+    return diff_line.old_line_no == line
 
 
 def _same_anchor(
@@ -712,9 +789,18 @@ def merge_pending_review_drafts(
         key = _comment_content_key(server_comment)
         if removed_id and server_comment.review_comment_id == removed_id:
             continue
-        if removed_key is not None and key == removed_key:
+        if removed_key is not None and (
+            key == removed_key
+            or _server_comment_matches_local_when_range_missing(
+                removed_comment,
+                server_comment,
+            )
+        ):
             continue
-        if key in local_keys:
+        if key in local_keys or _server_comment_matches_any_local_range_shadow(
+            merged,
+            server_comment,
+        ):
             _remember_server_comment_id(merged, server_comment)
             if server_comment.review_comment_id:
                 local_ids.add(server_comment.review_comment_id)
@@ -727,6 +813,7 @@ def merge_pending_review_drafts(
         local_keys.add(key)
 
     if len(merged) > 1:
+        merged = _drop_single_line_range_shadows(merged)
         merged.sort(key=_sort_key)
     return merged
 
@@ -762,7 +849,9 @@ def _pending_comments_from_review_comments(
         if draft is None:
             continue
         pending_comments.append(draft)
-    pending_comments.sort(key=_sort_key)
+    if len(pending_comments) > 1:
+        pending_comments = _drop_single_line_range_shadows(pending_comments)
+        pending_comments.sort(key=_sort_key)
     return pending_comments
 
 
@@ -779,7 +868,9 @@ def _pending_comments_from_review_threads(
             if draft is None:
                 continue
             pending_comments.append(draft)
-    pending_comments.sort(key=_sort_key)
+    if len(pending_comments) > 1:
+        pending_comments = _drop_single_line_range_shadows(pending_comments)
+        pending_comments.sort(key=_sort_key)
     return pending_comments
 
 
@@ -803,12 +894,59 @@ def _pending_comment_from_review_thread_comment(
     if anchor_line is None:
         return None
 
+    start_side = _thread_start_side(thread, comment, side)
+    start_line = _thread_start_line(thread, comment, start_side) if start_side else None
+    normalized_start_line = _normalized_start_line(anchor_line, start_line)
+
     return PendingReviewComment(
         body=comment.body,
         path=path,
         line=anchor_line,
         side=side,
+        start_line=normalized_start_line,
+        start_side=start_side if normalized_start_line is not None else None,
         review_comment_id=comment.id,
+    )
+
+
+def _thread_start_side(
+    thread: ReviewThread,
+    comment: PRComment,
+    side: PendingCommentSide,
+) -> PendingCommentSide | None:
+    if thread.start_line is None and thread.original_start_line is None:
+        if comment.start_line is None and comment.original_start_line is None:
+            return None
+    return (
+        _pending_comment_side(thread.start_diff_side or "")
+        or _pending_comment_side(comment.start_side)
+        or side
+    )
+
+
+def _thread_start_line(
+    thread: ReviewThread,
+    comment: PRComment,
+    start_side: PendingCommentSide,
+) -> int | None:
+    if start_side == "LEFT":
+        return (
+            thread.original_start_line
+            if thread.original_start_line is not None
+            else comment.original_start_line
+            if comment.original_start_line is not None
+            else thread.start_line
+            if thread.start_line is not None
+            else comment.start_line
+        )
+    return (
+        thread.start_line
+        if thread.start_line is not None
+        else comment.start_line
+        if comment.start_line is not None
+        else thread.original_start_line
+        if thread.original_start_line is not None
+        else comment.original_start_line
     )
 
 
@@ -852,13 +990,40 @@ def _pending_comment_from_review_comment(
             return None
         side, anchor_line = anchor
 
+    start_line = _comment_start_line(comment, side)
+    start_side = _comment_start_side(comment, side) if start_line is not None else None
+    normalized_start_line = _normalized_start_line(anchor_line, start_line)
+
     return PendingReviewComment(
         body=comment.body,
         path=comment.path,
         line=anchor_line,
         side=side,
+        start_line=normalized_start_line,
+        start_side=start_side if normalized_start_line is not None else None,
         review_comment_id=comment.id,
     )
+
+
+def _comment_start_side(
+    comment: PRComment,
+    side: PendingCommentSide,
+) -> PendingCommentSide:
+    return _pending_comment_side(comment.start_side) or side
+
+
+def _comment_start_line(
+    comment: PRComment,
+    side: PendingCommentSide,
+) -> int | None:
+    start_side = _comment_start_side(comment, side)
+    if start_side == "LEFT":
+        return (
+            comment.original_start_line
+            if comment.original_start_line is not None
+            else comment.start_line
+        )
+    return comment.start_line
 
 
 def _pending_comment_anchor_from_position(
@@ -900,11 +1065,77 @@ def _remember_server_comment_id(
         )
         return
 
+    for index, comment in enumerate(comments):
+        if not _server_comment_matches_local_when_range_missing(
+            comment,
+            server_comment,
+        ):
+            continue
+        if comment.review_comment_id:
+            return
+        comments[index] = comment.model_copy(
+            update={"review_comment_id": server_comment.review_comment_id}
+        )
+        return
 
-def _comment_content_key(
+
+def _server_comment_matches_any_local_range_shadow(
+    local_comments: Sequence[PendingReviewComment],
+    server_comment: PendingReviewComment,
+) -> bool:
+    return any(
+        _server_comment_matches_local_when_range_missing(comment, server_comment)
+        for comment in local_comments
+    )
+
+
+def _server_comment_matches_local_when_range_missing(
+    local_comment: PendingReviewComment | None,
+    server_comment: PendingReviewComment,
+) -> bool:
+    if local_comment is None:
+        return False
+    return (
+        local_comment.start_line is not None
+        and server_comment.start_line is None
+        and _range_shadow_key(local_comment) == _range_shadow_key(server_comment)
+    )
+
+
+def _drop_single_line_range_shadows(
+    comments: list[PendingReviewComment],
+) -> list[PendingReviewComment]:
+    range_keys = {
+        _range_shadow_key(comment)
+        for comment in comments
+        if comment.start_line is not None
+    }
+    if not range_keys:
+        return comments
+    return [
+        comment
+        for comment in comments
+        if comment.start_line is not None or _range_shadow_key(comment) not in range_keys
+    ]
+
+
+def _range_shadow_key(
     comment: PendingReviewComment,
 ) -> tuple[str, int, PendingCommentSide, str]:
     return (comment.path, comment.line, comment.side, comment.body)
+
+
+def _comment_content_key(
+    comment: PendingReviewComment,
+) -> tuple[str, int, PendingCommentSide, int | None, PendingCommentSide | None, str]:
+    return (
+        comment.path,
+        comment.line,
+        comment.side,
+        comment.start_line,
+        comment.start_side,
+        comment.body,
+    )
 
 
 def _pending_comment_side(side: str) -> PendingCommentSide | None:
