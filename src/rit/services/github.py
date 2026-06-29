@@ -8,8 +8,17 @@ from rit.services.github_repo import (
 )
 from rit.services.graphql_mutations import (
     ThreadResolutionMutationError,
+)
+from rit.services.graphql_mutations import (
     resolve_thread as resolve_thread_via_graphql,
+)
+from rit.services.graphql_mutations import (
     unresolve_thread as unresolve_thread_via_graphql,
+)
+from rit.services.pr_discussion import (
+    PRDiscussion,
+    fetch_pr_discussion,
+    fetch_pr_discussion_fast,
 )
 from rit.services.pr_file_pagination import (
     PR_FILES_PAGE_CONCURRENCY,
@@ -25,7 +34,11 @@ from rit.services.pr_file_view_states import (
     FileViewMutationError,
     FileViewStatesGraphQLError,
     fetch_file_view_states,
+)
+from rit.services.pr_file_view_states import (
     mark_file_as_viewed as mark_file_as_viewed_via_graphql,
+)
+from rit.services.pr_file_view_states import (
     unmark_file_as_viewed as unmark_file_as_viewed_via_graphql,
 )
 from rit.services.pr_graphql_response import (
@@ -38,28 +51,43 @@ from rit.services.pr_raw_diff import (
     async_iter_pr_diff_sections,
     fetch_pr_diff_text,
 )
-from rit.services.pr_discussion import (
-    PRDiscussion,
-    fetch_pr_discussion,
-    fetch_pr_discussion_fast,
+from rit.services.pr_review_graphql import (
+    create_pending_review as create_pending_review_via_graphql,
 )
-from rit.services.pr_review_request import (
+from rit.services.pr_review_graphql import (
+    create_review_comment as create_review_comment_via_graphql,
+)
+from rit.services.pr_review_graphql import (
+    delete_pending_review as delete_pending_review_via_graphql,
+)
+from rit.services.pr_review_graphql import (
+    list_review_comments as list_review_comments_via_graphql,
+)
+from rit.services.pr_review_graphql import (
+    submit_pending_review as submit_pending_review_via_graphql,
+)
+from rit.services.pr_review_graphql import (
+    submit_review as submit_review_via_graphql,
+)
+from rit.services.pr_issue_comment_request import (
     create_issue_comment as create_issue_comment_via_rest,
-    create_pending_review as create_pending_review_via_rest,
-    create_review_comment as create_review_comment_via_rest,
-    delete_pending_review as delete_pending_review_via_rest,
-    list_review_comments as list_review_comments_via_rest,
-    submit_pending_review as submit_pending_review_via_rest,
-    submit_review as submit_review_via_rest,
 )
 from rit.services.pr_reviewer_request import (
     add_assignees as add_assignees_via_rest,
+)
+from rit.services.pr_reviewer_request import (
     fetch_assignee_candidates,
     fetch_reviewer_candidates,
     fetch_reviewer_team_candidates,
     fetch_reviewer_user_candidates,
+)
+from rit.services.pr_reviewer_request import (
     remove_assignees as remove_assignees_via_rest,
+)
+from rit.services.pr_reviewer_request import (
     remove_requested_reviewers as remove_requested_reviewers_via_rest,
+)
+from rit.services.pr_reviewer_request import (
     request_reviewers as request_reviewers_via_rest,
 )
 from rit.state.models import (
@@ -72,7 +100,6 @@ from rit.state.models import (
     PRTeam,
     PRUser,
 )
-
 
 __all__ = (
     "GitHubError",
@@ -152,7 +179,7 @@ class GitHubService:
             )
 
     async def get_pr_discussion_fast(self, pr_number: int) -> PRDiscussion:
-        """Fetch comments and reviews quickly via REST for early timeline paint."""
+        """Fetch discussion data quickly via GraphQL for early timeline paint."""
         repo = await self.get_repo()
         with translate_pull_request_graphql_errors():
             return await fetch_pr_discussion_fast(
@@ -335,17 +362,22 @@ class GitHubService:
         path: str,
         line: int,
         side: str,
+        start_line: int | None = None,
+        start_side: str | None = None,
     ) -> PRComment:
-        """Create an inline review comment via the REST API."""
+        """Create an inline review comment via GraphQL."""
         repo = await self.get_repo()
-        return await create_review_comment_via_rest(
-            repo.full_name,
+        return await create_review_comment_via_graphql(
+            repo.owner,
+            repo.name,
             pr_number,
             body=body,
             commit_id=commit_id,
             path=path,
             line=line,
             side=side,
+            start_line=start_line,
+            start_side=start_side,
             runner=self._run_gh,
         )
 
@@ -358,8 +390,9 @@ class GitHubService:
         commit_id: str | None = None,
     ) -> PRReview:
         repo = await self.get_repo()
-        return await create_pending_review_via_rest(
-            repo.full_name,
+        return await create_pending_review_via_graphql(
+            repo.owner,
+            repo.name,
             pr_number,
             comments=comments,
             body=body,
@@ -373,8 +406,9 @@ class GitHubService:
         review_id: int,
     ) -> list[PRComment]:
         repo = await self.get_repo()
-        return await list_review_comments_via_rest(
-            repo.full_name,
+        return await list_review_comments_via_graphql(
+            repo.owner,
+            repo.name,
             pr_number,
             review_id=review_id,
             runner=self._run_gh,
@@ -382,8 +416,9 @@ class GitHubService:
 
     async def delete_pending_review(self, pr_number: int, review_id: int) -> None:
         repo = await self.get_repo()
-        await delete_pending_review_via_rest(
-            repo.full_name,
+        await delete_pending_review_via_graphql(
+            repo.owner,
+            repo.name,
             pr_number,
             review_id=review_id,
             runner=self._run_gh,
@@ -398,8 +433,9 @@ class GitHubService:
         body: str | None = None,
     ) -> PRReview:
         repo = await self.get_repo()
-        return await submit_pending_review_via_rest(
-            repo.full_name,
+        return await submit_pending_review_via_graphql(
+            repo.owner,
+            repo.name,
             pr_number,
             review_id=review_id,
             event=event,
@@ -416,10 +452,11 @@ class GitHubService:
         comments: list[PendingReviewComment] | None = None,
         commit_id: str | None = None,
     ) -> PRReview:
-        """Submit a top-level review via the REST API."""
+        """Submit a top-level review via GraphQL."""
         repo = await self.get_repo()
-        return await submit_review_via_rest(
-            repo.full_name,
+        return await submit_review_via_graphql(
+            repo.owner,
+            repo.name,
             pr_number,
             event=event,
             body=body,

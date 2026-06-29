@@ -8,11 +8,11 @@ from rit.services.github import (
     GitHubService,
     translate_pull_request_graphql_errors,
 )
+from rit.services.pr_graphql_queries import PullRequestGraphQLView, pull_request_query
 from rit.services.pr_graphql_response import (
     PullRequestGraphQLError,
     PullRequestNotFound,
 )
-from rit.services.pr_graphql_queries import PullRequestGraphQLView, pull_request_query
 
 
 class CaptureGitHubService(GitHubService):
@@ -57,7 +57,7 @@ def test_translate_pull_request_graphql_errors_wraps_not_found_errors() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_pr_discussion_fast_builds_threads_from_rest_comments() -> None:
+async def test_get_pr_discussion_fast_uses_graphql_review_threads() -> None:
     issue_comments = [
         {
             "id": 100,
@@ -76,31 +76,6 @@ async def test_get_pr_discussion_fast_builds_threads_from_rest_comments() -> Non
             "submitted_at": "2026-06-01T00:01:00Z",
         }
     ]
-    review_comments = [
-        {
-            "id": 300,
-            "body": "root",
-            "user": {"login": "coderabbitai[bot]"},
-            "path": "app.py",
-            "line": 12,
-            "side": "RIGHT",
-            "pull_request_review_id": 200,
-            "created_at": "2026-06-01T00:02:00Z",
-            "updated_at": "2026-06-01T00:02:00Z",
-        },
-        {
-            "id": 301,
-            "body": "reply",
-            "user": {"login": "dave"},
-            "path": "app.py",
-            "line": 12,
-            "side": "RIGHT",
-            "in_reply_to_id": 300,
-            "pull_request_review_id": 200,
-            "created_at": "2026-06-01T00:03:00Z",
-            "updated_at": "2026-06-01T00:03:00Z",
-        },
-    ]
     service = CaptureGitHubService(
         outputs=[
             json.dumps(
@@ -110,13 +85,49 @@ async def test_get_pr_discussion_fast_builds_threads_from_rest_comments() -> Non
                             "pullRequest": {
                                 "body": "PR body",
                                 "reviews": {"nodes": reviews},
+                                "reviewThreads": {
+                                    "nodes": [
+                                        {
+                                            "id": "thread-node",
+                                            "path": "app.py",
+                                            "line": 12,
+                                            "diffSide": "RIGHT",
+                                            "comments": {
+                                                "nodes": [
+                                                    {
+                                                        "databaseId": 300,
+                                                        "body": "root",
+                                                        "author": {
+                                                            "login": "coderabbitai[bot]"
+                                                        },
+                                                        "path": "app.py",
+                                                        "line": 12,
+                                                        "pullRequestReview": {
+                                                            "databaseId": 200
+                                                        },
+                                                    },
+                                                    {
+                                                        "databaseId": 301,
+                                                        "body": "reply",
+                                                        "author": {"login": "dave"},
+                                                        "path": "app.py",
+                                                        "line": 12,
+                                                        "replyTo": {"databaseId": 300},
+                                                        "pullRequestReview": {
+                                                            "databaseId": 200
+                                                        },
+                                                    },
+                                                ]
+                                            },
+                                        }
+                                    ]
+                                },
                                 "comments": {"nodes": issue_comments},
                             }
                         }
                     }
                 }
             ),
-            json.dumps(review_comments),
         ]
     )
 
@@ -131,11 +142,8 @@ async def test_get_pr_discussion_fast_builds_threads_from_rest_comments() -> Non
     assert thread.root_comment_id == 300
     assert [comment.id for comment in thread.comments] == [300, 301]
     assert thread.comments[0].user is not None
-    assert thread.comments[0].user.login == "coderabbitai"
-    assert [call[0][1] for call in service.calls] == [
-        "graphql",
-        "/repos/owner/repo/pulls/123/comments?per_page=100",
-    ]
+    assert thread.comments[0].user.login == "coderabbitai[bot]"
+    assert [call[0][1] for call in service.calls] == ["graphql"]
 
 
 @pytest.mark.asyncio
@@ -144,7 +152,9 @@ async def test_get_pr_files_fetches_remaining_pages_concurrently() -> None:
         {"filename": f"file-{index}.py", "status": "modified", "patch": "@@ -1 +1 @@"}
         for index in range(100)
     ]
-    second_page = [{"filename": "file-100.py", "status": "added", "patch": "@@ -0,0 +1 @@"}]
+    second_page = [
+        {"filename": "file-100.py", "status": "added", "patch": "@@ -0,0 +1 @@"}
+    ]
     service = CaptureGitHubService(
         outputs=[json.dumps(first_page), json.dumps(second_page)]
     )
@@ -229,22 +239,69 @@ async def test_empty_participant_changes_skip_repo_lookup_and_gh_calls() -> None
 
 
 @pytest.mark.asyncio
-async def test_create_review_comment_posts_submitted_review_payload() -> None:
+async def test_create_review_comment_posts_submitted_review_graphql_payload() -> None:
     service = CaptureGitHubService(
         outputs=[
-            json.dumps({"id": 80, "state": "COMMENTED", "body": ""}),
             json.dumps(
-                [
-                    {
-                        "id": 300,
-                        "pull_request_review_id": 80,
-                        "body": "ship it",
-                        "path": "app.py",
-                        "line": 42,
-                        "side": "RIGHT",
-                        "user": {"login": "alice"},
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "id": "PR_node",
+                                "reviews": {"nodes": []},
+                            }
+                        }
                     }
-                ]
+                }
+            ),
+            json.dumps(
+                {
+                    "data": {
+                        "addPullRequestReview": {
+                            "pullRequestReview": {
+                                "nodeId": "review_node",
+                                "databaseId": 80,
+                                "state": "COMMENTED",
+                                "body": "",
+                                "comments": {"nodes": []},
+                            }
+                        }
+                    }
+                }
+            ),
+            json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": [
+                                        {
+                                            "id": "thread-node",
+                                            "path": "app.py",
+                                            "line": 42,
+                                            "diffSide": "RIGHT",
+                                            "comments": {
+                                                "nodes": [
+                                                    {
+                                                        "databaseId": 300,
+                                                        "pullRequestReview": {
+                                                            "databaseId": 80
+                                                        },
+                                                        "body": "ship it",
+                                                        "path": "app.py",
+                                                        "line": 42,
+                                                        "author": {"login": "alice"},
+                                                    }
+                                                ]
+                                            },
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                }
             ),
         ]
     )
@@ -259,20 +316,16 @@ async def test_create_review_comment_posts_submitted_review_payload() -> None:
     )
 
     assert comment.id == 300
-    args, input_text = service.calls[0]
-    assert args == [
-        "api",
-        "--method",
-        "POST",
-        "/repos/owner/repo/pulls/123/reviews",
-        "--input",
-        "-",
-    ]
-    assert input_text is not None
-    assert json.loads(input_text) == {
+    assert comment.side == "RIGHT"
+    assert len(service.calls) == 3
+    assert all(call[0] == ["api", "graphql", "--input", "-"] for call in service.calls)
+    assert service.calls[1][1] is not None
+    mutation_input = json.loads(service.calls[1][1])["variables"]["input"]
+    assert mutation_input == {
+        "pullRequestId": "PR_node",
         "event": "COMMENT",
-        "commit_id": "deadbeef",
-        "comments": [
+        "commitOID": "deadbeef",
+        "threads": [
             {
                 "path": "app.py",
                 "line": 42,
@@ -281,40 +334,63 @@ async def test_create_review_comment_posts_submitted_review_payload() -> None:
             }
         ],
     }
-    assert service.calls[1][0] == [
-        "api",
-        "/repos/owner/repo/pulls/123/reviews/80/comments",
-        "--paginate",
-    ]
 
 
 @pytest.mark.asyncio
-async def test_list_review_comments_parses_concatenated_paginated_arrays() -> None:
+async def test_list_review_comments_reads_graphql_threads() -> None:
     service = CaptureGitHubService(
         outputs=[
             json.dumps(
-                [
-                    {
-                        "id": 300,
-                        "pull_request_review_id": 80,
-                        "body": "first",
-                        "path": "app.py",
-                        "line": 42,
-                        "side": "RIGHT",
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "reviewThreads": {
+                                    "nodes": [
+                                        {
+                                            "id": "thread-one",
+                                            "path": "app.py",
+                                            "line": 42,
+                                            "diffSide": "RIGHT",
+                                            "comments": {
+                                                "nodes": [
+                                                    {
+                                                        "databaseId": 300,
+                                                        "pullRequestReview": {
+                                                            "databaseId": 80
+                                                        },
+                                                        "body": "first",
+                                                        "path": "app.py",
+                                                        "line": 42,
+                                                    }
+                                                ]
+                                            },
+                                        },
+                                        {
+                                            "id": "thread-two",
+                                            "path": "app.py",
+                                            "line": 43,
+                                            "diffSide": "RIGHT",
+                                            "comments": {
+                                                "nodes": [
+                                                    {
+                                                        "databaseId": 301,
+                                                        "pullRequestReview": {
+                                                            "databaseId": 80
+                                                        },
+                                                        "body": "second",
+                                                        "path": "app.py",
+                                                        "line": 43,
+                                                    }
+                                                ]
+                                            },
+                                        },
+                                    ]
+                                }
+                            }
+                        }
                     }
-                ]
-            )
-            + json.dumps(
-                [
-                    {
-                        "id": 301,
-                        "pull_request_review_id": 80,
-                        "body": "second",
-                        "path": "app.py",
-                        "line": 43,
-                        "side": "RIGHT",
-                    }
-                ]
+                }
             )
         ]
     )
@@ -322,11 +398,8 @@ async def test_list_review_comments_parses_concatenated_paginated_arrays() -> No
     comments = await service.list_review_comments(123, 80)
 
     assert [comment.id for comment in comments] == [300, 301]
-    assert service.calls[0][0] == [
-        "api",
-        "/repos/owner/repo/pulls/123/reviews/80/comments",
-        "--paginate",
-    ]
+    assert [comment.side for comment in comments] == ["RIGHT", "RIGHT"]
+    assert service.calls[0][0] == ["api", "graphql", "--input", "-"]
 
 
 @pytest.mark.asyncio

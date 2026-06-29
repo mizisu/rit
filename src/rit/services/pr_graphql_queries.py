@@ -1,6 +1,5 @@
 from enum import Enum
 
-
 __all__ = (
     "PullRequestGraphQLView",
     "pull_request_graphql_request",
@@ -83,6 +82,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
       body
       reviews(first: 100) {
         nodes {
+          nodeId: id
           databaseId
           author {
             login
@@ -120,6 +120,8 @@ query($owner: String!, $repo: String!, $number: Int!) {
               path
               line
               originalLine
+              startLine
+              originalStartLine
               replyTo {
                 databaseId
               }
@@ -155,6 +157,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
       body
       reviews(first: 100) {
         nodes {
+          nodeId: id
           databaseId
           author {
             login
@@ -164,6 +167,44 @@ query($owner: String!, $repo: String!, $number: Int!) {
           body
           createdAt
           submittedAt
+        }
+      }
+      reviewThreads(first: 100) {
+        nodes {
+          id
+          isResolved
+          path
+          line
+          originalLine
+          startLine
+          originalStartLine
+          diffSide
+          startDiffSide
+          subjectType
+          comments(first: 100) {
+            nodes {
+              databaseId
+              author {
+                login
+                avatarUrl
+              }
+              body
+              createdAt
+              updatedAt
+              diffHunk
+              path
+              line
+              originalLine
+              startLine
+              originalStartLine
+              replyTo {
+                databaseId
+              }
+              pullRequestReview {
+                databaseId
+              }
+            }
+          }
         }
       }
       comments(first: 100) {
@@ -244,6 +285,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
       
       reviews(first: 100) {
         nodes {
+          nodeId: id
           databaseId
           author {
             login
@@ -282,6 +324,8 @@ query($owner: String!, $repo: String!, $number: Int!) {
               path
               line
               originalLine
+              startLine
+              originalStartLine
               replyTo {
                 databaseId
               }
