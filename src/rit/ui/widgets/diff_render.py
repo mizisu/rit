@@ -581,10 +581,15 @@ def _render_hunk(
         container.mount(hunk_header_widget)
         view._register_hunk_header_widget(hunk_index, hunk_header_widget)
 
-    if render_split:
-        _render_hunk_split(view, container, lines)
-    else:
-        _render_hunk_unified(view, container, lines)
+    previous_comment_layout = view._comment_layout_split_override
+    view._comment_layout_split_override = render_split
+    try:
+        if render_split:
+            _render_hunk_split(view, container, lines)
+        else:
+            _render_hunk_unified(view, container, lines)
+    finally:
+        view._comment_layout_split_override = previous_comment_layout
 
 
 PREVIEW_PREFIX_WIDTH = 7

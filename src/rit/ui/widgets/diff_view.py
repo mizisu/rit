@@ -290,6 +290,7 @@ class DiffView(VerticalScroll):
         self._inline_comment_editor_start_line: int | None = None
         self._inline_comment_editor_start_side: Literal["LEFT", "RIGHT"] | None = None
         self._pending_comment_jump: str | None = None  # "first" or "last"
+        self._comment_layout_split_override: bool | None = None
 
         self.mode = mode
 

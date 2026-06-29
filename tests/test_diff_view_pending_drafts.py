@@ -3,6 +3,7 @@ from textual.app import App, ComposeResult
 from textual.widgets import Static, TextArea
 
 from rit.core.diff import parse_patch
+from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.state.models import PendingReviewComment, PRComment, ReviewThread
 from rit.state.store import PRStore
 from rit.ui.widgets.comment_card import CommentCard
@@ -107,6 +108,108 @@ async def test_unified_pending_draft_starts_after_line_number_gutter() -> None:
         draft_widget = app.query_one("#pending-draft-1-right-0")
 
         assert draft_widget.region.x >= code_widget.region.x
+
+
+@pytest.mark.asyncio
+async def test_inline_comments_do_not_fill_wide_unified_view() -> None:
+    patch = """@@ -1,3 +1,3 @@
+ line1
+-old alpha
++new alpha
+ line2"""
+    store = PRStore()
+    store.save_pending_inline_comment(
+        "hello draft",
+        path="test.py",
+        line=2,
+        side="RIGHT",
+    )
+    store.state.review_threads = [_make_review_thread(root_id=101, side="RIGHT")]
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(store=store, mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test(size=(160, 16)) as pilot:
+        diff_view = app.query_one(DiffView)
+
+        await diff_view.show_diff("test.py", parse_patch(patch, "test.py"))
+        await pilot.pause()
+        await pilot.pause()
+
+        draft_widget = app.query_one("#pending-draft-1-right-0")
+        thread_widget = app.query_one("#inline-thread-101")
+
+        assert draft_widget.outer_size.width <= 96
+        assert thread_widget.outer_size.width <= 96
+        assert draft_widget.outer_size.width < diff_view.outer_size.width
+        assert thread_widget.outer_size.width < diff_view.outer_size.width
+
+
+@pytest.mark.asyncio
+async def test_comments_follow_forced_unified_hunk_inside_split_view() -> None:
+    store = PRStore()
+    store.save_pending_inline_comment(
+        "hello draft",
+        path="test.py",
+        line=2,
+        side="RIGHT",
+    )
+    store.state.review_threads = [_make_review_thread(root_id=201, side="RIGHT")]
+    diff = FileDiff(
+        filename="All files",
+        hunks=[
+            DiffHunk(
+                old_start=1,
+                old_count=1,
+                new_start=1,
+                new_count=1,
+                file_path="test.py",
+                file_additions=1,
+                file_deletions=1,
+                lines=[
+                    DiffLine(
+                        1,
+                        1,
+                        old_content="old alpha",
+                        new_content="new alpha",
+                        is_modified=True,
+                    )
+                ],
+            ),
+            DiffHunk(
+                old_start=2,
+                old_count=0,
+                new_start=2,
+                new_count=1,
+                file_path="test.py",
+                file_additions=1,
+                file_deletions=0,
+                lines=[DiffLine(None, 2, new_content="added beta", is_added=True)],
+            ),
+        ],
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(store=store, mode="split", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test(size=(160, 16)) as pilot:
+        diff_view = app.query_one(DiffView)
+
+        await diff_view.show_diff("All files", diff)
+        await pilot.pause()
+        await pilot.pause()
+
+        code_widget = app.query_one("#line-1 .code-content", Static)
+        draft_widget = app.query_one("#pending-draft-1-right-0")
+        thread_widget = app.query_one("#inline-thread-201")
+
+        assert diff_view.split is True
+        assert draft_widget.region.x == code_widget.region.x
+        assert thread_widget.region.x == code_widget.region.x
 
 
 @pytest.mark.asyncio

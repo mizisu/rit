@@ -66,6 +66,7 @@ __all__ = (
 COLLAPSED_THREAD_HEIGHT = 1
 COMMENT_HEIGHT_ESTIMATE = 3  # header + ~2 body lines
 PENDING_DRAFT_HEIGHT_ESTIMATE = 4
+INLINE_COMMENT_MAX_WIDTH = 96
 
 
 def estimate_thread_height(thread: ReviewThread) -> int:
@@ -668,7 +669,11 @@ def _build_side_aware_layout(
     side: Literal["old", "new", "auto"],
 ) -> Widget:
     widget.styles.width = "1fr"
-    if view.split:
+    widget.styles.max_width = INLINE_COMMENT_MAX_WIDTH
+    use_split = view._comment_layout_split_override
+    if use_split is None:
+        use_split = view.split
+    if use_split:
         return _build_split_comment_layout(view, widget, side=side)
     return _build_unified_comment_layout(view, widget)
 
