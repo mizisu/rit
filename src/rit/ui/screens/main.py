@@ -112,7 +112,7 @@ _PR_INFO_BINDINGS = [
         key_display="shift+o",
         group=_NAVIGATION_GROUP,
     ),
-    Binding("S", "review", "Review", group=_REVIEW_GROUP),
+    Binding("ctrl+s", "review", "Review", group=_REVIEW_GROUP),
     Binding(
         "R",
         "edit_reviewers",
@@ -135,7 +135,7 @@ _FILES_BINDINGS = [
     Binding("H", "focus_left", "", group=_NAVIGATION_GROUP, show=False),
     Binding("c", "comment", "Comment", group=_COMMENT_GROUP),
     Binding("d", "delete_pending_comment", "Delete Draft", group=_COMMENT_GROUP),
-    Binding("S", "review", "Review", group=_REVIEW_GROUP),
+    Binding("ctrl+s", "review", "Review", group=_REVIEW_GROUP),
     Binding("ctrl+l", "focus_right", "", group=_NAVIGATION_GROUP, show=False),
     Binding("L", "focus_right", "", group=_NAVIGATION_GROUP, show=False),
     Binding("e", "focus_file_tree", "File Tree", group=_NAVIGATION_GROUP),
