@@ -1,16 +1,8 @@
 """Settings schema: defaults, validation, and UI generation."""
 
-from typing import Literal
-
-# Type for schema field types
-FieldType = Literal["boolean", "string", "integer", "float", "choices", "object"]
-
-
 __all__ = (
-    "FieldType",
     "SCHEMA",
     "get_default_settings",
-    "get_flat_defaults",
 )
 
 
@@ -123,22 +115,5 @@ def get_default_settings() -> dict:
 
     for section in SCHEMA:
         result[section["key"]] = process_field(section)
-
-    return result
-
-
-def get_flat_defaults() -> dict[str, object]:
-    result: dict[str, object] = {}
-
-    def process_field(field: dict, prefix: str = "") -> None:
-        key = f"{prefix}.{field['key']}" if prefix else field["key"]
-        if field["type"] == "object":
-            for subfield in field.get("fields", []):
-                process_field(subfield, key)
-        else:
-            result[key] = field.get("default")
-
-    for section in SCHEMA:
-        process_field(section)
 
     return result

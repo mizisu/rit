@@ -2,15 +2,14 @@ import json
 
 from pydantic import TypeAdapter
 
-from rit.services.gh_request import GitHubInputRunner, run_request
-from rit.services.pr_file_pagination import (
+from rit.core.pagination import (
     PR_FILES_PAGE_CONCURRENCY,
     PR_FILES_PER_PAGE,
     collect_all_page_items,
     collect_page_batches,
 )
+from rit.services.gh_request import GitHubInputRunner, run_request
 from rit.state.models import PRFile
-
 
 __all__ = (
     "fetch_file_content",

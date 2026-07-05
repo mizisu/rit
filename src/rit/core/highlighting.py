@@ -15,7 +15,6 @@ __all__ = (
     "WORD_DIFF_ADDED_STYLE",
     "WORD_DIFF_DELETED_STYLE",
     "apply_word_diff_spans",
-    "highlight_diff",
     "highlight_lines_for_diff",
     "highlight_lines_for_diff_range",
     "prewarm_highlighter",
@@ -262,24 +261,6 @@ def _highlighted_lines(
     if len(source_lines) == 1:
         return [highlighted]
     return highlighted.split("\n")
-
-
-def highlight_diff(
-    diff: FileDiff, *, dark_mode: bool = True
-) -> tuple[list[Content], list[Content]]:
-    old_content_lines: list[Content] = []
-    new_content_lines: list[Content] = []
-    for filename, lines in _iter_diff_line_file_groups(diff):
-        old_lines_text, new_lines_text = _collect_line_text(lines)
-        old_lines, new_lines = _highlight_text_lines(
-            filename=filename,
-            old_lines_text=old_lines_text,
-            new_lines_text=new_lines_text,
-            dark_mode=dark_mode,
-        )
-        old_content_lines.extend(old_lines)
-        new_content_lines.extend(new_lines)
-    return old_content_lines, new_content_lines
 
 
 def apply_word_diff_spans(

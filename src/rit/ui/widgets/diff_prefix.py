@@ -14,7 +14,6 @@ __all__ = (
     "build_split_prefix_content",
     "build_unified_modified_prefix_content",
     "build_unified_prefix_content",
-    "preview_change_marker_content",
 )
 
 
@@ -60,15 +59,6 @@ def build_preview_prefix_content(
         _preview_change_marker_part(line),
         " ",
     )
-
-
-def preview_change_marker_content(line: DiffLine) -> Content:
-    """Build the full-file preview change marker."""
-    if line.preview_change == "added":
-        return Content.styled("┃", "$success")
-    if line.preview_change == "modified":
-        return Content.styled("┃", "$warning")
-    return Content(" ")
 
 
 def build_split_prefix(

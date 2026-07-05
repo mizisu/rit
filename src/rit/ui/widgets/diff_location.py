@@ -3,47 +3,13 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Literal
 
-from rit.core.types import DiffLine, FileDiff
+from rit.core.types import FileDiff
 from rit.ui.widgets.diff_types import RenderedRow
 
 __all__ = (
-    "full_preview_location_label",
     "line_index_for_location",
     "row_for_line_and_pane",
 )
-
-
-def full_preview_location_label(
-    *,
-    line: DiffLine | None,
-    total_lines: int,
-    diff: FileDiff | None,
-    hunk_index: int | None,
-) -> str:
-    """Return the location label shown while previewing the full file."""
-    if line is None:
-        return ""
-
-    line_no = line.new_line_no or line.old_line_no or line.line_index + 1
-    label = f"line {line_no}/{total_lines}"
-    if diff is None or not diff.hunks:
-        return label
-    if hunk_index is None or not (0 <= hunk_index < len(diff.hunks)):
-        return label
-
-    hunk = diff.hunks[hunk_index]
-    section = _clean_header(hunk.header)
-    if not section:
-        section = f"section {hunk_index + 1}/{len(diff.hunks)}"
-    return f"{label}  {section}"
-
-
-def _clean_header(header: str) -> str:
-    if not header:
-        return ""
-    if header[0].isspace() or header[-1].isspace():
-        return header.strip()
-    return header
 
 
 def line_index_for_location(

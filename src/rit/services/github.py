@@ -1,6 +1,10 @@
 from collections.abc import AsyncIterator, Iterator, Sequence
 from contextlib import contextmanager
 
+from rit.core.pagination import (
+    PR_FILES_PAGE_CONCURRENCY,
+    PR_FILES_PER_PAGE,
+)
 from rit.services.gh_cli import GhCliError, run_gh, run_gh_sync
 from rit.services.github_repo import (
     GitHubRepo,
@@ -19,10 +23,6 @@ from rit.services.pr_discussion import (
     PRDiscussion,
     fetch_pr_discussion,
     fetch_pr_discussion_fast,
-)
-from rit.services.pr_file_pagination import (
-    PR_FILES_PAGE_CONCURRENCY,
-    PR_FILES_PER_PAGE,
 )
 from rit.services.pr_file_request import (
     fetch_file_content,
@@ -47,6 +47,9 @@ from rit.services.pr_graphql_response import (
     fetch_pull_request_all,
     fetch_pull_request_summary,
 )
+from rit.services.pr_issue_comment_request import (
+    create_issue_comment as create_issue_comment_via_rest,
+)
 from rit.services.pr_raw_diff import (
     async_iter_pr_diff_sections,
     fetch_pr_diff_text,
@@ -68,9 +71,6 @@ from rit.services.pr_review_graphql import (
 )
 from rit.services.pr_review_graphql import (
     submit_review as submit_review_via_graphql,
-)
-from rit.services.pr_issue_comment_request import (
-    create_issue_comment as create_issue_comment_via_rest,
 )
 from rit.services.pr_reviewer_request import (
     add_assignees as add_assignees_via_rest,

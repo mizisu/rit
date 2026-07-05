@@ -17,8 +17,8 @@ from rit.state.models import (
     ReviewThreadInfo,
 )
 from rit.state.store import PRStore
+from rit.ui.collapsible_markdown import CopyableCodeBlock
 from rit.ui.components import pr_timeline as pr_timeline_module
-from rit.ui.components.collapsible_markdown import CopyableCodeBlock
 from rit.ui.components.pr_timeline import (
     INITIAL_TIMELINE_BODY_COUNT,
     TIMELINE_BODY_MOUNT_DELAY,

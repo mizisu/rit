@@ -10,19 +10,21 @@ from textual.containers import Vertical
 from textual.css.query import NoMatches
 
 import rit.ui.markdown_images as markdown_images_module
-from tests.conftest import wait_until
-from rit.ui.components.collapsible_markdown import (
+from rit.ui.collapsible_markdown import (
     CopyableCodeBlock,
     DetailsBlock,
-    ImageViewerScreen,
-    MarkdownImageBlock,
-    MarkdownImageRef,
     MarkdownPart,
     mount_markdown_with_details,
     parse_details_blocks,
     parse_fenced_code_blocks,
+)
+from rit.ui.markdown_images import (
+    ImageViewerScreen,
+    MarkdownImageBlock,
+    MarkdownImageRef,
     parse_markdown_image_parts,
 )
+from tests.conftest import wait_until
 
 
 def _details(part: MarkdownPart) -> DetailsBlock:
@@ -481,6 +483,7 @@ async def test_markdown_image_block_loads_image_from_in_memory_bytes() -> None:
 
     app = TestApp()
     async with app.run_test() as pilot:
+
         def image_widget_with_size():
             try:
                 widget = app.query_one(".markdown-terminal-image")

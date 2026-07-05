@@ -9,16 +9,10 @@ from textual.content import Content
 __all__ = (
     "DiffHunk",
     "DiffLine",
-    "DiffSide",
     "FileDiff",
     "InlineSegment",
     "SegmentType",
 )
-
-
-class DiffSide(Enum):
-    LEFT = "left"  # Old/deleted
-    RIGHT = "right"  # New/added
 
 
 class SegmentType(Enum):
@@ -57,8 +51,6 @@ class DiffLine:
     highlighted_old_content: Content | None = None
     highlighted_new_content: Content | None = None
 
-    is_selected: bool = False  # Visual mode selection
-    is_current: bool = False  # Current cursor line
     file_path: str | None = None
     preview_change: Literal["added", "modified"] | None = None
     preview_deleted_before: bool = False

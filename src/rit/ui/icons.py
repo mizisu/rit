@@ -2,13 +2,11 @@
 
 __all__ = (
     "DEFAULT_FILE_ICON",
-    "DIR_ICON",
     "get_file_icon",
 )
 
 
 DEFAULT_FILE_ICON = "\uf15b"  # nf-fa-file
-DIR_ICON = "\uf07b"  # nf-fa-folder
 
 EXTENSION_ICONS: dict[str, str] = {
     ".py": "\ue73c",  # nf-dev-python
