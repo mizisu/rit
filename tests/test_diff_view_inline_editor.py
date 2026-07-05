@@ -1,5 +1,6 @@
 import pytest
 from textual.app import App, ComposeResult
+from textual.widgets import Static
 
 from rit.core.diff import parse_patch
 from rit.ui.widgets.diff_view import DiffView
@@ -28,9 +29,11 @@ async def test_open_inline_comment_editor_mounts_below_current_line() -> None:
 
         line_widget = app.query_one("#line-0")
         editor = app.query_one("#diff-inline-comment-editor")
+        context = editor.query_one(".comment-editor-context", Static)
 
         assert editor.region.y > line_widget.region.y
         assert diff_view.inline_comment_target() == ("test.py", 1, "LEFT")
+        assert str(context.content) == "Selected: test.py:1 (old)"
 
 
 @pytest.mark.asyncio
@@ -61,9 +64,13 @@ async def test_open_inline_comment_editor_uses_visual_selection_range() -> None:
         assert await diff_view.open_inline_comment_editor() is True
         await pilot.pause()
 
+        editor = app.query_one("#diff-inline-comment-editor")
+        context = editor.query_one(".comment-editor-context", Static)
+
         assert diff_view.inline_comment_target() == ("test.py", 4, "RIGHT")
         assert diff_view.inline_comment_start_line() == 1
         assert diff_view.inline_comment_start_side() == "RIGHT"
+        assert str(context.content) == "Selected: test.py:1-4 (new)"
 
 
 @pytest.mark.asyncio

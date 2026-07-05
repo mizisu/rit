@@ -66,6 +66,11 @@ class InlineCommentEditor(Vertical):
         margin-bottom: 1;
     }
 
+    InlineCommentEditor .comment-editor-context {
+        color: $text-muted;
+        margin-bottom: 1;
+    }
+
     InlineCommentEditor .comment-editor-body {
         height: 6;
         min-height: 4;
@@ -116,6 +121,7 @@ class InlineCommentEditor(Vertical):
         title: str,
         placeholder: str,
         initial_text: str = "",
+        context: str = "",
         id: str | None = None,
     ) -> None:
         super().__init__(id=id, classes="-hidden")
@@ -123,10 +129,17 @@ class InlineCommentEditor(Vertical):
         self._title = title
         self._placeholder = placeholder
         self._initial_text = initial_text
+        self._selection_context = context
         self._pending_focus = False
 
     def compose(self) -> ComposeResult:
         yield Static(self._title, classes="comment-editor-title")
+        if self._selection_context:
+            yield Static(
+                self._selection_context,
+                classes="comment-editor-context",
+                markup=False,
+            )
         yield TextArea(
             id="comment-editor-body",
             classes="comment-editor-body",

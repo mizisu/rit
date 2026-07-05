@@ -85,7 +85,7 @@ class DiffView(VerticalScroll):
     COMPLEX_DIFF_WINDOW_ROWS_MULTIPLIER = 0.75
     DYNAMIC_WINDOW_SHIFT_DIVISOR = 7
     MIN_DYNAMIC_WINDOW_RADIUS = 12
-    INLINE_COMMENT_EDITOR_HEIGHT = 8
+    INLINE_COMMENT_EDITOR_HEIGHT = 9
 
     DEFAULT_CSS = Path(__file__).with_suffix(".tcss").read_text()
 
@@ -289,6 +289,7 @@ class DiffView(VerticalScroll):
         self._inline_comment_editor_widget: InlineCommentEditor | None = None
         self._inline_comment_editor_layout_widget: Widget | None = None
         self._inline_comment_editor_initial_body: str = ""
+        self._inline_comment_editor_context: str = ""
         self._inline_comment_editor_draft_index: int | None = None
         self._inline_comment_editor_start_line: int | None = None
         self._inline_comment_editor_start_side: Literal["LEFT", "RIGHT"] | None = None
@@ -939,8 +940,9 @@ class DiffView(VerticalScroll):
         widget = InlineCommentEditor(
             kind="inline",
             title="Add inline comment",
-            placeholder="Write a comment for the current line...",
+            placeholder="Write a comment for the selected line...",
             initial_text=self._inline_comment_editor_initial_body,
+            context=self._inline_comment_editor_context,
             id="diff-inline-comment-editor",
         )
         _, _, target_side = self._inline_comment_editor_target or ("", 0, "RIGHT")
@@ -959,6 +961,37 @@ class DiffView(VerticalScroll):
             self._inline_comment_editor_widget.open(
                 self._inline_comment_editor_initial_body
             )
+
+    @staticmethod
+    def _inline_comment_side_label(side: Literal["LEFT", "RIGHT"]) -> str:
+        return "old" if side == "LEFT" else "new"
+
+    @classmethod
+    def _inline_comment_context_label(
+        cls,
+        target: tuple[str, int, Literal["LEFT", "RIGHT"]],
+        *,
+        start_line: int | None,
+        start_side: Literal["LEFT", "RIGHT"] | None,
+    ) -> str:
+        path, end_line, side = target
+        side_label = cls._inline_comment_side_label(side)
+        if start_line is None:
+            return f"Selected: {path}:{end_line} ({side_label})"
+
+        effective_start_side = start_side or side
+        start_side_label = cls._inline_comment_side_label(effective_start_side)
+        if effective_start_side == side:
+            first_line = min(start_line, end_line)
+            last_line = max(start_line, end_line)
+            if first_line == last_line:
+                return f"Selected: {path}:{first_line} ({side_label})"
+            return f"Selected: {path}:{first_line}-{last_line} ({side_label})"
+
+        return (
+            f"Selected: {path}:{start_line} ({start_side_label}) "
+            f"-> {end_line} ({side_label})"
+        )
 
     async def open_inline_comment_editor(self) -> bool:
         line = self._current_line()
@@ -993,6 +1026,11 @@ class DiffView(VerticalScroll):
 
         self._inline_comment_editor_line_index = editor_line_index
         self._inline_comment_editor_target = target
+        self._inline_comment_editor_context = self._inline_comment_context_label(
+            target,
+            start_line=self._inline_comment_editor_start_line,
+            start_side=self._inline_comment_editor_start_side,
+        )
         _virtual._rebuild_virtual_layout(self)
         await self._render_diff()
         self.call_after_refresh(self._focus_inline_comment_editor)
@@ -1010,6 +1048,7 @@ class DiffView(VerticalScroll):
         self._inline_comment_editor_widget = None
         self._inline_comment_editor_layout_widget = None
         self._inline_comment_editor_initial_body = ""
+        self._inline_comment_editor_context = ""
         self._inline_comment_editor_draft_index = None
         self._inline_comment_editor_start_line = None
         self._inline_comment_editor_start_side = None
@@ -1275,6 +1314,7 @@ class DiffView(VerticalScroll):
                 self._inline_comment_editor_widget = None
                 self._inline_comment_editor_layout_widget = None
                 self._inline_comment_editor_initial_body = ""
+                self._inline_comment_editor_context = ""
                 self._inline_comment_editor_draft_index = None
                 self._inline_comment_editor_start_line = None
                 self._inline_comment_editor_start_side = None
