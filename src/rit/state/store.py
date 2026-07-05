@@ -8,7 +8,7 @@ from typing import Awaitable, Callable, Iterable, Literal
 from textual.message import Message
 
 from rit.core.types import FileDiff
-from rit.services import GitHubService
+from rit.services import GitHubError, GitHubService
 from rit.state.discussion_projection import (
     PRDiscussion,
     RecentDiscussion,
@@ -95,6 +95,7 @@ from rit.state.pr_merge import merge_pr_discussion, merge_pr_summary
 from rit.state.review_annotations import ReviewAnnotationIndex
 
 __all__ = (
+    "GitHubError",
     "PRStore",
     "PRStoreState",
     "UnsupportedInlineCommentTarget",

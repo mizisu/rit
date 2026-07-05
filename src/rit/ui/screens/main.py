@@ -14,7 +14,7 @@ from textual.worker import Worker, WorkerState
 
 from rit.app import RitApp
 from rit.state.models import FileViewedState, PRTeam, PRUser
-from rit.state.store import PRStore, UnsupportedInlineCommentTarget
+from rit.state.store import GitHubError, PRStore, UnsupportedInlineCommentTarget
 from rit.ui.components.file_changes import FileChanges
 from rit.ui.components.pr_info import PRInfo
 from rit.ui.messages import Flash
@@ -685,6 +685,7 @@ class MainScreen(Screen[None]):
             self._submit_review(event, body),
             exclusive=False,
             name="_submit_review",
+            exit_on_error=False,
         )
 
     @on(InlineCommentEditor.Submitted)
@@ -1072,6 +1073,7 @@ class MainScreen(Screen[None]):
                         "Failed to submit review",
                     ),
                     severity="error",
+                    markup=False,
                 )
             return
 
@@ -1121,7 +1123,7 @@ class MainScreen(Screen[None]):
     @staticmethod
     def _worker_error_message(worker: Worker, fallback: str) -> str:
         error = worker.error
-        if isinstance(error, UnsupportedInlineCommentTarget):
+        if isinstance(error, (UnsupportedInlineCommentTarget, GitHubError)):
             return str(error)
         return fallback
 

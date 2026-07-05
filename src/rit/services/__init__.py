@@ -1,3 +1,3 @@
-from rit.services.github import GitHubService
+from rit.services.github import GitHubError, GitHubService
 
-__all__ = ["GitHubService"]
+__all__ = ["GitHubError", "GitHubService"]
