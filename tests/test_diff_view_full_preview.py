@@ -1,7 +1,10 @@
 """Tests for full-file preview rendering."""
 
+from typing import cast
+
 import pytest
 from textual.app import App, ComposeResult
+from textual.widgets import Static
 
 from rit.core.diff import parse_patch
 from rit.state.store import PRStore
@@ -67,8 +70,10 @@ async def test_full_file_preview_renders_source_change_markers_only() -> None:
         await pilot.pause()
 
         prefix_texts = [
-            str(getattr(node.content, "plain", node.content))
-            for node in diff_view.query(".line-prefix")
+            str(getattr(prefix.content, "plain", prefix.content))
+            for prefix in (
+                cast(Static, node) for node in diff_view.query(".line-prefix")
+            )
         ]
 
         assert len(diff_view.query(".hunk-header")) == 0
@@ -77,7 +82,7 @@ async def test_full_file_preview_renders_source_change_markers_only() -> None:
 
 
 @pytest.mark.asyncio
-async def test_full_file_preview_sticky_header_tracks_line_and_section() -> None:
+async def test_full_file_preview_uses_file_header_without_docked_header() -> None:
     patch = """@@ -2,2 +2,2 @@
  line 2
 -line old
@@ -110,15 +115,12 @@ async def test_full_file_preview_sticky_header_tracks_line_and_section() -> None
         )
         await pilot.pause()
 
-        diff_view.cursor_line = 7
-        await pilot.pause()
+        file_header = diff_view.query_one("#file-header-0", Static)
+        file_header_text = str(
+            getattr(file_header.content, "plain", file_header.content)
+        )
 
-        header = diff_view.query_one("#diff-header")
-        header_text = str(getattr(header.content, "plain", header.content))
-
-        assert "preview.py" in header_text
-        assert "line 8/12" in header_text
-        assert "change hunk 2/2" in header_text
+        assert "preview.py" in file_header_text
 
 
 @pytest.mark.asyncio

@@ -100,7 +100,10 @@ def build_comment_map(view: DiffView) -> None:
     if not view.store or not view.current_file:
         return
 
-    file_paths = _file_paths_for_current_diff(view)
+    file_paths = _visible_comment_file_paths(view)
+    if not file_paths:
+        return
+
     for draft in _pending_comments_for_current_diff(view, file_paths):
         line_index = _resolve_pending_line_index(view, draft)
         if line_index is not None:
@@ -268,6 +271,14 @@ def _file_paths_for_current_diff(view: DiffView) -> AbstractSet[str]:
     if paths:
         return paths
     return {view.current_file} if view.current_file else set()
+
+
+def _visible_comment_file_paths(view: DiffView) -> AbstractSet[str]:
+    file_paths = _file_paths_for_current_diff(view)
+    folded_paths = getattr(view, "_folded_file_paths", frozenset())
+    if not folded_paths:
+        return file_paths
+    return file_paths - folded_paths
 
 
 def _pending_comments_for_current_diff(

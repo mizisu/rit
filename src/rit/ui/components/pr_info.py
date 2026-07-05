@@ -53,9 +53,9 @@ class PRInfo(Container):
         self._labels_widget: Static | None = None
         self._assignees_widget: Static | None = None
         self._reviewers_widget: Static | None = None
-        self._header_render_signature: tuple[str, int, str, str, str, int, int] | None = (
-            None
-        )
+        self._header_render_signature: (
+            tuple[str, int, str, str, str, int, int] | None
+        ) = None
         self._labels_render_signature: tuple[int, int, int, int, int] | None = None
         self._labels_render_text: str | None = None
         self._assignees_render_signature: tuple[int, int, int, int, int] | None = None
@@ -104,9 +104,6 @@ class PRInfo(Container):
 
     def on_resize(self, event: events.Resize) -> None:
         self._update_wide_state()
-
-    def on_click(self, event: events.Click) -> None:
-        pass
 
     def _update_wide_state(self) -> None:
         self.wide = self.size.width >= 120

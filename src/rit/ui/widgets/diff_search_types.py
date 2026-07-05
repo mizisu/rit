@@ -126,7 +126,6 @@ class SearchJumpUpdate:
     target_index: int
     flash_message: str | None
     flash_style: FlashStyle | None
-    update_status: bool
 
 
 @dataclass(frozen=True)
@@ -145,7 +144,6 @@ class SearchCloseUpdate:
     action: SearchCloseAction
     clear_state: bool
     refresh_display: bool
-    update_status: bool
     focus_view: bool
 
 

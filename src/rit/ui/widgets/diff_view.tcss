@@ -5,15 +5,6 @@ DiffView {
     layers: base search;
 }
 
-DiffView .diff-header {
-    dock: top;
-    padding: 0 1;
-    background: #181926;
-    border-bottom: solid #363a4f;
-    height: 3;
-    content-align: left middle;
-}
-
 DiffView #diff-content {
     width: 1fr;
     height: auto;
@@ -36,19 +27,15 @@ DiffView .file-diff-header {
     min-width: 100%;
     margin: 0;
     content-align: left middle;
-    outline-left: thick #8aadf4;
 }
 
-DiffView .file-diff-header.-added {
-    outline-left: thick #a6da95;
+DiffView .file-diff-header.-collapsed {
+    color: $text-muted;
 }
 
-DiffView .file-diff-header.-removed {
-    outline-left: thick #ed8796;
-}
-
-DiffView .file-diff-header.-renamed {
-    outline-left: thick #f5bde6;
+DiffView .folded-file-placeholder {
+    color: $text-muted;
+    text-style: italic;
 }
 
 DiffView .split-file-diff-header-scroll {
@@ -253,7 +240,6 @@ DiffView .diff-block-anchor {
     padding: 0;
 }
 
-DiffView .diff-header,
 DiffView #diff-thread-inspector-shell,
 DiffView #diff-content {
     layer: base;

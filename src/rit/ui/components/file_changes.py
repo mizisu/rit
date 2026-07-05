@@ -345,7 +345,9 @@ class FileChanges(Horizontal):
         if document is None:
             return False
 
-        line_index = document.file_line_starts.get(filename)
+        line_index = self.diff_view.file_start_line_index(filename)
+        if line_index is None:
+            line_index = document.file_line_starts.get(filename)
         if line_index is None:
             return False
 
@@ -356,8 +358,30 @@ class FileChanges(Horizontal):
     def _combined_file_for_line(self, line_index: int) -> str | None:
         return self._render_session.combined_file_for_line(line_index)
 
+    def current_diff_file_target(self) -> str | None:
+        """Return the real file represented by the current diff cursor."""
+        if self._showing_combined_files:
+            return (
+                self.diff_view.file_for_line_index(self.diff_view.cursor_line)
+                or self._combined_file_for_line(self.diff_view.cursor_line)
+                or self.store.state.selected_file
+            )
+        return self.diff_view.current_file
+
+    def sync_file_tree_to_diff_cursor(self) -> None:
+        """Move the file tree selection to the file under the diff cursor."""
+        filename = self.current_diff_file_target()
+        if filename is None:
+            return
+        if not any(file.filename == filename for file in self.store.state.files):
+            return
+        self.store.state.selected_file = filename
+        self.file_tree.select_file(filename, emit_message=False)
+
     def _sync_combined_selection_for_cursor(self) -> None:
-        filename = self._combined_file_for_line(self.diff_view.cursor_line)
+        filename = self.diff_view.file_for_line_index(
+            self.diff_view.cursor_line
+        ) or self._combined_file_for_line(self.diff_view.cursor_line)
         if filename is None:
             return
         if (
@@ -430,15 +454,6 @@ class FileChanges(Horizontal):
         if diff is None:
             return None
 
-        if diff.filename == COMBINED_DIFF_FILENAME:
-            document = self._render_session.combined_document
-            cached = (
-                document.line_index_for_location(filename, line, side)
-                if document is not None
-                else None
-            )
-            if cached is not None:
-                return cached
         return self.diff_view.line_index_for_location(filename, line, side)
 
     def _jump_to_diff_line(
@@ -706,8 +721,9 @@ class FileChanges(Horizontal):
     def update_file_view_state(self, filename: str) -> None:
         """Update viewed badge for a single file (no full tree rebuild)."""
         self.file_tree.update_view_state(filename)
-        if self.diff_view.current_file == filename:
+        if self.diff_view.current_file == filename or self._showing_combined_files:
             self.diff_view.refresh_header()
+            self.diff_view.refresh_viewed_folds()
 
     def _update_sidebar_width(self, new_width: int) -> None:
         MIN_WIDTH = 20

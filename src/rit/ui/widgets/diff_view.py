@@ -18,12 +18,13 @@ from textual.widget import Widget
 from textual.widgets import Input, Static, TextArea
 
 from rit.core.types import DiffLine, FileDiff
-from rit.state.models import PendingReviewComment, PRFile, ReviewThread
+from rit.state.models import FileViewedState, PendingReviewComment, PRFile, ReviewThread
 from rit.ui.messages import Flash
 from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets import diff_cursor as _cursor
 from rit.ui.widgets import diff_cursor_side as _cursor_side
 from rit.ui.widgets import diff_cursor_update as _cursor_update
+from rit.ui.widgets import diff_folding as _folding
 from rit.ui.widgets import diff_full_file_preview as _full_preview
 from rit.ui.widgets import diff_highlight as _hl
 from rit.ui.widgets import diff_location as _location
@@ -31,7 +32,6 @@ from rit.ui.widgets import diff_plan as _plan
 from rit.ui.widgets import diff_render as _render
 from rit.ui.widgets import diff_search as _search
 from rit.ui.widgets import diff_selection as _selection
-from rit.ui.widgets import diff_status as _status
 from rit.ui.widgets import diff_virtual as _virtual
 from rit.ui.widgets import diff_visual_mode as _visual_mode
 from rit.ui.widgets.comment_editor import InlineCommentEditor
@@ -229,6 +229,10 @@ class DiffView(VerticalScroll):
 
         self._virt = VirtualState()
         self._render_request_token: int = 0
+        self._source_diff: FileDiff | None = None
+        self._folded_file_paths: frozenset[str] = frozenset()
+        self._manually_folded_files: set[str] = set()
+        self._expanded_viewed_files: set[str] = set()
         self._suspend_split_state_rerender: bool = False
         self._suspend_scroll_virtual_window_watch: bool = False
         self._syncing_split_scroll: bool = False
@@ -247,7 +251,6 @@ class DiffView(VerticalScroll):
         self._row_anchor_widgets: dict[str, Widget] = {}
         self._hunk_header_widgets: dict[int, Widget] = {}
 
-        self._header_widget: Static | None = None
         self._search_bar_widget: Horizontal | None = None
         self._search_input_widget: Input | None = None
 
@@ -295,12 +298,6 @@ class DiffView(VerticalScroll):
         self.mode = mode
 
     def compose(self) -> ComposeResult:
-        yield Static(
-            "Select a file to view diff",
-            classes="diff-header",
-            id="diff-header",
-        )
-
         yield VerticalScroll(id="diff-content")
         with Horizontal(id="diff-search-bar"):
             yield Static("/", classes="search-prompt")
@@ -320,7 +317,6 @@ class DiffView(VerticalScroll):
     def watch_mode(self, new_mode: Literal["split", "unified", "auto"]) -> None:
         _render._update_split_state(self)
         _search.refresh_matches(self)
-        _cursor._queue_cursor_ui_flush(self, update_status_line=True)
 
     def watch_show_line_numbers(self, old_value: bool, new_value: bool) -> None:
         if old_value == new_value or not self.is_mounted or not self._all_lines:
@@ -346,13 +342,9 @@ class DiffView(VerticalScroll):
             name="diff-word-diff-rerender",
         )
 
-    def watch_current_hunk_index(self, _old_index: int, _new_index: int) -> None:
-        _cursor._queue_cursor_ui_flush(self, update_status_line=True)
-
     def on_resize(self) -> None:
         _render._update_split_state(self)
         _search.refresh_matches(self)
-        _cursor._queue_cursor_ui_flush(self, update_status_line=True)
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
@@ -366,12 +358,10 @@ class DiffView(VerticalScroll):
 
     def on_mount(self) -> None:
         self.can_focus = True
-        self._header_widget = self.query_one("#diff-header", Static)
         self._search_bar_widget = self.query_one("#diff-search-bar", Horizontal)
         self._search_input_widget = self.query_one("#diff-search-input", Input)
 
         self._content_widget = self.query_one("#diff-content", VerticalScroll)
-        self._update_status_line()
         if not self._highlighter_prewarm_started:
             self._highlighter_prewarm_started = True
             self.run_worker(
@@ -478,9 +468,6 @@ class DiffView(VerticalScroll):
             for line_idx in old_selection_specs:
                 _selection._clear_line_selection(self, line_idx)
 
-        if update.update_status_line:
-            self._update_status_line()
-
     def watch_visual_type(
         self, old_type: Literal["char", "line"], new_type: Literal["char", "line"]
     ) -> None:
@@ -492,14 +479,10 @@ class DiffView(VerticalScroll):
         if update.sub_title is not None:
             self.app.sub_title = update.sub_title
         queue_update = _visual_mode.visual_queue_update(update)
-        if (
-            queue_update.selection_dirty_lines is not None
-            or queue_update.update_status_line
-        ):
+        if queue_update.selection_dirty_lines is not None:
             _cursor._queue_cursor_ui_flush(
                 self,
                 selection_dirty_lines=queue_update.selection_dirty_lines,
-                update_status_line=queue_update.update_status_line,
             )
 
     def watch_visual_anchor_line(
@@ -518,14 +501,10 @@ class DiffView(VerticalScroll):
             cursor_line=self.cursor_line,
         )
         queue_update = _visual_mode.visual_queue_update(update)
-        if (
-            queue_update.selection_dirty_lines is not None
-            or queue_update.update_status_line
-        ):
+        if queue_update.selection_dirty_lines is not None:
             _cursor._queue_cursor_ui_flush(
                 self,
                 selection_dirty_lines=queue_update.selection_dirty_lines,
-                update_status_line=queue_update.update_status_line,
             )
 
     # ------------------------------------------------------------------
@@ -560,6 +539,15 @@ class DiffView(VerticalScroll):
 
         if event.key == "enter":
             if _comments.try_toggle_current(self):
+                event.stop()
+                event.prevent_default()
+                return
+            if self._can_toggle_current_file_fold():
+                self.run_worker(
+                    self.toggle_current_file_fold(),
+                    exclusive=True,
+                    name="diff-toggle-file-fold",
+                )
                 event.stop()
                 event.prevent_default()
                 return
@@ -687,7 +675,126 @@ class DiffView(VerticalScroll):
 
     @property
     def current_diff(self) -> FileDiff | None:
-        return self._diff
+        return self._source_diff or self._diff
+
+    def _render_diff_for_source(self, diff: FileDiff) -> FileDiff:
+        if self._showing_full_file:
+            self._folded_file_paths = frozenset()
+            return diff
+
+        render_diff, folded_files = _folding.build_viewed_file_fold_diff(
+            diff,
+            is_collapsed=self._should_collapse_file,
+        )
+        self._folded_file_paths = folded_files
+        return render_diff
+
+    def _should_collapse_file(self, filename: str) -> bool:
+        if not filename:
+            return False
+        if filename in self._manually_folded_files:
+            return True
+        if filename in self._expanded_viewed_files:
+            return False
+        return self._file_viewed_state(filename) == FileViewedState.VIEWED
+
+    def _file_viewed_state(self, filename: str) -> FileViewedState:
+        file = self._file_for_path(filename)
+        if file is None:
+            return FileViewedState.UNVIEWED
+        return file.viewer_viewed_state
+
+    def _file_for_path(self, filename: str) -> PRFile | None:
+        if self._file is not None and self._file.filename == filename:
+            return self._file
+        if self.store is None:
+            return None
+
+        state = self.store.state
+        files_by_filename = getattr(state, "files_by_filename", None)
+        if files_by_filename is not None:
+            file = files_by_filename.get(filename)
+            if file is not None:
+                return file
+        files = getattr(state, "files", ())
+        return next((file for file in files if file.filename == filename), None)
+
+    def _is_file_folded(self, filename: str) -> bool:
+        return filename in self._folded_file_paths
+
+    def _current_fold_target(self) -> str | None:
+        line = self._current_line()
+        if line is not None and line.file_path:
+            return line.file_path
+        if self.current_file:
+            return self.current_file
+        return None
+
+    def _can_toggle_current_file_fold(self) -> bool:
+        return self._current_fold_target() is not None and self._source_diff is not None
+
+    def _first_line_index_for_file(self, filename: str) -> int | None:
+        for line in self._all_lines:
+            if line.file_path == filename:
+                return line.line_index
+        if filename == self.current_file and self._all_lines:
+            return 0
+        return None
+
+    def file_start_line_index(self, filename: str) -> int | None:
+        """Return the first visible line for a file in the rendered diff."""
+        return self._first_line_index_for_file(filename)
+
+    def file_for_line_index(self, line_index: int) -> str | None:
+        """Return the file represented by a visible rendered line."""
+        if 0 <= line_index < len(self._all_lines):
+            return self._all_lines[line_index].file_path or self.current_file
+        return None
+
+    async def toggle_current_file_fold(self) -> bool:
+        filename = self._current_fold_target()
+        if filename is None:
+            return False
+
+        if filename in self._folded_file_paths:
+            self._manually_folded_files.discard(filename)
+            if self._file_viewed_state(filename) == FileViewedState.VIEWED:
+                self._expanded_viewed_files.add(filename)
+        else:
+            self._manually_folded_files.add(filename)
+            self._expanded_viewed_files.discard(filename)
+
+        source = self._source_diff or self._diff
+        current_file = self.current_file
+        if source is None or current_file is None:
+            return False
+
+        await self.show_diff(current_file, source, preserve_full_file_state=True)
+        target_line = self._first_line_index_for_file(filename)
+        if target_line is not None:
+            self.jump_to_line_index(target_line, side="RIGHT", focus=self.has_focus)
+        return True
+
+    def refresh_viewed_folds(self) -> None:
+        """Refresh folded viewed-file bodies after viewed states change."""
+        source = self._source_diff or self._diff
+        current_file = self.current_file
+        if source is None or current_file is None or not self.is_mounted:
+            return
+        self.run_worker(
+            self._refresh_viewed_folds(source, current_file),
+            exclusive=True,
+            name="diff-viewed-fold-refresh",
+        )
+
+    async def _refresh_viewed_folds(self, source: FileDiff, current_file: str) -> None:
+        target_file = self._current_fold_target()
+        await self.show_diff(current_file, source, preserve_full_file_state=True)
+        if target_file is None:
+            return
+        target_line = self._first_line_index_for_file(target_file)
+        if target_line is not None:
+            self.jump_to_line_index(target_line, side="RIGHT", focus=self.has_focus)
 
     def line_index_for_location(
         self,
@@ -993,9 +1100,6 @@ class DiffView(VerticalScroll):
             return self._hunk_index_by_line[line_index]
         return None
 
-    def _dock_header_height(self) -> int:
-        return _cursor._dock_header_height(self)
-
     def _half_page_step(self) -> int:
         return _cursor._half_page_step(self)
 
@@ -1176,6 +1280,7 @@ class DiffView(VerticalScroll):
                 self._inline_comment_editor_start_side = None
 
             self.current_file = filename
+            self._source_diff = diff
             self._diff = diff
             self.current_hunk_index = 0
 
@@ -1258,6 +1363,9 @@ class DiffView(VerticalScroll):
             else:
                 self._file = None
 
+            diff = self._render_diff_for_source(diff)
+            self._diff = diff
+
             plan = _plan.build_diff_plan(diff, include_rendered_rows=False)
             self._all_lines = plan.all_lines
             self._diff_file_paths = plan.file_paths
@@ -1304,8 +1412,8 @@ class DiffView(VerticalScroll):
             await asyncio.to_thread(lambda: _render._precompute_diff_data(self))
 
     def refresh_header(self) -> None:
-        """Re-render the diff header badge without re-rendering diff content."""
-        self._update_status_line()
+        """Re-render visible file headers."""
+        _render._refresh_file_header_widgets(self)
 
     def refresh_thread_metadata(self) -> None:
         """Refresh inline thread metadata without rebuilding diff rows."""
@@ -1339,20 +1447,6 @@ class DiffView(VerticalScroll):
             self._run_render_diff_for_request(self._render_request_token),
             exclusive=True,
             name="diff-theme-rerender",
-        )
-
-    def _update_status_line(self) -> None:
-        header = self._header_widget
-        if header is None:
-            return
-
-        header.update(
-            _status.build_status_line(
-                _render._build_header_text(self),
-                search_query=self._search_query,
-                search_match_count=len(self._search_matches),
-                search_match_index=self._search_match_index,
-            )
         )
 
     # ------------------------------------------------------------------
@@ -1398,7 +1492,7 @@ class DiffView(VerticalScroll):
         await self.show_full_file_preview(
             self.current_file,
             content,
-            source_diff=self._diff,
+            source_diff=self._source_diff or self._diff,
         )
 
     async def show_full_file_preview(
@@ -1411,7 +1505,7 @@ class DiffView(VerticalScroll):
         restore_diff: FileDiff | None = None,
     ) -> None:
         self._saved_filename = restore_filename or self.current_file
-        self._saved_diff = restore_diff or self._diff
+        self._saved_diff = restore_diff or self._source_diff or self._diff
         self._saved_restore_position = self._full_file_restore_position()
         anchor_line_no = self._full_file_preview_anchor_line_no(
             filename,

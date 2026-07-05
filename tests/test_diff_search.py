@@ -5,13 +5,15 @@ import pytest
 from textual.content import Content
 
 from rit.core.types import DiffLine
-from rit.ui.widgets import diff_search
-from rit.ui.widgets import diff_search_bar
-from rit.ui.widgets import diff_search_display
 from rit.ui.widgets import diff_blocks as diff_blocks_module
-from rit.ui.widgets import diff_search_matching
-from rit.ui.widgets import diff_search_match_index
-from rit.ui.widgets import diff_search_policy
+from rit.ui.widgets import (
+    diff_search,
+    diff_search_bar,
+    diff_search_display,
+    diff_search_match_index,
+    diff_search_matching,
+    diff_search_policy,
+)
 from rit.ui.widgets.diff_search_types import SearchRefreshUpdate
 from rit.ui.widgets.diff_types import DiffSearchMatch, RenderedRow
 
@@ -40,7 +42,9 @@ def test_search_sides_for_line_searches_both_sides_for_split_modified_line() -> 
     ) == ("old", "new")
 
 
-def test_search_sides_for_line_uses_existing_side_for_split_single_sided_lines() -> None:
+def test_search_sides_for_line_uses_existing_side_for_split_single_sided_lines() -> (
+    None
+):
     assert diff_search.search_sides_for_line(
         row_mode="split",
         row_side="old",
@@ -183,17 +187,23 @@ def test_search_match_columns_returns_empty_for_empty_query_or_text() -> None:
 
 
 def test_search_match_style_uses_stronger_warning_for_active_match() -> None:
-    assert diff_search.search_match_style(
-        match_index=2,
-        active_match_index=2,
-    ) == "on $warning 45%"
+    assert (
+        diff_search.search_match_style(
+            match_index=2,
+            active_match_index=2,
+        )
+        == "on $warning 45%"
+    )
 
 
 def test_search_match_style_uses_softer_warning_for_inactive_match() -> None:
-    assert diff_search.search_match_style(
-        match_index=1,
-        active_match_index=2,
-    ) == "on $warning 25%"
+    assert (
+        diff_search.search_match_style(
+            match_index=1,
+            active_match_index=2,
+        )
+        == "on $warning 25%"
+    )
 
 
 def test_search_matches_for_text_builds_matches_with_row_metadata() -> None:
@@ -796,8 +806,7 @@ def test_search_match_index_at_cursor_uses_indexed_lookup_without_prefix_scan() 
             raise AssertionError("cursor match lookup should not scan match prefix")
 
     matches = IndexedMatches(
-        [_match(i, i, "auto", 0) for i in range(1000)]
-        + [_match(1000, 1000, "old", 4)]
+        [_match(i, i, "auto", 0) for i in range(1000)] + [_match(1000, 1000, "old", 4)]
     )
 
     assert (
@@ -1057,7 +1066,6 @@ def test_search_jump_update_reports_inactive_search() -> None:
         target_index=-1,
         flash_message="No active search",
         flash_style="warning",
-        update_status=False,
     )
 
 
@@ -1073,7 +1081,6 @@ def test_search_jump_update_reports_active_query_without_matches() -> None:
         target_index=-1,
         flash_message="No matches: needle",
         flash_style="warning",
-        update_status=True,
     )
 
 
@@ -1089,26 +1096,31 @@ def test_search_jump_update_activates_next_target() -> None:
         target_index=2,
         flash_message=None,
         flash_style=None,
-        update_status=False,
     )
 
 
 def test_search_submission_request_ignores_missing_query() -> None:
-    assert diff_search.search_submission_request(None) == diff_search.SearchSubmissionRequest(
+    assert diff_search.search_submission_request(
+        None
+    ) == diff_search.SearchSubmissionRequest(
         action="ignore",
         query="",
     )
 
 
 def test_search_submission_request_clears_blank_query() -> None:
-    assert diff_search.search_submission_request("  \t ") == diff_search.SearchSubmissionRequest(
+    assert diff_search.search_submission_request(
+        "  \t "
+    ) == diff_search.SearchSubmissionRequest(
         action="clear",
         query="",
     )
 
 
 def test_search_submission_request_normalizes_search_query() -> None:
-    assert diff_search.search_submission_request("  needle  ") == diff_search.SearchSubmissionRequest(
+    assert diff_search.search_submission_request(
+        "  needle  "
+    ) == diff_search.SearchSubmissionRequest(
         action="search",
         query="needle",
     )
@@ -1256,7 +1268,6 @@ def test_search_close_update_ignores_missing_or_hidden_bar() -> None:
         action="ignore",
         clear_state=False,
         refresh_display=False,
-        update_status=False,
         focus_view=False,
     )
 
@@ -1270,7 +1281,6 @@ def test_search_close_update_closes_visible_bar_with_requested_clear_state() -> 
         action="close",
         clear_state=True,
         refresh_display=True,
-        update_status=True,
         focus_view=True,
     )
 
@@ -1322,9 +1332,6 @@ def test_close_search_closes_visible_bar_clears_and_refreshes(
         def focus(self) -> None:
             calls.append("focus")
 
-        def _update_status_line(self) -> None:
-            calls.append("status")
-
     def clear_state(view: object) -> None:
         calls.append("clear")
 
@@ -1332,13 +1339,15 @@ def test_close_search_closes_visible_bar_clears_and_refreshes(
         calls.append("refresh")
 
     monkeypatch.setattr(diff_search_bar, "clear_state", clear_state)
-    monkeypatch.setattr(diff_search_bar, "refresh_search_display", refresh_search_display)
+    monkeypatch.setattr(
+        diff_search_bar, "refresh_search_display", refresh_search_display
+    )
 
     view = View()
     diff_search.close_search(view, clear_query=True)
 
     assert view._search_bar_widget.display is False
-    assert calls == ["clear", "refresh", "status", "focus"]
+    assert calls == ["clear", "refresh", "focus"]
 
 
 def test_close_search_ignores_missing_or_hidden_bar() -> None:

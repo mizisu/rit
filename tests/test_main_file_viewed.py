@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -13,6 +14,46 @@ class CaptureFileChanges:
 
     def update_file_view_state(self, filename: str) -> None:
         self.updated.append(filename)
+
+
+def test_toggle_file_viewed_uses_combined_diff_cursor_file() -> None:
+    file = PRFile(filename="one.py")
+    updates: list[str] = []
+
+    class DiffView:
+        has_focus = True
+        current_file = "All files"
+
+    class FileChanges:
+        diff_view = DiffView()
+
+        def current_diff_file_target(self) -> str:
+            return "one.py"
+
+        def update_file_view_state(self, filename: str) -> None:
+            updates.append(filename)
+
+    class TestScreen(MainScreen):
+        @property
+        def file_changes(self) -> FileChanges:
+            return FileChanges()
+
+        def run_worker(self, coro, *args: object, **kwargs: object) -> None:
+            coro.close()
+
+    screen = TestScreen(owner="test", repo="repo", pr_number=123)
+    screen.current_tab = 1
+    screen.store = cast(
+        Any,
+        SimpleNamespace(
+            state=SimpleNamespace(files=[file], pr=object(), selected_file="two.py")
+        ),
+    )
+
+    screen.action_toggle_file_viewed()
+
+    assert file.viewer_viewed_state == FileViewedState.VIEWED
+    assert updates == ["one.py"]
 
 
 @pytest.mark.asyncio
@@ -39,7 +80,7 @@ async def test_sync_file_viewed_reraises_unexpected_success_flash_errors() -> No
                 raise RuntimeError("flash dispatch failed")
 
     screen = TestScreen(owner="test", repo="repo", pr_number=123)
-    screen.store = Store()
+    screen.store = cast(Any, Store())
 
     with pytest.raises(RuntimeError, match="flash dispatch failed"):
         await screen._sync_file_viewed(

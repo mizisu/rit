@@ -81,7 +81,6 @@ class ViewportGeometry:
     scroll_y: int
     viewport_height: int
     max_scroll_y: int
-    dock_header_height: int = 0
 
 
 def render_height_for_line(line: DiffLine, *, split: bool) -> int:
@@ -181,7 +180,6 @@ def viewport_center_line(
     line_bottom_offsets: list[int],
     virtual_content_height: int,
     scroll_y: int,
-    dock_header_height: int,
     viewport_height: int,
 ) -> int:
     if not line_top_offsets:

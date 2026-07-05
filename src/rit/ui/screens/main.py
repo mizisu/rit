@@ -769,7 +769,7 @@ class MainScreen(Screen[None]):
 
         diff = self.store.get_file_diff(current_file)
         if diff is None and diff_view.current_file == current_file:
-            diff = diff_view._diff
+            diff = diff_view.current_diff
         if diff is None:
             return
 
@@ -797,7 +797,7 @@ class MainScreen(Screen[None]):
         diff_view = self.file_changes.diff_view
         diff = self.store.get_file_diff(current_file)
         if diff is None and diff_view.current_file == current_file:
-            diff = diff_view._diff
+            diff = diff_view.current_diff
         if diff is None:
             return
 
@@ -1207,6 +1207,7 @@ class MainScreen(Screen[None]):
             return
         if not self.file_changes.file_tree.display:
             self.file_changes.show_file_tree()
+        self.file_changes.sync_file_tree_to_diff_cursor()
         self._focus_files_tree()
 
     def action_toggle_file_tree(self) -> None:
@@ -1315,14 +1316,15 @@ class MainScreen(Screen[None]):
         )
 
     def _apply_viewed_states(self) -> None:
-        """Refresh tree and diff header after background viewed-state load."""
+        """Refresh tree and diff after background viewed-state load."""
         self.file_changes.file_tree.refresh_files()
         self.file_changes.diff_view.refresh_header()
+        self.file_changes.diff_view.refresh_viewed_folds()
 
     def _resolve_file_view_target(self) -> str | None:
         diff_view = self.file_changes.diff_view
         if diff_view.has_focus and diff_view.current_file:
-            return diff_view.current_file
+            return self.file_changes.current_diff_file_target()
 
         file_tree = self.file_changes.file_tree
         tree = file_tree.query_one("#file-tree", Tree)

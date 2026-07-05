@@ -61,7 +61,6 @@ def handle_changed(view: DiffView, value: str) -> None:
     refresh_search_display(view)
     if update.reveal_index is not None:
         reveal_match(view, update.reveal_index)
-    view._update_status_line()
 
 
 def handle_submitted(view: DiffView, query: str | None) -> None:
@@ -92,7 +91,6 @@ def handle_submitted(view: DiffView, query: str | None) -> None:
         refresh_search_display(view)
         assert update.flash_message is not None
         view.post_message(Flash(update.flash_message, duration=1.5))
-        view._update_status_line()
         return
 
     view._search_query = update.query
@@ -103,7 +101,6 @@ def handle_submitted(view: DiffView, query: str | None) -> None:
         assert update.flash_message is not None
         assert update.flash_style is not None
         view.post_message(Flash(update.flash_message, style=update.flash_style))
-        view._update_status_line()
         return
 
     refresh_search_display(view)

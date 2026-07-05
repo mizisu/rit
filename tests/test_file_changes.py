@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Sequence
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -12,7 +13,7 @@ from textual.widgets import Static
 from rit.core.diff import parse_patch
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.services.github import PRDiscussion
-from rit.state.models import PR, LoadingState, PRFile
+from rit.state.models import PR, FileViewedState, LoadingState, PRFile
 from rit.state.store import PRStore
 from rit.ui.components import file_changes as file_changes_module
 from rit.ui.components.combined_diff import CombinedDiffDocument
@@ -145,6 +146,33 @@ def test_combined_file_line_starts_reuses_document_map_without_copy(
     )
 
     assert file_changes._combined_file_line_starts is line_starts
+
+
+def test_sync_file_tree_to_diff_cursor_selects_known_cursor_file() -> None:
+    class FileTreeStub:
+        selected: tuple[str, bool] | None = None
+
+        def select_file(self, filename: str, *, emit_message: bool = True) -> None:
+            self.selected = (filename, emit_message)
+
+    state = SimpleNamespace(
+        files=[PRFile(filename="one.py"), PRFile(filename="two.py")],
+        selected_file="one.py",
+    )
+    file_tree = FileTreeStub()
+
+    class FileChangesStub:
+        def __init__(self) -> None:
+            self.store = SimpleNamespace(state=state)
+            self.file_tree = file_tree
+
+        def current_diff_file_target(self) -> str | None:
+            return "two.py"
+
+    FileChanges.sync_file_tree_to_diff_cursor(cast(FileChanges, FileChangesStub()))
+
+    assert state.selected_file == "two.py"
+    assert file_tree.selected == ("two.py", False)
 
 
 def test_store_get_file_diff_parses_lazily_and_caches_status_metadata() -> None:
@@ -676,6 +704,7 @@ async def test_combined_diff_uses_prominent_file_headers_without_hunk_headers() 
             patch=patch,
             additions=12,
             deletions=3,
+            viewer_viewed_state=FileViewedState.VIEWED,
         ),
         PRFile(
             filename="two.py",
@@ -709,6 +738,8 @@ async def test_combined_diff_uses_prominent_file_headers_without_hunk_headers() 
         assert "one.py" in header_text
         assert "+12" in header_text
         assert "-3" in header_text
+        assert "■■■■■" in header_text
+        assert "Viewed" in header_text
         assert "Unviewed" not in header_text
         assert "Modified" not in header_text
         assert "[M]" not in header_text
@@ -721,6 +752,43 @@ async def test_combined_diff_uses_prominent_file_headers_without_hunk_headers() 
         await pilot.pause()
 
         assert first_header.outer_size.width == file_changes.diff_view.outer_size.width
+
+
+@pytest.mark.asyncio
+async def test_file_view_state_update_refreshes_combined_file_header_label() -> None:
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename="one.py", status="modified", patch=patch),
+        PRFile(filename="two.py", status="modified", patch=patch),
+    ]
+    store.state.file_diffs = {
+        filename: parse_patch(patch, filename) for filename in ["one.py", "two.py"]
+    }
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await pilot.pause()
+        await pilot.pause()
+
+        first_header = file_changes.diff_view.query_one("#file-header-0", Static)
+        assert "Unviewed" in str(
+            getattr(first_header.content, "plain", first_header.content)
+        )
+
+        store.state.files[0].viewer_viewed_state = FileViewedState.VIEWED
+        file_changes.update_file_view_state("one.py")
+        await pilot.pause()
+
+        header_text = str(getattr(first_header.content, "plain", first_header.content))
+        assert "Viewed" in header_text
+        assert "Unviewed" not in header_text
 
 
 def test_file_header_prefers_current_file_stats_over_stale_hunk_metadata() -> None:
@@ -886,7 +954,7 @@ def test_file_header_width_accounts_for_rename_display_path_without_viewport() -
 
     assert isinstance(header, Static)
     header_text = str(getattr(header.content, "plain", header.content))
-    assert header_text == "▾ old/location.py -> new.py  +1"
+    assert header_text == "▾ old/location.py -> new.py  +1  ■■■■■  Unviewed"
 
 
 @pytest.mark.asyncio

@@ -43,7 +43,9 @@ def reveal_match(view: DiffView, index: int) -> None:
     update = search_reveal_update(
         target_exists=True,
         has_target_widget=target_widget is not None,
-        target_visible=False if target_widget is not None else view._row_is_visible(target_row),
+        target_visible=False
+        if target_widget is not None
+        else view._row_is_visible(target_row),
     )
     if update.action == "scroll_widget":
         assert target_widget is not None
@@ -103,7 +105,6 @@ def activate_match(view: DiffView, index: int) -> None:
         update_active_pane=activation.update_active_pane,
     )
     view._scroll_to_cursor_horizontal()
-    view._update_status_line()
 
 
 def jump_match(view: DiffView, direction: Literal[-1, 1]) -> None:
@@ -123,8 +124,6 @@ def jump_match(view: DiffView, direction: Literal[-1, 1]) -> None:
         assert update.flash_message is not None
         assert update.flash_style is not None
         view.post_message(Flash(update.flash_message, style=update.flash_style))
-        if update.update_status:
-            view._update_status_line()
         return
 
     activate_match(view, update.target_index)

@@ -1,83 +1,41 @@
-"""Header text construction for DiffView."""
+"""File header text construction for DiffView."""
 
 from __future__ import annotations
 
 from rich.cells import cell_len
-from rich.markup import escape
 from rich.text import Text
 
 from rit.core.types import FileDiff
-from rit.state.models import FileViewedState, PRFile
+from rit.state.models import FileViewedState
 
-FILE_HEADER_CHROME_WIDTH = 8
+FILE_HEADER_DIFFSTAT_BLOCKS = 5
+_FILE_HEADER_PREFIX_WIDTH = cell_len("▾ ")
+_FILE_HEADER_STATS_GAP_WIDTH = cell_len("  ")
+_FILE_HEADER_DIFFSTAT_GAP_WIDTH = cell_len("  ")
+_FILE_HEADER_VIEWED_GAP_WIDTH = cell_len("  ")
+_FILE_HEADER_VIEWED_LABEL_WIDTH = cell_len("Unviewed")
+_FILE_HEADER_EXTRA_WIDTH = 4
+FILE_HEADER_CHROME_WIDTH = (
+    _FILE_HEADER_PREFIX_WIDTH
+    + _FILE_HEADER_STATS_GAP_WIDTH
+    + _FILE_HEADER_DIFFSTAT_GAP_WIDTH
+    + FILE_HEADER_DIFFSTAT_BLOCKS
+    + _FILE_HEADER_VIEWED_GAP_WIDTH
+    + _FILE_HEADER_VIEWED_LABEL_WIDTH
+    + _FILE_HEADER_EXTRA_WIDTH
+)
 
 __all__ = (
     "FILE_HEADER_CHROME_WIDTH",
+    "FILE_HEADER_DIFFSTAT_BLOCKS",
     "aggregate_file_change_stats",
     "append_change_stats",
-    "build_diff_header_text",
     "build_file_header_text",
-    "change_stats_markup",
     "change_stats_plain",
     "file_header_min_width",
+    "file_header_path_budget",
     "truncate_middle",
-    "viewed_state_badge",
 )
-
-
-def build_diff_header_text(
-    *,
-    current_file: str | None,
-    file: PRFile | None,
-    showing_full_file: bool,
-    preview_location: str,
-) -> str:
-    """Build the diff header text including viewed and preview status."""
-    if not current_file:
-        return "Select a file to view diff"
-
-    path = escape(current_file)
-    status_parts: list[str] = []
-    if file is not None:
-        state_badge, state_style = viewed_state_badge(file)
-        status_parts.extend(
-            [
-                f"[{state_style}]{state_badge}[/]",
-                change_stats_markup(file.additions, file.deletions),
-            ]
-        )
-
-    if showing_full_file:
-        status_parts.append("[dim italic]preview[/]")
-        if preview_location:
-            status_parts.append(f"[dim]{escape(preview_location)}[/]")
-
-    if not status_parts:
-        return f"[bold #cad3f5]{path}[/]"
-
-    return f"[bold #cad3f5]{path}[/]  " + "  [dim]|[/]  ".join(status_parts)
-
-
-def viewed_state_badge(file: PRFile | None) -> tuple[str, str]:
-    """Return display text and style for a file viewed state."""
-    state = file.viewer_viewed_state if file is not None else FileViewedState.UNVIEWED
-    if state == FileViewedState.VIEWED:
-        return "✓ Viewed", "bold #a6da95"
-    if state == FileViewedState.DISMISSED:
-        return "! Changed", "bold #eed49f"
-    return "● Unviewed", "#6e738d"
-
-
-def change_stats_markup(additions: int, deletions: int) -> str:
-    """Return Rich markup for file addition/deletion counts."""
-    parts: list[str] = []
-    if deletions:
-        parts.append(f"[bold #ed8796]-{deletions}[/]")
-    if additions:
-        parts.append(f"[bold #a6da95]+{additions}[/]")
-    if not parts:
-        return "[dim]no textual changes[/]"
-    return " ".join(parts)
 
 
 def change_stats_plain(additions: int, deletions: int) -> str:
@@ -104,6 +62,34 @@ def append_change_stats(text: Text, additions: int, deletions: int) -> None:
         text.append("no textual changes", style="dim")
 
 
+def _append_diffstat_bar(text: Text, additions: int, deletions: int) -> None:
+    total = additions + deletions
+    if total <= 0:
+        text.append("□" * FILE_HEADER_DIFFSTAT_BLOCKS, style="#6e738d")
+        return
+
+    added_blocks = round(FILE_HEADER_DIFFSTAT_BLOCKS * additions / total)
+    if additions and not added_blocks:
+        added_blocks = 1
+    if deletions and added_blocks == FILE_HEADER_DIFFSTAT_BLOCKS:
+        added_blocks -= 1
+
+    deleted_blocks = FILE_HEADER_DIFFSTAT_BLOCKS - added_blocks
+    if added_blocks:
+        text.append("■" * added_blocks, style="bold #a6da95")
+    if deleted_blocks:
+        text.append("■" * deleted_blocks, style="bold #ed8796")
+
+
+def _append_viewed_label(text: Text, state: FileViewedState) -> None:
+    if state == FileViewedState.VIEWED:
+        text.append("Viewed", style="bold #a6da95")
+    elif state == FileViewedState.DISMISSED:
+        text.append("Changed", style="bold #eed49f")
+    else:
+        text.append("Unviewed", style="#6e738d")
+
+
 def build_file_header_text(
     *,
     path: str,
@@ -111,13 +97,15 @@ def build_file_header_text(
     additions: int,
     deletions: int,
     path_budget: int,
+    viewed_state: FileViewedState = FileViewedState.UNVIEWED,
+    collapsed: bool = False,
 ) -> Text:
-    """Build the Rich text used by combined-file diff headers."""
+    """Build the Rich text used by file diff headers."""
     full_path = _file_header_display_path(path=path, old_path=old_path)
     display_path = truncate_middle(full_path, path_budget)
 
     text = Text()
-    text.append("▾", style="#6e738d")
+    text.append("▸" if collapsed else "▾", style="#6e738d")
     text.append(" ")
     if old_path and old_path != path and display_path == full_path:
         text.append(old_path, style="dim")
@@ -127,6 +115,10 @@ def build_file_header_text(
         text.append(display_path, style="bold #cad3f5")
     text.append("  ")
     append_change_stats(text, additions, deletions)
+    text.append("  ")
+    _append_diffstat_bar(text, additions, deletions)
+    text.append("  ")
+    _append_viewed_label(text, viewed_state)
     return text
 
 
@@ -137,6 +129,20 @@ def file_header_min_width(*, path: str, old_path: str | None, stats_plain: str) 
         + cell_len(stats_plain)
         + FILE_HEADER_CHROME_WIDTH
     )
+
+
+def file_header_path_budget(width: int, *, stats_plain: str) -> int:
+    """Return the path cell budget for a rendered file header width."""
+    non_path_width = (
+        _FILE_HEADER_PREFIX_WIDTH
+        + _FILE_HEADER_STATS_GAP_WIDTH
+        + cell_len(stats_plain)
+        + _FILE_HEADER_DIFFSTAT_GAP_WIDTH
+        + FILE_HEADER_DIFFSTAT_BLOCKS
+        + _FILE_HEADER_VIEWED_GAP_WIDTH
+        + _FILE_HEADER_VIEWED_LABEL_WIDTH
+    )
+    return max(4, width - non_path_width)
 
 
 def aggregate_file_change_stats(diff: FileDiff | None, path: str) -> tuple[int, int]:

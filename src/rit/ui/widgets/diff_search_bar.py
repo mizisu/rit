@@ -52,8 +52,6 @@ def close_search(view: DiffView, *, clear_query: bool) -> None:
         clear_state(view)
     if update.refresh_display:
         refresh_search_display(view)
-    if update.update_status:
-        view._update_status_line()
     if update.focus_view:
         view.focus()
 

@@ -132,6 +132,36 @@ def test_focus_files_tree_reraises_unexpected_focus_errors() -> None:
         screen._focus_files_tree()
 
 
+def test_focus_file_tree_syncs_tree_to_current_diff_file_before_focus() -> None:
+    tree = FocusTarget()
+    calls: list[str] = []
+
+    class FileChanges:
+        file_tree = SimpleNamespace(
+            display=True,
+            has_focus_within=False,
+            query_one=lambda *_args: tree,
+        )
+
+        def sync_file_tree_to_diff_cursor(self) -> None:
+            calls.append("sync")
+
+    file_changes = FileChanges()
+
+    class TestScreen(MainScreen):
+        @property
+        def file_changes(self):
+            return file_changes
+
+    screen = TestScreen(owner="test", repo="repo", pr_number=123)
+    screen.current_tab = 1
+
+    screen.action_focus_file_tree()
+
+    assert calls == ["sync"]
+    assert tree.focused is True
+
+
 def test_toggle_file_tree_focuses_tree_when_opening() -> None:
     tree = FocusTarget()
     file_changes = ToggleFileChanges(tree)

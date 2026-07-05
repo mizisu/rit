@@ -1,65 +1,18 @@
-from rich.text import Text
 from rich.cells import cell_len
+from rich.text import Text
 
 from rit.core.types import DiffHunk, DiffLine, FileDiff
-from rit.state.models import FileViewedState, PRFile
+from rit.state.models import FileViewedState
 from rit.ui.widgets.diff_header import (
+    FILE_HEADER_CHROME_WIDTH,
     aggregate_file_change_stats,
     append_change_stats,
     build_file_header_text,
-    build_diff_header_text,
     change_stats_plain,
     file_header_min_width,
+    file_header_path_budget,
     truncate_middle,
 )
-
-
-def test_build_diff_header_text_escapes_path_markup() -> None:
-    file = PRFile(filename="src/[red]app.py", additions=2, deletions=1)
-
-    text = build_diff_header_text(
-        current_file="src/[red]app.py",
-        file=file,
-        showing_full_file=False,
-        preview_location="",
-    )
-
-    assert "[bold #cad3f5]src/\\[red]app.py[/]" in text
-    assert "● Unviewed" in text
-    assert "[bold #ed8796]-1[/] [bold #a6da95]+2[/]" in text
-
-
-def test_build_diff_header_text_includes_preview_location_when_showing_full_file() -> None:
-    file = PRFile(
-        filename="src/app.py",
-        additions=0,
-        deletions=0,
-        viewer_viewed_state=FileViewedState.VIEWED,
-    )
-
-    text = build_diff_header_text(
-        current_file="src/app.py",
-        file=file,
-        showing_full_file=True,
-        preview_location="line 4/10  [section]",
-    )
-
-    assert "✓ Viewed" in text
-    assert "[dim]no textual changes[/]" in text
-    assert "[dim italic]preview[/]" in text
-    assert "[dim]line 4/10  \\[section][/]" in text
-
-
-def test_build_diff_header_text_handles_missing_file_selection() -> None:
-    assert (
-        build_diff_header_text(
-            current_file=None,
-            file=None,
-            showing_full_file=False,
-            preview_location="",
-        )
-        == "Select a file to view diff"
-    )
 
 
 def test_change_stats_plain_matches_header_stats_order() -> None:
@@ -100,13 +53,31 @@ def test_build_file_header_text_preserves_rename_styles_when_untruncated() -> No
         additions=3,
         deletions=2,
         path_budget=40,
+        viewed_state=FileViewedState.VIEWED,
     )
 
-    assert text.plain == "▾ old.py -> new.py  -2 +3"
+    assert text.plain == "▾ old.py -> new.py  -2 +3  ■■■■■  Viewed"
     spans = [(span.start, span.end, span.style) for span in text.spans]
     assert (2, 8, "dim") in spans
     assert (8, 12, "dim") in spans
     assert (12, 18, "bold #cad3f5") in spans
+    assert (27, 30, "bold #a6da95") in spans
+    assert (30, 32, "bold #ed8796") in spans
+    assert (34, 40, "bold #a6da95") in spans
+
+
+def test_build_file_header_text_uses_collapsed_prefix() -> None:
+    text = build_file_header_text(
+        path="viewed.py",
+        old_path=None,
+        additions=1,
+        deletions=0,
+        path_budget=40,
+        viewed_state=FileViewedState.VIEWED,
+        collapsed=True,
+    )
+
+    assert text.plain == "▸ viewed.py  +1  ■■■■■  Viewed"
 
 
 def test_build_file_header_text_truncates_display_path_within_budget() -> None:
@@ -118,7 +89,7 @@ def test_build_file_header_text_truncates_display_path_within_budget() -> None:
         path_budget=14,
     )
 
-    display_path = text.plain.removeprefix("▾ ").removesuffix("  +1")
+    display_path = text.plain.removeprefix("▾ ").split("  +1", 1)[0]
 
     assert cell_len(display_path) <= 14
     assert "..." in display_path
@@ -132,7 +103,16 @@ def test_file_header_min_width_accounts_for_rename_path() -> None:
         stats_plain="+1",
     )
 
-    assert width == cell_len("old/location.py -> new.py") + cell_len("+1") + 8
+    assert (
+        width
+        == cell_len("old/location.py -> new.py")
+        + cell_len("+1")
+        + FILE_HEADER_CHROME_WIDTH
+    )
+
+
+def test_file_header_path_budget_reserves_diffstat_and_viewed_label() -> None:
+    assert file_header_path_budget(32, stats_plain="-2 +3") == 6
 
 
 def test_truncate_middle_preserves_ascii_head_tail_within_budget() -> None:

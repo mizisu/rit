@@ -48,7 +48,6 @@ class VisualModeUIUpdate:
     sub_title: str
     selection_refresh_lines: frozenset[int]
     clear_selection: bool
-    update_status_line: bool
 
 
 @dataclass(frozen=True)
@@ -57,7 +56,6 @@ class VisualTypeUIUpdate:
 
     sub_title: str | None
     selection_dirty_lines: frozenset[int]
-    update_status_line: bool
 
 
 @dataclass(frozen=True)
@@ -72,7 +70,6 @@ class VisualQueueUpdate:
     """Cursor UI flush policy for visual-mode updates."""
 
     selection_dirty_lines: frozenset[int] | None
-    update_status_line: bool
 
 
 type VisualQueuedUpdate = VisualTypeUIUpdate | VisualAnchorUIUpdate
@@ -198,7 +195,6 @@ def visual_mode_ui_update(
             _single_line_set(cursor_line) if visual_mode else _empty_line_set()
         ),
         clear_selection=not visual_mode,
-        update_status_line=True,
     )
 
 
@@ -218,7 +214,6 @@ def visual_type_ui_update(
         selection_dirty_lines=(
             _single_line_set(cursor_line) if visual_mode else _empty_line_set()
         ),
-        update_status_line=True,
     )
 
 
@@ -240,10 +235,5 @@ def visual_queue_update(update: VisualQueuedUpdate) -> VisualQueueUpdate:
     return VisualQueueUpdate(
         selection_dirty_lines=(
             update.selection_dirty_lines if update.selection_dirty_lines else None
-        ),
-        update_status_line=(
-            update.update_status_line
-            if isinstance(update, VisualTypeUIUpdate)
-            else False
         ),
     )

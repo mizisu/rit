@@ -67,7 +67,6 @@ def test_build_diff_geometry_accounts_for_modified_rows_and_inline_extras() -> N
             line_bottom_offsets=geometry.line_bottom_offsets,
             virtual_content_height=geometry.virtual_content_height,
             scroll_y=10,
-            dock_header_height=1,
             viewport_height=8,
         )
         == 1
@@ -199,7 +198,6 @@ def test_row_bounds_and_reveal_targets_are_pure_geometry() -> None:
         scroll_y=0,
         viewport_height=2,
         max_scroll_y=20,
-        dock_header_height=1,
     )
     assert cursor_viewport_offset((3, 4), viewport) == 3
     assert scroll_target_for_row_viewport_offset((3, 4), viewport, 0) == 3
@@ -207,13 +205,12 @@ def test_row_bounds_and_reveal_targets_are_pure_geometry() -> None:
 
 
 def test_row_visibility_uses_scrollable_content_coordinates() -> None:
-    """Docked headers should not expand the visible diff-line range."""
+    """Viewport visibility should use scrollable content coordinates."""
 
     viewport = ViewportGeometry(
         scroll_y=142,
         viewport_height=15,
         max_scroll_y=260,
-        dock_header_height=3,
     )
 
     assert row_is_visible((156, 157), viewport)
@@ -227,7 +224,6 @@ def test_scroll_target_for_span_respects_vertical_scrolloff() -> None:
         scroll_y=0,
         viewport_height=9,
         max_scroll_y=80,
-        dock_header_height=3,
     )
 
     assert (
@@ -238,7 +234,6 @@ def test_scroll_target_for_span_respects_vertical_scrolloff() -> None:
         scroll_y=20,
         viewport_height=9,
         max_scroll_y=80,
-        dock_header_height=3,
     )
 
     assert (

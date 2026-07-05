@@ -5,23 +5,23 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping, Sequence
 from typing import TYPE_CHECKING, Literal
 
-from rich.cells import cell_len
+from rich.text import Text
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.widget import Widget
 from textual.widgets import Static
 
 from rit.core.types import DiffHunk, DiffLine, FileDiff
-from rit.state.models import PRFile
+from rit.state.models import FileViewedState, PRFile
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets import diff_cursor_content as _cursor_content
+from rit.ui.widgets import diff_folding as _folding
 from rit.ui.widgets import diff_full_file_preview as _full_preview
 from rit.ui.widgets import diff_geometry as _geometry
 from rit.ui.widgets import diff_header as _header
 from rit.ui.widgets import diff_highlight as _hl
 from rit.ui.widgets import diff_layout as _layout
-from rit.ui.widgets import diff_location as _location
 from rit.ui.widgets import diff_plan as _plan
 from rit.ui.widgets import diff_prefix as _prefix
 from rit.ui.widgets import diff_search as _search
@@ -239,7 +239,6 @@ def _viewport_center_line(view: DiffView) -> int:
         line_bottom_offsets=view._line_bottom_offsets,
         virtual_content_height=view._virtual_content_height,
         scroll_y=int(view.scroll_y),
-        dock_header_height=view._dock_header_height(),
         viewport_height=view.scrollable_content_region.height,
     )
 
@@ -282,43 +281,11 @@ def _should_render_hunk_header(
 # ---------------------------------------------------------------------------
 
 
-def _build_header_text(view: DiffView) -> str:
-    """Build the diff header text for the current view state."""
-    showing_full_file = bool(view.current_file and view._showing_full_file)
-    file = _file_for_header(view, view.current_file) if view.current_file else None
-    return _header.build_diff_header_text(
-        current_file=view.current_file,
-        file=file,
-        showing_full_file=showing_full_file,
-        preview_location=_full_preview_location_label(view)
-        if showing_full_file
-        else "",
-    )
-
-
-def _full_preview_location_label(view: DiffView) -> str:
-    line = view._current_line()
-    return _location.full_preview_location_label(
-        line=line,
-        total_lines=len(view._all_lines),
-        diff=view._diff,
-        hunk_index=view._get_hunk_index_for_line(line.line_index)
-        if line is not None
-        else None,
-    )
-
-
 async def _render_diff(view: DiffView) -> None:
     ctx = _get_render_request_context()
     request_token = ctx.get()
     if request_token is not None and not view._is_current_render_request(request_token):
         return
-    header = view._header_widget
-    if header is None:
-        header = view.query_one("#diff-header", Static)
-        view._header_widget = header
-    view._update_status_line()
-
     new_content = view._content_widget
     if new_content is None:
         new_content = view.query_one("#diff-content", VerticalScroll)
@@ -428,17 +395,14 @@ def _aggregate_file_change_stats(view: DiffView, path: str) -> tuple[int, int]:
     planned_stats = getattr(view, "_file_change_stats", {})
     if path in planned_stats:
         return planned_stats[path]
-    return _header.aggregate_file_change_stats(view._diff, path)
+    source_diff = getattr(view, "_source_diff", None)
+    return _header.aggregate_file_change_stats(source_diff or view._diff, path)
 
 
-def _create_file_header_widget(
+def _file_header_text_and_width(
     view: DiffView,
-    *,
-    hunk_index: int,
     hunk: DiffHunk,
-    split: bool | None = None,
-) -> Widget:
-    use_split = view.split if split is None else split
+) -> tuple[Text, int]:
     path = hunk.file_path or "unknown"
     old_path = hunk.file_old_path
     file = _file_for_header(view, path)
@@ -452,6 +416,9 @@ def _create_file_header_widget(
         deletions = max(deletions, aggregate_deletions)
 
     stats_plain = _change_stats_plain(additions, deletions)
+    viewed_state = (
+        file.viewer_viewed_state if file is not None else FileViewedState.UNVIEWED
+    )
     width = _file_header_width_for_layout(
         view,
         _header.file_header_min_width(
@@ -460,22 +427,60 @@ def _create_file_header_widget(
             stats_plain=stats_plain,
         ),
     )
-    prefix_plain = "▾ "
-    path_budget = max(
-        4,
-        width - cell_len(prefix_plain) - cell_len(stats_plain) - 2,
-    )
     text = _header.build_file_header_text(
         path=path,
         old_path=old_path,
         additions=additions,
         deletions=deletions,
-        path_budget=path_budget,
+        path_budget=_header.file_header_path_budget(width, stats_plain=stats_plain),
+        viewed_state=viewed_state,
+        collapsed=view._is_file_folded(path),
     )
+    return text, width
 
+
+def _refresh_file_header_widgets(view: DiffView) -> None:
+    if view._diff is None or not view.is_mounted:
+        return
+
+    for widget in view.query(".file-diff-header"):
+        if not isinstance(widget, Static):
+            continue
+        widget_id = widget.id or ""
+        if not widget_id.startswith("file-header-"):
+            continue
+        try:
+            hunk_index = int(widget_id.removeprefix("file-header-"))
+        except ValueError:
+            continue
+        if not 0 <= hunk_index < len(view._diff.hunks):
+            continue
+        hunk = view._diff.hunks[hunk_index]
+        text, width = _file_header_text_and_width(view, hunk)
+        widget.update(text)
+        if view._is_file_folded(hunk.file_path or ""):
+            widget.add_class("-collapsed")
+        else:
+            widget.remove_class("-collapsed")
+        widget.styles.width = max(1, width)
+
+
+def _create_file_header_widget(
+    view: DiffView,
+    *,
+    hunk_index: int,
+    hunk: DiffHunk,
+    split: bool | None = None,
+) -> Widget:
+    use_split = view.split if split is None else split
+    text, width = _file_header_text_and_width(view, hunk)
+
+    classes = "file-diff-header"
+    if view._is_file_folded(hunk.file_path or ""):
+        classes += " -collapsed"
     header_widget = Static(
         text,
-        classes=f"file-diff-header -{hunk.file_status}",
+        classes=classes,
         id=f"file-header-{hunk_index}",
     )
     header_widget.styles.height = _geometry.FILE_DIFF_HEADER_HEIGHT
@@ -1003,7 +1008,6 @@ def _finalize_render_state(view: DiffView) -> None:
     _show_initial_cursor(view)
     if view.visual_mode:
         view._update_selection_highlighting({view.cursor_line})
-    view._update_status_line()
     _hl._ensure_visible_highlight(view)
 
     pending = view._pending_comment_jump
@@ -1055,6 +1059,8 @@ def _render_line_unified(view: DiffView, line: DiffLine) -> Horizontal | Vertica
 
     prefix_widget = Static(prefix_content, classes="line-prefix")
     prefix_widget.styles.width = _unified_prefix_width_for_layout(view)
+    if _folding.is_folded_placeholder_line(line):
+        code_classes += " folded-file-placeholder"
     code_widget = Static(code_content, classes=code_classes)
     code_widget.styles.width = view._unified_code_width
 

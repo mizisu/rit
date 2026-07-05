@@ -1,7 +1,7 @@
 """Tests for DiffView hunk navigation and layout behavior."""
 
-from pathlib import Path
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -24,31 +24,6 @@ from rit.ui.widgets.diff_visual import MISSING_SIDE_HATCH_STYLE, MISSING_SIDE_ST
 def _as_plain(widget: Static) -> str:
     content = getattr(widget, "content", "")
     return str(getattr(content, "plain", content))
-
-
-class _HeaderRecorder:
-    def __init__(self) -> None:
-        self.text: str | None = None
-
-    def update(self, text: str) -> None:
-        self.text = text
-
-
-def test_status_line_escapes_search_query_markup(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Search status should render literal query text, not Rich markup."""
-    view = DiffView()
-    header = _HeaderRecorder()
-    view._header_widget = header
-    view._search_query = "[red]needle[/]"
-    view._search_matches = []
-    view._search_match_index = -1
-    monkeypatch.setattr(_render, "_build_header_text", lambda _view: "base")
-
-    view._update_status_line()
-
-    assert header.text == 'base  [$warning]search "\\[red]needle\\[/]" no matches[/]'
 
 
 def test_cycle_diff_mode_uses_shared_mode_label_mapping(
@@ -92,9 +67,7 @@ def test_change_background_styles_remain_subtle() -> None:
     assert _render._unified_line_style(view, added) == "on $success 6%"
     assert _render._unified_line_style(view, deleted) == "on $error 6%"
     assert _render._unified_line_style(view, modified, side="old") == "on $error 6%"
-    assert (
-        _render._unified_line_style(view, modified, side="new") == "on $success 6%"
-    )
+    assert _render._unified_line_style(view, modified, side="new") == "on $success 6%"
     assert _render._split_line_style(view, modified, side="old") == "on $error 6%"
     assert _render._split_line_style(view, modified, side="new") == "on $success 6%"
     assert _blocks._cursor_block_line_style("on $success 6%") == "on $success 18%"

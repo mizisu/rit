@@ -170,7 +170,6 @@ def test_visual_mode_ui_update_refreshes_cursor_line_when_entering() -> None:
         sub_title="-- VISUAL --",
         selection_refresh_lines=frozenset({4}),
         clear_selection=False,
-        update_status_line=True,
     )
 
 
@@ -183,7 +182,6 @@ def test_visual_mode_ui_update_uses_line_subtitle_for_line_mode() -> None:
         sub_title="-- VISUAL LINE --",
         selection_refresh_lines=frozenset({2}),
         clear_selection=False,
-        update_status_line=True,
     )
 
 
@@ -196,7 +194,6 @@ def test_visual_mode_ui_update_clears_selection_when_exiting() -> None:
         sub_title="",
         selection_refresh_lines=frozenset(),
         clear_selection=True,
-        update_status_line=True,
     )
 
 
@@ -272,7 +269,6 @@ def test_visual_type_ui_update_marks_line_dirty_in_visual_mode() -> None:
     ) == VisualTypeUIUpdate(
         sub_title="-- VISUAL LINE --",
         selection_dirty_lines=frozenset({5}),
-        update_status_line=True,
     )
 
 
@@ -284,11 +280,10 @@ def test_visual_type_ui_update_uses_char_subtitle_in_visual_mode() -> None:
     ) == VisualTypeUIUpdate(
         sub_title="-- VISUAL --",
         selection_dirty_lines=frozenset({5}),
-        update_status_line=True,
     )
 
 
-def test_visual_type_ui_update_only_updates_status_outside_visual_mode() -> None:
+def test_visual_type_ui_update_has_no_dirty_lines_outside_visual_mode() -> None:
     assert visual_type_ui_update(
         visual_mode=False,
         visual_type="line",
@@ -296,7 +291,6 @@ def test_visual_type_ui_update_only_updates_status_outside_visual_mode() -> None
     ) == VisualTypeUIUpdate(
         sub_title=None,
         selection_dirty_lines=frozenset(),
-        update_status_line=True,
     )
 
 
@@ -314,7 +308,7 @@ def test_visual_anchor_ui_update_is_empty_outside_visual_mode() -> None:
     ) == VisualAnchorUIUpdate(selection_dirty_lines=frozenset())
 
 
-def test_visual_queue_update_maps_visual_type_dirty_line_and_status() -> None:
+def test_visual_queue_update_maps_visual_type_dirty_line() -> None:
     update = visual_type_ui_update(
         visual_mode=True,
         visual_type="line",
@@ -323,7 +317,6 @@ def test_visual_queue_update_maps_visual_type_dirty_line_and_status() -> None:
 
     assert visual_mode.visual_queue_update(update) == visual_mode.VisualQueueUpdate(
         selection_dirty_lines=frozenset({5}),
-        update_status_line=True,
     )
 
 
@@ -335,5 +328,4 @@ def test_visual_queue_update_omits_empty_dirty_lines() -> None:
 
     assert visual_mode.visual_queue_update(update) == visual_mode.VisualQueueUpdate(
         selection_dirty_lines=None,
-        update_status_line=False,
     )

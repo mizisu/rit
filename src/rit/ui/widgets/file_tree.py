@@ -168,7 +168,7 @@ class FileTree(Vertical):
         self._search_widget = search
         yield search
 
-        tree: Tree[str] = Tree("Files", id="file-tree")
+        tree: Tree[str] = ReviewTree("Files", id="file-tree")
         tree.show_root = False
         tree.guide_depth = 2
         tree.root.expand()
@@ -313,7 +313,9 @@ class FileTree(Vertical):
             self.post_message(Flash("No file selected", style="warning", duration=2.0))
             return
 
-        filename = self._basename_for_filename(node.data) if basename_only else node.data
+        filename = (
+            self._basename_for_filename(node.data) if basename_only else node.data
+        )
         label = "filename" if basename_only else "file path"
         self.app.copy_to_clipboard(filename)
         self.post_message(
@@ -695,7 +697,8 @@ class FileTree(Vertical):
             None,
         )
         if callable(count_pending_file_comments):
-            return count_pending_file_comments(filename)
+            count = count_pending_file_comments(filename)
+            return count if isinstance(count, int) else 0
         return len(self.store.get_pending_file_comments(filename))
 
     def update_view_state(self, filename: str) -> None:

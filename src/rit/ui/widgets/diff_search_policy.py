@@ -18,8 +18,8 @@ from rit.ui.widgets.diff_search_types import (
     SearchSide,
     SearchStartUpdate,
     SearchSubmissionRequest,
-    SearchSubmitUpdate,
     SearchSubmittedInputUpdate,
+    SearchSubmitUpdate,
 )
 from rit.ui.widgets.diff_types import DiffSearchMatch
 
@@ -148,9 +148,7 @@ def search_activation_placement_update(
 ) -> SearchActivationPlacementUpdate:
     """Return placement policy after activating a search match."""
     should_anchor = has_target_row and (
-        not target_row_visible
-        or not has_current_row
-        or row_distance > half_page_step
+        not target_row_visible or not has_current_row or row_distance > half_page_step
     )
     if should_anchor:
         return SearchActivationPlacementUpdate(
@@ -299,7 +297,6 @@ def search_jump_update(
             target_index=-1,
             flash_message="No active search",
             flash_style="warning",
-            update_status=False,
         )
     if match_count <= 0:
         return SearchJumpUpdate(
@@ -307,7 +304,6 @@ def search_jump_update(
             target_index=-1,
             flash_message=f"No matches: {query}",
             flash_style="warning",
-            update_status=True,
         )
     return SearchJumpUpdate(
         action="activate",
@@ -319,7 +315,6 @@ def search_jump_update(
         ),
         flash_message=None,
         flash_style=None,
-        update_status=False,
     )
 
 
@@ -407,14 +402,12 @@ def search_close_update(
             action="ignore",
             clear_state=False,
             refresh_display=False,
-            update_status=False,
             focus_view=False,
         )
     return SearchCloseUpdate(
         action="close",
         clear_state=clear_query,
         refresh_display=True,
-        update_status=True,
         focus_view=True,
     )
 

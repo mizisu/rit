@@ -69,9 +69,6 @@ class DiffSearchMatch:
 @dataclass(frozen=True)
 class DiffLayout:
     auto_split_min_width: int = 120
-    unified_prefix_width: int = 18
-    split_prefix_width: int = 8
-
     vertical_scrolloff: int = 2
     horizontal_scroll_edge_padding: int = 5
     horizontal_scroll_reveal_padding: int = 10
@@ -243,7 +240,6 @@ class CursorUIState:
     selection_dirty: set[int] = field(default_factory=set)
     selection_full_refresh: bool = False
     sync_search: bool = False
-    update_status: bool = False
     suppress_scroll: bool = False
     pending_count: str = ""
     desired_column: int | None = None

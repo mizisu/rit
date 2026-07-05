@@ -10,9 +10,9 @@ from textual.geometry import Size
 
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_comments as _comments
+from rit.ui.widgets import diff_cursor_update as _cursor_update
 from rit.ui.widgets import diff_geometry as _geometry
 from rit.ui.widgets import diff_search as _search
-from rit.ui.widgets import diff_cursor_update as _cursor_update
 from rit.ui.widgets import diff_virtual as _virtual
 from rit.ui.widgets import diff_visual_mode as _visual_mode
 from rit.ui.widgets import diff_word_motion as _word_motion
@@ -337,9 +337,7 @@ def _cycle_active_pane(view: DiffView) -> None:
         return
     if not view.split and not line.is_modified:
         return
-    target_pane: Literal["old", "new"] = (
-        "old" if view.active_pane == "new" else "new"
-    )
+    target_pane: Literal["old", "new"] = "old" if view.active_pane == "new" else "new"
     _move_cursor(
         view,
         pane=target_pane,
@@ -481,13 +479,6 @@ def _pane_for_row(view: DiffView, row: RenderedRow) -> Literal["old", "new"]:
 # ---------------------------------------------------------------------------
 
 
-def _dock_header_height(view: DiffView) -> int:
-    header = view._header_widget
-    if header is None:
-        return 0
-    return header.outer_size.height
-
-
 def _half_page_step(view: DiffView) -> int:
     return max(1, view.scrollable_content_region.height // 2)
 
@@ -524,7 +515,6 @@ def _viewport_geometry(view: DiffView) -> _geometry.ViewportGeometry:
         scroll_y=int(view.scroll_y),
         viewport_height=max(1, view.scrollable_content_region.height),
         max_scroll_y=max(0, int(view.max_scroll_y)),
-        dock_header_height=_dock_header_height(view),
     )
 
 
@@ -629,9 +619,7 @@ def _mounted_block_row_vertical_bounds(
         return None
 
     line_indices = block.line_indices
-    block_top = int(view.scroll_y) + (
-        block.region.y - view.scrollable_content_region.y
-    )
+    block_top = int(view.scroll_y) + (block.region.y - view.scrollable_content_region.y)
     if view.split:
         for row_offset, line_index in enumerate(line_indices):
             if line_index == row.line_index:
@@ -798,13 +786,10 @@ def _queue_cursor_ui_flush(
     selection_dirty_lines: Collection[int] | None = None,
     selection_full_refresh: bool = False,
     sync_search_match: bool = False,
-    update_status_line: bool = False,
 ) -> None:
     if not view.is_mounted:
         if sync_search_match:
             _search.sync_match_index_to_cursor(view)
-        if update_status_line:
-            view._update_status_line()
         return
 
     request = _cursor_update.cursor_flush_request(
@@ -813,7 +798,6 @@ def _queue_cursor_ui_flush(
         selection_dirty_lines=selection_dirty_lines,
         selection_full_refresh=selection_full_refresh,
         sync_search_match=sync_search_match,
-        update_status_line=update_status_line,
     )
 
     if request.cursor_lines:
@@ -824,8 +808,6 @@ def _queue_cursor_ui_flush(
         view._cursor_ui.selection_full_refresh = True
     if request.sync_search_match:
         view._cursor_ui.sync_search = True
-    if request.update_status_line:
-        view._cursor_ui.update_status = True
 
     if view._cursor_ui.flush_pending:
         return
@@ -844,7 +826,6 @@ def _queue_cursor_update(
         cursor_lines=queue_update.cursor_lines,
         selection_dirty_lines=queue_update.selection_dirty_lines,
         sync_search_match=queue_update.sync_search_match,
-        update_status_line=queue_update.update_status_line,
     )
 
 
@@ -855,13 +836,11 @@ def _flush_queued_cursor_ui_updates(view: DiffView) -> None:
     selection_dirty_lines = view._cursor_ui.selection_dirty
     selection_full_refresh = view._cursor_ui.selection_full_refresh
     sync_search_match = view._cursor_ui.sync_search
-    update_status_line = view._cursor_ui.update_status
 
     view._cursor_ui.dirty_lines = set()
     view._cursor_ui.selection_dirty = set()
     view._cursor_ui.selection_full_refresh = False
     view._cursor_ui.sync_search = False
-    view._cursor_ui.update_status = False
 
     if not view.is_mounted:
         return
@@ -890,8 +869,6 @@ def _flush_queued_cursor_ui_updates(view: DiffView) -> None:
 
     if sync_search_match:
         _search.sync_match_index_to_cursor(view)
-    if update_status_line:
-        view._update_status_line()
 
 
 def _cursor_lines_for_repaint(cursor_lines: Collection[int]) -> Collection[int]:
@@ -929,7 +906,6 @@ def _apply_cursor_move_side_effects(
         old_pane=old_pane,
         new_pane=new_pane,
         visual_mode=view.visual_mode,
-        search_query=view._search_query,
     )
 
     if move_update.line_changed:
@@ -1212,8 +1188,7 @@ def _center_cursor(view: DiffView) -> None:
     top, bottom = bounds
     mid = (top + bottom) // 2
     viewport_height = max(1, view.scrollable_content_region.height)
-    header_h = _dock_header_height(view)
-    target_y = max(0, mid - viewport_height // 2 - header_h)
+    target_y = max(0, mid - viewport_height // 2)
 
     base_max_y = int(view.max_scroll_y) - view._center_padding_height
     needed_padding = max(0, target_y - base_max_y)

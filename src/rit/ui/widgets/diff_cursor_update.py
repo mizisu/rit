@@ -6,7 +6,6 @@ from collections.abc import Collection
 from dataclasses import dataclass
 from typing import Literal
 
-
 PaneName = Literal["old", "new"]
 _EMPTY_LINE_SET: frozenset[int] = frozenset()
 
@@ -34,12 +33,11 @@ __all__ = (
 
 @dataclass(frozen=True)
 class CursorMoveUpdate:
-    """Repaint and status policy for a cursor move."""
+    """Repaint policy for a cursor move."""
 
     cursor_lines: frozenset[int]
     selection_dirty_lines: frozenset[int] | None
     sync_search_match: bool
-    update_status_line: bool
     changed: bool
     line_changed: bool
     column_changed: bool
@@ -54,7 +52,6 @@ class CursorFlushRequest:
     selection_dirty_lines: frozenset[int]
     selection_full_refresh: bool
     sync_search_match: bool
-    update_status_line: bool
 
 
 @dataclass(frozen=True)
@@ -64,7 +61,6 @@ class CursorQueueUpdate:
     cursor_lines: frozenset[int]
     selection_dirty_lines: frozenset[int] | None
     sync_search_match: bool
-    update_status_line: bool
 
 
 @dataclass(frozen=True)
@@ -82,7 +78,6 @@ class ActivePaneUpdate:
     cursor_lines: frozenset[int]
     selection_dirty_lines: frozenset[int] | None
     sync_search_match: bool
-    update_status_line: bool
 
 
 @dataclass(frozen=True)
@@ -92,7 +87,6 @@ class CursorLineUpdate:
     cursor_lines: frozenset[int]
     selection_dirty_lines: frozenset[int] | None
     sync_search_match: bool
-    update_status_line: bool
 
 
 @dataclass(frozen=True)
@@ -104,7 +98,6 @@ class CursorColumnUpdate:
     selection_dirty_lines: frozenset[int] | None
     sync_search_match: bool
     scroll_horizontal: bool
-    update_status_line: bool = False
 
 
 type CursorRepaintUpdate = (
@@ -137,7 +130,6 @@ def active_pane_update(
         cursor_lines=cursor_lines,
         selection_dirty_lines=cursor_lines if visual_mode else None,
         sync_search_match=True,
-        update_status_line=True,
     )
 
 
@@ -191,7 +183,6 @@ def cursor_line_update(
         cursor_lines=lines,
         selection_dirty_lines=lines if visual_mode else None,
         sync_search_match=True,
-        update_status_line=True,
     )
 
 
@@ -201,7 +192,6 @@ def cursor_queue_update(update: CursorRepaintUpdate) -> CursorQueueUpdate:
         cursor_lines=update.cursor_lines,
         selection_dirty_lines=update.selection_dirty_lines,
         sync_search_match=update.sync_search_match,
-        update_status_line=update.update_status_line,
     )
 
 
@@ -234,17 +224,13 @@ def cursor_flush_request(
     selection_dirty_lines: Collection[int] | None = None,
     selection_full_refresh: bool = False,
     sync_search_match: bool = False,
-    update_status_line: bool = False,
 ) -> CursorFlushRequest:
     """Return a normalized cursor UI flush request."""
     return CursorFlushRequest(
         cursor_lines=_bounded_line_indices(cursor_lines, line_count),
-        selection_dirty_lines=_bounded_line_indices(
-            selection_dirty_lines, line_count
-        ),
+        selection_dirty_lines=_bounded_line_indices(selection_dirty_lines, line_count),
         selection_full_refresh=selection_full_refresh,
         sync_search_match=sync_search_match,
-        update_status_line=update_status_line,
     )
 
 
@@ -286,9 +272,8 @@ def cursor_move_update(
     old_pane: PaneName,
     new_pane: PaneName,
     visual_mode: bool,
-    search_query: str | None,
 ) -> CursorMoveUpdate:
-    """Return repaint and status policy for a cursor move."""
+    """Return repaint policy for a cursor move."""
     line_changed = old_line != new_line
     column_changed = old_column != new_column
     pane_changed = old_pane != new_pane
@@ -308,8 +293,6 @@ def cursor_move_update(
         cursor_lines=cursor_lines,
         selection_dirty_lines=selection_dirty_lines,
         sync_search_match=changed,
-        update_status_line=(line_changed or pane_changed)
-        or (column_changed and bool(search_query)),
         changed=changed,
         line_changed=line_changed,
         column_changed=column_changed,

@@ -87,7 +87,6 @@ def test_cursor_flush_request_filters_lines_to_diff_bounds() -> None:
         selection_dirty_lines={-5, 1, 7},
         selection_full_refresh=False,
         sync_search_match=False,
-        update_status_line=False,
     )
 
     assert request == CursorFlushRequest(
@@ -95,7 +94,6 @@ def test_cursor_flush_request_filters_lines_to_diff_bounds() -> None:
         selection_dirty_lines=frozenset({1}),
         selection_full_refresh=False,
         sync_search_match=False,
-        update_status_line=False,
     )
 
 
@@ -106,7 +104,6 @@ def test_cursor_flush_request_preserves_flags_without_lines() -> None:
         selection_dirty_lines=None,
         selection_full_refresh=True,
         sync_search_match=True,
-        update_status_line=True,
     )
 
     assert request == CursorFlushRequest(
@@ -114,7 +111,6 @@ def test_cursor_flush_request_preserves_flags_without_lines() -> None:
         selection_dirty_lines=frozenset(),
         selection_full_refresh=True,
         sync_search_match=True,
-        update_status_line=True,
     )
 
 
@@ -165,7 +161,6 @@ def test_cursor_repaint_updates_build_line_sets_without_intermediate_sets(
         cursor_lines=original_frozenset({4}),
         selection_dirty_lines=original_frozenset({4}),
         sync_search_match=True,
-        update_status_line=True,
     )
     assert cursor_line_update(
         old_line=2,
@@ -175,7 +170,6 @@ def test_cursor_repaint_updates_build_line_sets_without_intermediate_sets(
         cursor_lines=original_frozenset({2, 5}),
         selection_dirty_lines=original_frozenset({2, 5}),
         sync_search_match=True,
-        update_status_line=True,
     )
     assert cursor_column_update(
         cursor_line=7,
@@ -191,7 +185,6 @@ def test_cursor_repaint_updates_build_line_sets_without_intermediate_sets(
         old_pane="new",
         new_pane="new",
         visual_mode=True,
-        search_query="",
     ).selection_dirty_lines == original_frozenset({1, 3})
 
     assert calls == [(4,), (2, 5), (7,), (1, 3)]
@@ -224,7 +217,6 @@ def test_cursor_flush_request_bounds_singletons_without_generator(
         selection_dirty_lines=original_frozenset({5}),
         selection_full_refresh=False,
         sync_search_match=False,
-        update_status_line=False,
     )
 
     assert calls == [(4,), (5,)]
@@ -257,7 +249,6 @@ def test_cursor_flush_request_bounds_multiple_lines_without_generator(
         selection_dirty_lines=original_frozenset({8, 9}),
         selection_full_refresh=False,
         sync_search_match=False,
-        update_status_line=False,
     )
 
     assert calls == [(2, 4), (8, 9)]
@@ -272,12 +263,10 @@ def test_cursor_move_update_marks_new_line_only_for_column_move() -> None:
         old_pane="new",
         new_pane="new",
         visual_mode=False,
-        search_query="",
     )
 
     assert update.cursor_lines == frozenset({2})
     assert update.selection_dirty_lines is None
-    assert update.update_status_line is False
     assert update.changed is True
     assert update.line_changed is False
     assert update.column_changed is True
@@ -293,12 +282,10 @@ def test_cursor_move_update_marks_old_and_new_lines_for_line_move() -> None:
         old_pane="new",
         new_pane="new",
         visual_mode=False,
-        search_query="",
     )
 
     assert update.cursor_lines == frozenset({1, 3})
     assert update.selection_dirty_lines is None
-    assert update.update_status_line is True
     assert update.changed is True
     assert update.line_changed is True
     assert update.column_changed is False
@@ -314,15 +301,13 @@ def test_cursor_move_update_tracks_visual_selection_dirty_lines() -> None:
         old_pane="new",
         new_pane="new",
         visual_mode=True,
-        search_query="",
     )
 
     assert update.cursor_lines == frozenset({1, 3})
     assert update.selection_dirty_lines == frozenset({1, 3})
-    assert update.update_status_line is True
 
 
-def test_cursor_move_update_updates_status_for_search_column_move() -> None:
+def test_cursor_move_update_marks_column_move_changed() -> None:
     update = cursor_move_update(
         old_line=2,
         new_line=2,
@@ -331,14 +316,12 @@ def test_cursor_move_update_updates_status_for_search_column_move() -> None:
         old_pane="new",
         new_pane="new",
         visual_mode=False,
-        search_query="needle",
     )
 
-    assert update.update_status_line is True
     assert update.changed is True
 
 
-def test_cursor_move_update_updates_status_for_pane_change() -> None:
+def test_cursor_move_update_marks_pane_change_changed() -> None:
     update = cursor_move_update(
         old_line=2,
         new_line=2,
@@ -347,11 +330,9 @@ def test_cursor_move_update_updates_status_for_pane_change() -> None:
         old_pane="old",
         new_pane="new",
         visual_mode=False,
-        search_query="",
     )
 
     assert update.cursor_lines == frozenset({2})
-    assert update.update_status_line is True
     assert update.changed is True
     assert update.line_changed is False
     assert update.column_changed is False
@@ -366,7 +347,6 @@ def test_active_pane_update_marks_cursor_line_in_normal_mode() -> None:
         cursor_lines=frozenset({4}),
         selection_dirty_lines=None,
         sync_search_match=True,
-        update_status_line=True,
     )
 
 
@@ -378,7 +358,6 @@ def test_active_pane_update_marks_selection_line_in_visual_mode() -> None:
         cursor_lines=frozenset({4}),
         selection_dirty_lines=frozenset({4}),
         sync_search_match=True,
-        update_status_line=True,
     )
 
 
@@ -392,7 +371,6 @@ def test_cursor_queue_update_preserves_active_pane_flush_policy() -> None:
         cursor_lines=frozenset({4}),
         selection_dirty_lines=frozenset({4}),
         sync_search_match=True,
-        update_status_line=True,
     )
 
 
@@ -405,7 +383,6 @@ def test_cursor_line_update_marks_old_and_new_lines_in_normal_mode() -> None:
         cursor_lines=frozenset({2, 5}),
         selection_dirty_lines=None,
         sync_search_match=True,
-        update_status_line=True,
     )
 
 
@@ -418,7 +395,6 @@ def test_cursor_line_update_marks_selection_lines_in_visual_mode() -> None:
         cursor_lines=frozenset({2, 5}),
         selection_dirty_lines=frozenset({2, 5}),
         sync_search_match=True,
-        update_status_line=True,
     )
 
 
@@ -519,7 +495,7 @@ def test_cursor_column_update_marks_selection_line_in_visual_mode() -> None:
     )
 
 
-def test_cursor_queue_update_maps_column_flush_policy_without_status_update() -> None:
+def test_cursor_queue_update_maps_column_flush_policy() -> None:
     update = cursor_column_update(
         cursor_line=4,
         new_column=3,
@@ -531,7 +507,6 @@ def test_cursor_queue_update_maps_column_flush_policy_without_status_update() ->
         cursor_lines=frozenset({4}),
         selection_dirty_lines=frozenset({4}),
         sync_search_match=True,
-        update_status_line=False,
     )
 
 
@@ -544,14 +519,12 @@ def test_cursor_queue_update_maps_move_flush_policy() -> None:
         old_pane="old",
         new_pane="new",
         visual_mode=True,
-        search_query="",
     )
 
     assert cursor_update.cursor_queue_update(update) == cursor_update.CursorQueueUpdate(
         cursor_lines=frozenset({2, 5}),
         selection_dirty_lines=frozenset({2, 5}),
         sync_search_match=True,
-        update_status_line=True,
     )
 
 
@@ -564,7 +537,6 @@ def test_cursor_move_scroll_update_scrolls_line_moves_in_normal_mode() -> None:
         old_pane="new",
         new_pane="new",
         visual_mode=False,
-        search_query="",
     )
 
     assert cursor_update.cursor_move_scroll_update(
@@ -587,7 +559,6 @@ def test_cursor_move_scroll_update_holds_visual_scroll_without_opt_in() -> None:
         old_pane="new",
         new_pane="new",
         visual_mode=True,
-        search_query="",
     )
 
     assert cursor_update.cursor_move_scroll_update(
@@ -610,7 +581,6 @@ def test_cursor_move_scroll_update_scrolls_pane_moves_horizontally() -> None:
         old_pane="old",
         new_pane="new",
         visual_mode=False,
-        search_query="",
     )
 
     assert cursor_update.cursor_move_scroll_update(
@@ -633,7 +603,6 @@ def test_cursor_move_scroll_update_suppresses_all_scroll() -> None:
         old_pane="old",
         new_pane="new",
         visual_mode=False,
-        search_query="",
     )
 
     assert cursor_update.cursor_move_scroll_update(

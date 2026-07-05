@@ -13,13 +13,13 @@ from rit.core.diff import parse_patch
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.state.models import PendingReviewComment, PRComment, PRFile, ReviewThread
 from rit.state.store import PRStore
-from rit.ui.widgets import diff_search as _search_mod
 from rit.ui.widgets import diff_blocks as _blocks_mod
 from rit.ui.widgets import diff_comments as _comments_mod
 from rit.ui.widgets import diff_cursor as _cursor_mod
 from rit.ui.widgets import diff_highlight as _hl_mod
 from rit.ui.widgets import diff_plan as _plan_mod
 from rit.ui.widgets import diff_render as _render_mod
+from rit.ui.widgets import diff_search as _search_mod
 from rit.ui.widgets import diff_selection as _selection_mod
 from rit.ui.widgets import diff_types as _diff_types_mod
 from rit.ui.widgets import diff_virtual as _virtual_mod
@@ -410,7 +410,9 @@ def test_split_code_content_skips_selection_spec_when_visual_mode_off() -> None:
         cursor_column = 0
 
         def _compute_selection_spec_for_line(self, _line_index: int) -> None:
-            raise AssertionError("visual-mode-off split rows should not compute selection")
+            raise AssertionError(
+                "visual-mode-off split rows should not compute selection"
+            )
 
         def _diff_line_cursor_active(self, _line_index: int) -> bool:
             return False
@@ -502,9 +504,6 @@ def test_cursor_ui_flush_transfers_pending_line_sets_without_copy(
         def _update_selection_highlighting(self, _dirty_lines=None) -> None:
             raise AssertionError("no selection repaint expected")
 
-        def _update_status_line(self) -> None:
-            raise AssertionError("no status repaint expected")
-
     seen: dict[str, object] = {}
 
     def cursor_lines_for_flush(**kwargs):
@@ -549,9 +548,6 @@ def test_cursor_ui_flush_skips_sort_for_single_dirty_line(
 
         def _update_selection_highlighting(self, _dirty_lines=None) -> None:
             raise AssertionError("no selection repaint expected")
-
-        def _update_status_line(self) -> None:
-            raise AssertionError("no status repaint expected")
 
     monkeypatch.setattr(
         _cursor_mod._blocks,
@@ -698,9 +694,10 @@ def test_file_path_lookup_reuses_planned_container_without_copy() -> None:
     diff_view.current_file = "large.py"
     diff_view._diff_file_paths = NoIterFilePaths()
 
-    assert _comments_mod._file_paths_for_current_diff(
-        diff_view
-    ) is diff_view._diff_file_paths
+    assert (
+        _comments_mod._file_paths_for_current_diff(diff_view)
+        is diff_view._diff_file_paths
+    )
 
 
 @pytest.mark.asyncio
@@ -868,10 +865,6 @@ def test_exiting_visual_mode_clears_selection_without_copying_specs(
         visual_type = "char"
         cursor_line = 4
         _visual_selection_specs = NoListSelectionSpecs()
-        status_updates = 0
-
-        def _update_status_line(self) -> None:
-            self.status_updates += 1
 
     cleared: list[int] = []
     monkeypatch.setattr(
@@ -887,7 +880,6 @@ def test_exiting_visual_mode_clears_selection_without_copying_specs(
     assert cleared == [2, 4, 6]
     assert view._visual_selection_specs == {}
     assert view.app.sub_title == ""
-    assert view.status_updates == 1
 
 
 def test_highlight_refresh_reuses_range_order_without_sort(
@@ -2630,12 +2622,10 @@ async def test_cursor_ui_flush_coalesces_multiple_requests_in_same_tick(
         flush_calls = {"count": 0}
         grouped_calls: list[set[int]] = []
         search_calls = {"count": 0}
-        status_calls = {"count": 0}
 
         original_flush = diff_view._flush_queued_cursor_ui_updates
         original_grouped = _blocks_mod._refresh_grouped_blocks_for_lines
         original_search = _search_mod.sync_match_index_to_cursor
-        original_status = diff_view._update_status_line
 
         def counted_flush() -> None:
             flush_calls["count"] += 1
@@ -2649,26 +2639,19 @@ async def test_cursor_ui_flush_coalesces_multiple_requests_in_same_tick(
             search_calls["count"] += 1
             original_search(view)
 
-        def counted_status() -> None:
-            status_calls["count"] += 1
-            original_status()
-
         diff_view._flush_queued_cursor_ui_updates = counted_flush  # type: ignore[method-assign]
         monkeypatch.setattr(
             _blocks_mod, "_refresh_grouped_blocks_for_lines", counted_grouped
         )
         monkeypatch.setattr(_search_mod, "sync_match_index_to_cursor", counted_search)
-        diff_view._update_status_line = counted_status  # type: ignore[method-assign]
 
         diff_view._queue_cursor_ui_flush(
             cursor_lines={0},
             sync_search_match=True,
-            update_status_line=True,
         )
         diff_view._queue_cursor_ui_flush(
             cursor_lines={1},
             sync_search_match=True,
-            update_status_line=True,
         )
 
         assert diff_view._cursor_ui.flush_pending is True
@@ -2679,7 +2662,6 @@ async def test_cursor_ui_flush_coalesces_multiple_requests_in_same_tick(
         assert flush_calls["count"] == 1
         assert grouped_calls == [{0, 1}]
         assert search_calls["count"] == 1
-        assert status_calls["count"] == 1
 
 
 @pytest.mark.asyncio

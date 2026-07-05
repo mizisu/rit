@@ -2,8 +2,7 @@ import importlib
 
 import pytest
 
-from rit.ui.widgets import diff_search
-from rit.ui.widgets import diff_search_navigation
+from rit.ui.widgets import diff_search, diff_search_navigation
 from rit.ui.widgets.diff_search_types import (
     SearchActivationPlacementUpdate,
     SearchActivationUpdate,
@@ -37,7 +36,6 @@ def test_activate_match_reuses_activation_dirty_lines_without_copy(
         invalidated: object = None
         moved: tuple[int, object, int, bool, bool] | None = None
         scrolled = False
-        status_updates = 0
 
         def _invalidate_base_code_content_cache(self, line_indices: object) -> None:
             self.invalidated = line_indices
@@ -64,9 +62,6 @@ def test_activate_match_reuses_activation_dirty_lines_without_copy(
 
         def _scroll_to_cursor_horizontal(self) -> None:
             self.scrolled = True
-
-        def _update_status_line(self) -> None:
-            self.status_updates += 1
 
     def search_activation_update(*_args: object, **_kwargs: object):
         return SearchActivationUpdate(
@@ -111,4 +106,3 @@ def test_activate_match_reuses_activation_dirty_lines_without_copy(
     assert view.invalidated is dirty_lines
     assert view.moved == (4, None, 3, False, False)
     assert view.scrolled is True
-    assert view.status_updates == 1
