@@ -64,7 +64,9 @@ def _should_force_unified_for_current_file(view: DiffView) -> bool:
 
 
 def _should_force_unified_for_hunk(hunk: DiffHunk) -> bool:
-    return _layout.should_force_unified_for_hunk(hunk)
+    return any(
+        _folding.is_folded_placeholder_line(line) for line in hunk.lines
+    ) or _layout.should_force_unified_for_hunk(hunk)
 
 
 def _split_prefix_width_for_layout(
@@ -307,6 +309,8 @@ async def _render_diff(view: DiffView) -> None:
         view._pending_comment_layout_widgets_by_line = {}
         view._inline_comment_editor_widget = None
         view._inline_comment_editor_layout_widget = None
+        view._file_comment_editor_widget = None
+        view._file_comment_editor_mounted_hunk_index = None
         view._row_anchor_widgets = {}
         view._hunk_header_widgets = {}
         view._virt.top_buffer = None
@@ -462,6 +466,10 @@ def _refresh_file_header_widgets(view: DiffView) -> None:
             widget.add_class("-collapsed")
         else:
             widget.remove_class("-collapsed")
+        if view._selected_file_header_hunk == hunk_index:
+            widget.add_class("-selected")
+        else:
+            widget.remove_class("-selected")
         widget.styles.width = max(1, width)
 
 
@@ -478,6 +486,8 @@ def _create_file_header_widget(
     classes = "file-diff-header"
     if view._is_file_folded(hunk.file_path or ""):
         classes += " -collapsed"
+    if view._selected_file_header_hunk == hunk_index:
+        classes += " -selected"
     header_widget = Static(
         text,
         classes=classes,
@@ -569,6 +579,7 @@ def _render_hunk(
                 split=render_split,
             )
         )
+        view._mount_file_comment_editor(container, hunk_index)
 
     if show_header and (view._diff is None or view._diff.show_hunk_headers):
         hunk_header = (
@@ -624,13 +635,32 @@ def _new_line_number_width(view: DiffView) -> int:
     )
 
 
-def _unified_prefix_width_for_layout(view: DiffView) -> int:
+def _unified_line_number_columns(
+    view: DiffView,
+    line: DiffLine | None = None,
+) -> _layout.LineNumberColumns:
+    if view._showing_full_file:
+        return "new"
+    if line is None:
+        return "both"
+    path = line.file_path or view.current_file
+    if path is None:
+        return "both"
+    additions, deletions = view._file_change_stats.get(path, (0, 0))
+    return _layout.line_number_columns_for_change_counts(additions, deletions)
+
+
+def _unified_prefix_width_for_layout(
+    view: DiffView,
+    line: DiffLine | None = None,
+) -> int:
     if view._showing_full_file:
         return _preview_prefix_width_for_layout(view)
     return _layout.unified_prefix_width_for_layout(
         show_line_numbers=view.show_line_numbers,
         old_line_number_width=_old_line_number_width(view),
         new_line_number_width=_new_line_number_width(view),
+        line_number_columns=_unified_line_number_columns(view, line),
     )
 
 
@@ -667,6 +697,7 @@ def _build_unified_prefix_content(view: DiffView, line: DiffLine) -> Content:
         show_line_numbers=view.show_line_numbers,
         old_line_number_width=_old_line_number_width(view),
         new_line_number_width=_new_line_number_width(view),
+        line_number_columns=_unified_line_number_columns(view, line),
     )
 
 
@@ -1058,7 +1089,7 @@ def _render_line_unified(view: DiffView, line: DiffLine) -> Horizontal | Vertica
     code_classes = _unified_code_classes(line, side=side)
 
     prefix_widget = Static(prefix_content, classes="line-prefix")
-    prefix_widget.styles.width = _unified_prefix_width_for_layout(view)
+    prefix_widget.styles.width = _unified_prefix_width_for_layout(view, line)
     if _folding.is_folded_placeholder_line(line):
         code_classes += " folded-file-placeholder"
     code_widget = Static(code_content, classes=code_classes)
@@ -1325,7 +1356,7 @@ def _render_modified_line(view: DiffView, line: DiffLine) -> Vertical:
     old_code_content = _build_unified_code_content(view, line, side="old")
 
     old_prefix_widget = Static(old_prefix_content, classes="line-prefix")
-    old_prefix_widget.styles.width = _unified_prefix_width_for_layout(view)
+    old_prefix_widget.styles.width = _unified_prefix_width_for_layout(view, line)
     old_code_widget = Static(
         old_code_content,
         classes=_unified_code_classes(line, side="old"),
@@ -1347,7 +1378,7 @@ def _render_modified_line(view: DiffView, line: DiffLine) -> Vertical:
     new_code_content = _build_unified_code_content(view, line, side="new")
 
     new_prefix_widget = Static(new_prefix_content, classes="line-prefix")
-    new_prefix_widget.styles.width = _unified_prefix_width_for_layout(view)
+    new_prefix_widget.styles.width = _unified_prefix_width_for_layout(view, line)
     new_code_widget = Static(
         new_code_content,
         classes=_unified_code_classes(line, side="new"),
@@ -1454,13 +1485,15 @@ def _update_line_cursor(view: DiffView, line_idx: int) -> None:
     has_cursor = view._diff_line_cursor_active(line_idx)
 
     for code_widget in code_widgets:
+        show_cursor = has_cursor and view._widget_matches_cursor_side(line, code_widget)
         if code_widget.has_class("-placeholder"):
-            if code_widget.has_class("-cursor"):
+            if show_cursor:
+                code_widget.add_class("-cursor")
+            else:
                 code_widget.remove_class("-cursor")
             continue
 
         side = view._get_line_side_for_widget(line, code_widget)
-        show_cursor = has_cursor and view._widget_matches_cursor_side(line, code_widget)
         had_cursor = code_widget.has_class("-cursor")
         has_search = bool(view._search_query and view._search_matches)
 

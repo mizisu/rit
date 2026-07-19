@@ -24,6 +24,9 @@ from rit.services.pr_discussion import (
     fetch_pr_discussion,
     fetch_pr_discussion_fast,
 )
+from rit.services.pr_file_comment_request import (
+    create_file_comment as create_file_comment_via_rest,
+)
 from rit.services.pr_file_request import (
     fetch_file_content,
     fetch_pr_file_pages,
@@ -71,6 +74,9 @@ from rit.services.pr_review_graphql import (
 )
 from rit.services.pr_review_graphql import (
     submit_review as submit_review_via_graphql,
+)
+from rit.services.pr_review_comment_request import (
+    update_review_comment as update_review_comment_via_rest,
 )
 from rit.services.pr_reviewer_request import (
     add_assignees as add_assignees_via_rest,
@@ -378,6 +384,39 @@ class GitHubService:
             side=side,
             start_line=start_line,
             start_side=start_side,
+            runner=self._run_gh,
+        )
+
+    async def update_review_comment(
+        self,
+        comment_id: int,
+        body: str,
+    ) -> PRComment:
+        """Update an existing pull request review comment."""
+        repo = await self.get_repo()
+        return await update_review_comment_via_rest(
+            repo.full_name,
+            comment_id,
+            body=body,
+            runner=self._run_gh,
+        )
+
+    async def create_file_comment(
+        self,
+        pr_number: int,
+        *,
+        body: str,
+        commit_id: str,
+        path: str,
+    ) -> PRComment:
+        """Create a file-level review comment via the REST API."""
+        repo = await self.get_repo()
+        return await create_file_comment_via_rest(
+            repo.full_name,
+            pr_number,
+            body=body,
+            commit_id=commit_id,
+            path=path,
             runner=self._run_gh,
         )
 

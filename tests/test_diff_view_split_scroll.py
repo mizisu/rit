@@ -53,6 +53,34 @@ def test_block_missing_side_placeholder_renders_light_hatch() -> None:
     assert "#6e738d" in str(strips[0]._segments[0].style)
 
 
+def test_block_missing_side_placeholder_applies_row_style() -> None:
+    """Missing-side hatches should keep the cursor row background."""
+    cursor_style = "on $primary 25%"
+    content = LineContent([None], [cursor_style], width=5)
+    requested_styles: list[str | Style] = []
+
+    def get_style(style: str | Style) -> Style:
+        requested_styles.append(style)
+        if style == MISSING_SIDE_HATCH_STYLE:
+            return Style(
+                foreground=Color.parse("#6e738d"),
+                background=Color.parse("#181926"),
+            )
+        if style == cursor_style:
+            return Style(background=Color.parse("#8aadf4"))
+        return Style.null()
+
+    strip = content.render_strip(
+        0,
+        5,
+        Style.null(),
+        RenderOptions(get_style, {}, None, None, None),
+    )
+
+    assert requested_styles == [MISSING_SIDE_HATCH_STYLE, cursor_style]
+    assert "#8aadf4" in str(strip._segments[0].style)
+
+
 def test_block_annotations_can_style_missing_side_rows() -> None:
     """Block-rendered line prefixes should allow missing-side row backgrounds."""
     from rit.ui.widgets.diff_visual import LineAnnotations
@@ -69,6 +97,42 @@ def test_block_annotations_can_style_missing_side_rows() -> None:
 
     assert strip.text == "  "
     assert "on #363a4f" in str(strip._segments[0].style)
+
+
+@pytest.mark.asyncio
+async def test_block_split_cursor_stays_on_missing_selected_pane() -> None:
+    """Grouped split rows should highlight the selected missing-side hatch."""
+    patch = """@@ -1,2 +1,3 @@
+ line1
++added only
+-old content here
++new content here"""
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="split", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff_view.BLOCK_RENDER_LINE_THRESHOLD = 1
+
+        await diff_view.show_diff("test.py", parse_patch(patch, "test.py"))
+        await pilot.pause()
+        diff_view.focus()
+        diff_view.action_cycle_active_pane()
+        await pilot.press("j")
+        await pilot.pause()
+
+        block = diff_view._split_blocks_by_line[1]
+        row = block._rows_by_line[1]
+        left_visual = block._left_code._render()
+        right_visual = block._right_code._render()
+        assert isinstance(left_visual, LineContent)
+        assert isinstance(right_visual, LineContent)
+        assert left_visual.code_lines[row] is None
+        assert left_visual.line_styles[row] == "on $primary 25%"
+        assert right_visual.line_styles[row] != "on $primary 25%"
 
 
 @pytest.mark.asyncio

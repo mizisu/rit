@@ -244,6 +244,9 @@ def upsert_pending_comment(
         and 0 <= draft_index < len(comments)
         and _same_anchor(comments[draft_index], path=path, line=line, side=side)
     ):
+        draft = draft.model_copy(
+            update={"review_comment_id": comments[draft_index].review_comment_id}
+        )
         updated = list(comments)
         updated[draft_index] = draft
         return updated, draft
@@ -251,6 +254,9 @@ def upsert_pending_comment(
     if replace_existing:
         for index, existing in enumerate(comments):
             if _same_anchor(existing, path=path, line=line, side=side):
+                draft = draft.model_copy(
+                    update={"review_comment_id": existing.review_comment_id}
+                )
                 if len(comments) == 1:
                     return [draft], draft
                 updated = list(comments)

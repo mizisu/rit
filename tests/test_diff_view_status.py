@@ -463,6 +463,8 @@ async def test_split_cursor_movement_preserves_selected_pane_across_missing_side
         diff_view.action_cycle_active_pane()
         await pilot.pause()
         assert diff_view.active_pane == "old"
+        diff_view._move_cursor(column=3)
+        assert diff_view.cursor_column == 3
 
         await pilot.press("j")
         await pilot.pause()
@@ -471,8 +473,19 @@ async def test_split_cursor_movement_preserves_selected_pane_across_missing_side
         added_new_code = diff_view.query_one("#line-1-new .code-content", Static)
         assert diff_view.cursor_line == 1
         assert diff_view.active_pane == "old"
-        assert not added_old_code.has_class("-cursor")
-        assert added_new_code.has_class("-cursor")
+        assert diff_view.cursor_pane == "old"
+        assert diff_view.cursor_column == 0
+        assert added_old_code.has_class("-cursor")
+        assert not added_new_code.has_class("-cursor")
+
+        await pilot.press("v")
+        await pilot.pause()
+        await pilot.press("escape")
+        await pilot.pause()
+
+        assert diff_view.visual_mode is False
+        assert added_old_code.has_class("-cursor")
+        assert not added_new_code.has_class("-cursor")
 
         await pilot.press("j")
         await pilot.pause()
@@ -481,6 +494,7 @@ async def test_split_cursor_movement_preserves_selected_pane_across_missing_side
         modified_new_code = diff_view.query_one("#line-2-new .code-content", Static)
         assert diff_view.cursor_line == 2
         assert diff_view.active_pane == "old"
+        assert diff_view.cursor_column == 3
         assert modified_old_code.has_class("-cursor")
         assert not modified_new_code.has_class("-cursor")
 

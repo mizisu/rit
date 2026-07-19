@@ -601,6 +601,26 @@ class PRStore:
         self._remember_submitted_comment(comment)
         return comment
 
+    async def submit_file_comment(self, body: str, *, path: str) -> PRComment:
+        """Submit a review comment targeting an entire changed file."""
+        normalized = normalize_issue_comment_body(body)
+        if not path:
+            raise ValueError("Comment file path is unavailable")
+
+        pr = self._state.pr
+        commit_id = pr.head_sha if pr is not None else ""
+        if not commit_id:
+            raise ValueError("PR head SHA is unavailable")
+
+        comment = await self._service.create_file_comment(
+            self.pr_number,
+            body=normalized,
+            commit_id=commit_id,
+            path=path,
+        )
+        self._remember_submitted_comment(comment)
+        return comment
+
     def save_pending_inline_comment(
         self,
         body: str,
@@ -947,8 +967,26 @@ class PRStore:
             start_side=start_side,
             draft_index=draft_index,
         )
+        saved_version = self._pending_review_local_version
         if after_local_save is not None:
             await after_local_save()
+
+        if removed_comment is not None and removed_comment.review_comment_id:
+            try:
+                async with self._pending_review_sync_lock:
+                    await self._service.update_review_comment(
+                        removed_comment.review_comment_id,
+                        normalized,
+                    )
+            except Exception:
+                if should_restore_pending_review_snapshot(
+                    snapshot,
+                    rollback_if_version=saved_version,
+                    current_version=self._pending_review_local_version,
+                ):
+                    self.restore_pending_review_snapshot(snapshot)
+                raise
+            return draft
 
         await self.sync_pending_review(
             rollback_to=snapshot,

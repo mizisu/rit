@@ -97,6 +97,8 @@ def build_diff_geometry(
     extra_heights_by_line: dict[int, int] | None = None,
     inline_editor_line_index: int | None = None,
     inline_editor_height: int = 0,
+    file_editor_hunk_index: int | None = None,
+    file_editor_height: int = 0,
 ) -> DiffGeometry:
     if diff is None:
         return DiffGeometry([], [], [], [], 0, 0)
@@ -122,10 +124,12 @@ def build_diff_geometry(
     show_hunk_headers = diff.show_hunk_headers
 
     offset = 0
-    for hunk in diff.hunks:
+    for hunk_index, hunk in enumerate(diff.hunks):
         hunk_header_top_offsets.append(offset)
         if hunk.starts_file:
             offset += FILE_DIFF_HEADER_HEIGHT
+            if hunk_index == file_editor_hunk_index:
+                offset += max(0, file_editor_height)
         if show_hunk_headers:
             offset += 1
         for line in hunk.lines:

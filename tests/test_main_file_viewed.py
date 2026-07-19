@@ -19,10 +19,14 @@ class CaptureFileChanges:
 def test_toggle_file_viewed_uses_combined_diff_cursor_file() -> None:
     file = PRFile(filename="one.py")
     updates: list[str] = []
+    collapsed: list[str] = []
 
     class DiffView:
         has_focus = True
         current_file = "All files"
+
+        def collapse_viewed_file(self, filename: str) -> None:
+            collapsed.append(filename)
 
     class FileChanges:
         diff_view = DiffView()
@@ -53,6 +57,7 @@ def test_toggle_file_viewed_uses_combined_diff_cursor_file() -> None:
     screen.action_toggle_file_viewed()
 
     assert file.viewer_viewed_state == FileViewedState.VIEWED
+    assert collapsed == ["one.py"]
     assert updates == ["one.py"]
 
 

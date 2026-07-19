@@ -1,41 +1,19 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Literal
 
-from rich._emoji_codes import EMOJI as _RICH_EMOJI
-from textual import on
+from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.message import Message
 from textual.widgets import OptionList, Static, TextArea
-from textual.widgets.option_list import Option, OptionDoesNotExist
 
-EditorKind = Literal["issue", "inline"]
+from rit.ui.widgets.emoji_picker import EMOJI_PICKER_BINDINGS, EmojiPicker
+
+EditorKind = Literal["issue", "inline", "file"]
 SubmitMode = Literal["queue", "post"]
-
-_EMOJI_CLOSED_RE = re.compile(r":([A-Za-z0-9_+\-]+):$")
-_EMOJI_OPEN_RE = re.compile(r":([A-Za-z0-9_+\-]*)$")
-_EMOJI_BOUNDARY_CHARS = frozenset(" \t([{<")
-_EMOJI_NAMES = tuple(sorted(_RICH_EMOJI))
-_EMOJI_PREVIEW_LIMIT = 6
-_POPULAR_EMOJI_NAMES = ("rocket", "eyes", "white_check_mark", "tada", "heart", "+1")
-
-
-@dataclass(frozen=True, slots=True)
-class _EmojiToken:
-    start_column: int
-    end_column: int
-    name: str
-    closed: bool
-
-
-@dataclass(frozen=True, slots=True)
-class _EmojiSuggestion:
-    name: str
-    emoji: str
 
 
 __all__ = (
@@ -72,28 +50,15 @@ class InlineCommentEditor(Vertical):
     }
 
     InlineCommentEditor .comment-editor-body {
-        height: 6;
+        height: auto;
         min-height: 4;
         max-height: 12;
         margin-bottom: 1;
     }
-
-    InlineCommentEditor #comment-editor-emoji-options {
-        height: 6;
-        max-height: 8;
-        margin-bottom: 1;
-    }
-
-    InlineCommentEditor #comment-editor-emoji-options.-hidden {
-        display: none;
-    }
     """
 
     BINDINGS = [
-        Binding("down", "emoji_next", "Next emoji", show=False, priority=True),
-        Binding("up", "emoji_previous", "Previous emoji", show=False, priority=True),
-        Binding("enter,tab", "emoji_accept", "Select emoji", show=False, priority=True),
-        Binding("escape", "emoji_hide", "Hide emoji picker", show=False, priority=True),
+        *EMOJI_PICKER_BINDINGS,
         Binding("ctrl+s,ctrl+enter", "submit('queue')", "Save draft", show=False),
         Binding(
             "ctrl+shift+s,ctrl+shift+enter",
@@ -114,6 +79,15 @@ class InlineCommentEditor(Vertical):
     class Cancelled(Message):
         kind: EditorKind
 
+    @dataclass
+    class LayoutHeightChanged(Message):
+        editor: InlineCommentEditor
+        height: int
+
+        @property
+        def control(self) -> InlineCommentEditor:
+            return self.editor
+
     def __init__(
         self,
         *,
@@ -131,6 +105,7 @@ class InlineCommentEditor(Vertical):
         self._initial_text = initial_text
         self._selection_context = context
         self._pending_focus = False
+        self._reported_layout_height = 0
 
     def compose(self) -> ComposeResult:
         yield Static(self._title, classes="comment-editor-title")
@@ -147,12 +122,7 @@ class InlineCommentEditor(Vertical):
             show_line_numbers=False,
             placeholder=self._placeholder,
         )
-        yield OptionList(
-            id="comment-editor-emoji-options",
-            classes="-hidden",
-            compact=True,
-            markup=False,
-        )
+        yield EmojiPicker(id="comment-editor-emoji-options")
         if self._kind == "inline":
             hint = "Ctrl+S pending • Ctrl+Shift+S post now • Esc cancel"
         else:
@@ -163,6 +133,15 @@ class InlineCommentEditor(Vertical):
         if self._pending_focus:
             self._pending_focus = False
             self._focus_body()
+
+    def on_resize(self, event: events.Resize) -> None:
+        if not self.is_open:
+            return
+        layout_height = event.size.height + self.styles.margin.height
+        if layout_height == self._reported_layout_height:
+            return
+        self._reported_layout_height = layout_height
+        self.post_message(self.LayoutHeightChanged(self, layout_height))
 
     def _focus_body(self) -> None:
         body = self.query_one("#comment-editor-body", TextArea)
@@ -200,225 +179,39 @@ class InlineCommentEditor(Vertical):
 
     @on(TextArea.Changed, "#comment-editor-body")
     def _on_body_changed(self, event: TextArea.Changed) -> None:
-        self._refresh_emoji_options(event.text_area)
+        self._emoji_picker().refresh_for(event.text_area)
 
     @on(TextArea.SelectionChanged, "#comment-editor-body")
     def _on_body_selection_changed(self, event: TextArea.SelectionChanged) -> None:
-        self._refresh_emoji_options(event.text_area)
+        self._emoji_picker().refresh_for(event.text_area)
 
     @on(OptionList.OptionSelected, "#comment-editor-emoji-options")
     def _on_emoji_option_selected(self, event: OptionList.OptionSelected) -> None:
         event.stop()
-        self._accept_emoji_name(event.option_id)
+        body = self.query_one("#comment-editor-body", TextArea)
+        self._emoji_picker().accept(body, event.option_id)
 
     def action_emoji_next(self) -> None:
-        options = self._emoji_options_widget()
-        options.action_cursor_down()
+        self._emoji_picker().action_cursor_down()
 
     def action_emoji_previous(self) -> None:
-        options = self._emoji_options_widget()
-        options.action_cursor_up()
+        self._emoji_picker().action_cursor_up()
 
     def action_emoji_accept(self) -> None:
-        highlighted = self._emoji_options_widget().highlighted_option
-        if highlighted is None or highlighted.disabled:
-            return
-        self._accept_emoji_name(highlighted.id)
+        body = self.query_one("#comment-editor-body", TextArea)
+        self._emoji_picker().accept_highlighted(body)
 
     def action_emoji_hide(self) -> None:
-        self._hide_emoji_options()
+        self._emoji_picker().hide_picker()
         self.query_one("#comment-editor-body", TextArea).focus()
 
-    def _refresh_emoji_options(self, body: TextArea) -> None:
-        token = self._emoji_token_at_cursor(body)
-        if token is None:
-            self._hide_emoji_options()
-            return
-        suggestions = _emoji_suggestions_for_token(
-            token,
-            limit=_EMOJI_PREVIEW_LIMIT,
-        )
-        if not suggestions:
-            self._hide_emoji_options()
-            return
-
-        options = self._emoji_options_widget()
-        previous_id = _highlighted_option_id(options)
-        options.clear_options()
-        options.add_options(
-            [
-                Option(_format_emoji_option(suggestion), id=suggestion.name)
-                for suggestion in suggestions
-            ]
-        )
-        _restore_highlighted_emoji(options, previous_id, suggestions)
-        options.remove_class("-hidden")
-
-    def _accept_emoji_name(self, name: object | None) -> None:
-        if not isinstance(name, str):
-            return
-        emoji = _emoji_for_name(name)
-        if emoji is None:
-            return
-        body = self.query_one("#comment-editor-body", TextArea)
-        token = self._emoji_token_at_cursor(body)
-        if token is None:
-            return
-        row, _column = body.cursor_location
-        body.replace(
-            emoji,
-            (row, token.start_column),
-            (row, token.end_column),
-            maintain_selection_offset=False,
-        )
-        self._hide_emoji_options()
-        body.focus()
-
-    def _hide_emoji_options(self) -> None:
-        if not self.is_mounted:
-            return
-        options = self._emoji_options_widget()
-        options.clear_options()
-        options.add_class("-hidden")
-
-    def _emoji_options_widget(self) -> OptionList:
-        return self.query_one("#comment-editor-emoji-options", OptionList)
-
-    def _emoji_options_visible(self) -> bool:
-        if not self.is_mounted:
-            return False
-        return not self._emoji_options_widget().has_class("-hidden")
-
-    def _emoji_token_at_cursor(self, body: TextArea) -> _EmojiToken | None:
-        start, end = body.selection
-        if start != end:
-            return None
-        row, column = body.cursor_location
-        lines = body.document.lines
-        if row < 0 or row >= len(lines):
-            return None
-        return _emoji_token_for_line(lines[row], column)
+    def _emoji_picker(self) -> EmojiPicker:
+        return self.query_one("#comment-editor-emoji-options", EmojiPicker)
 
     def action_cancel(self) -> None:
         self.post_message(self.Cancelled(self._kind))
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action.startswith("emoji_"):
-            return self._emoji_options_visible()
+            return self.is_mounted and self._emoji_picker().is_open
         return super().check_action(action, parameters)
-
-
-def _emoji_token_for_line(line: str, cursor_column: int) -> _EmojiToken | None:
-    if cursor_column < 0 or cursor_column > len(line):
-        return None
-    prefix = line[:cursor_column]
-    match = _EMOJI_CLOSED_RE.search(prefix)
-    closed = match is not None
-    if match is None:
-        match = _EMOJI_OPEN_RE.search(prefix)
-    if match is None:
-        return None
-    if match.start() > 0 and line[match.start() - 1] not in _EMOJI_BOUNDARY_CHARS:
-        return None
-    return _EmojiToken(
-        start_column=match.start(),
-        end_column=cursor_column,
-        name=match.group(1),
-        closed=closed,
-    )
-
-
-def _resolve_emoji_name(name: str) -> str | None:
-    lowered = name.lower()
-    if lowered in _RICH_EMOJI:
-        return lowered
-    normalized = lowered.replace("-", "_")
-    if normalized in _RICH_EMOJI:
-        return normalized
-    return None
-
-
-def _emoji_for_name(name: str) -> str | None:
-    resolved = _resolve_emoji_name(name)
-    if resolved is None:
-        return None
-    return _RICH_EMOJI[resolved]
-
-
-def _emoji_suggestions_for_token(
-    token: _EmojiToken,
-    *,
-    limit: int,
-) -> list[_EmojiSuggestion]:
-    if token.closed:
-        resolved = _resolve_emoji_name(token.name)
-        if resolved is None:
-            return []
-        return [_EmojiSuggestion(name=resolved, emoji=_RICH_EMOJI[resolved])]
-    return _emoji_suggestions(token.name, limit=limit)
-
-
-def _emoji_suggestions(query: str, *, limit: int) -> list[_EmojiSuggestion]:
-    names = _popular_emoji_names() if not query else _matching_emoji_names(query)
-    suggestions: list[_EmojiSuggestion] = []
-    seen: set[str] = set()
-    for name in names:
-        resolved = _resolve_emoji_name(name)
-        if resolved is None or resolved in seen:
-            continue
-        suggestions.append(_EmojiSuggestion(name=resolved, emoji=_RICH_EMOJI[resolved]))
-        seen.add(resolved)
-        if len(suggestions) >= limit:
-            break
-    return suggestions
-
-
-def _popular_emoji_names() -> tuple[str, ...]:
-    return _POPULAR_EMOJI_NAMES
-
-
-def _matching_emoji_names(query: str) -> tuple[str, ...]:
-    lowered = query.lower()
-    normalized = lowered.replace("-", "_")
-    exact = [name for name in _EMOJI_NAMES if name in {lowered, normalized}]
-    prefix = [
-        name
-        for name in _EMOJI_NAMES
-        if name not in exact and name.replace("-", "_").startswith(normalized)
-    ]
-    contains = [
-        name
-        for name in _EMOJI_NAMES
-        if name not in exact
-        and name not in prefix
-        and normalized in name.replace("-", "_")
-    ]
-    return tuple(exact + prefix + contains)
-
-
-def _highlighted_option_id(options: OptionList) -> str | None:
-    highlighted = options.highlighted_option
-    if highlighted is None or not isinstance(highlighted.id, str):
-        return None
-    return highlighted.id
-
-
-def _restore_highlighted_emoji(
-    options: OptionList,
-    previous_id: str | None,
-    suggestions: list[_EmojiSuggestion],
-) -> None:
-    option_ids = [previous_id, suggestions[0].name]
-    for option_id in option_ids:
-        if option_id is None:
-            continue
-        try:
-            options.highlighted = options.get_option_index(option_id)
-            return
-        except OptionDoesNotExist:
-            pass
-    options.action_first()
-
-
-def _format_emoji_option(suggestion: _EmojiSuggestion) -> str:
-    return f"{suggestion.emoji} :{suggestion.name}:"

@@ -26,7 +26,8 @@ async def test_review_submit_screen_places_actions_below_body_in_requested_order
         options = screen.query_one("#review-submit-actions", OptionList)
 
         assert children[1].id == "review-submit-body"
-        assert children[2].id == "review-submit-actions"
+        assert children[2].id == "review-submit-emoji-options"
+        assert children[3].id == "review-submit-actions"
         assert [option.id for option in options.options] == [
             "COMMENT",
             "APPROVE",
@@ -67,7 +68,7 @@ async def test_review_submit_screen_shows_pending_draft_details() -> None:
         second_item = screen.query_one("#review-submit-pending-item-1", CommentCard)
         plain_widgets = list(screen.query(".comment-body-plain"))
 
-        assert children[3].id == "review-submit-pending"
+        assert children[4].id == "review-submit-pending"
         assert pending_list.region.height >= 8
         assert len(screen.query("CommentCard.review-submit-pending-item")) == 2
         assert str(first_item.query_one(".comment-header").render()) == (
@@ -100,6 +101,47 @@ async def test_review_submit_screen_prefills_initial_body() -> None:
         textarea = screen.query_one("#review-submit-body", TextArea)
 
         assert textarea.text == "saved summary"
+
+
+@pytest.mark.asyncio
+async def test_review_submit_screen_selects_and_submits_emoji_shortcode() -> None:
+    class TestApp(App):
+        def __init__(self) -> None:
+            super().__init__()
+            self.result: tuple[str, str] | None = None
+
+        def on_mount(self) -> None:
+            self.push_screen(ReviewSubmitScreen(), self._capture)
+
+        def _capture(self, result: tuple[str, str] | None) -> None:
+            self.result = result
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        screen = app.screen
+        textarea = screen.query_one("#review-submit-body", TextArea)
+        textarea.text = "ship :roc"
+        textarea.move_cursor((0, len("ship :roc")))
+        await pilot.pause()
+
+        options = screen.query_one("#review-submit-emoji-options", OptionList)
+        highlighted = options.highlighted_option
+
+        assert not options.has_class("-hidden")
+        assert highlighted is not None
+        assert highlighted.id == "rocket"
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert textarea.text == "ship 🚀"
+
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        assert app.result == ("COMMENT", "ship 🚀")
 
 
 @pytest.mark.asyncio

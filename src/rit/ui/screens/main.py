@@ -485,8 +485,17 @@ class MainScreen(Screen[None]):
         if self.current_tab != 1:
             return
 
+        diff_view = self.file_changes.diff_view
+        if diff_view.selected_file_header_path() is not None:
+            self.run_worker(
+                diff_view.open_file_comment_editor(),
+                exclusive=False,
+                name="_open_file_comment_editor",
+            )
+            return
+
         self.run_worker(
-            self.file_changes.diff_view.open_inline_comment_editor(),
+            diff_view.open_inline_comment_editor(),
             exclusive=False,
             name="_open_inline_comment_editor",
         )
@@ -704,6 +713,20 @@ class MainScreen(Screen[None]):
             return
 
         diff_view = self.file_changes.diff_view
+        if event.kind == "file":
+            target = diff_view.file_comment_target()
+            if target is None:
+                self.post_message(
+                    Flash("No file header selected", style="warning", duration=2.0)
+                )
+                return
+            self.run_worker(
+                self._post_file_comment(event.body, path=target),
+                exclusive=False,
+                name="_post_file_comment",
+            )
+            return
+
         target = diff_view.inline_comment_target()
         draft_index = diff_view.inline_comment_draft_index()
         start_line = diff_view.inline_comment_start_line()
@@ -752,6 +775,13 @@ class MainScreen(Screen[None]):
         event.stop()
         if event.kind == "issue":
             self.pr_info.close_issue_comment()
+            return
+        if event.kind == "file":
+            self.run_worker(
+                self.file_changes.diff_view.close_file_comment_editor(),
+                exclusive=False,
+                name="_close_file_comment_editor",
+            )
             return
         self.run_worker(
             self.file_changes.diff_view.close_inline_comment_editor(),
@@ -828,6 +858,14 @@ class MainScreen(Screen[None]):
     async def _submit_issue_comment(self, body: str) -> bool:
         await self.store.submit_issue_comment(body)
         self.pr_info.refresh_comments()
+        return True
+
+    async def _post_file_comment(self, body: str, *, path: str) -> bool:
+        await self.store.submit_file_comment(body, path=path)
+        await self.file_changes.diff_view.close_file_comment_editor()
+        await self.store.refresh_review_data()
+        self.pr_info.refresh_comments()
+        self.file_changes.file_tree.refresh_files()
         return True
 
     async def _submit_review(
@@ -1061,6 +1099,22 @@ class MainScreen(Screen[None]):
                 self.notify("Failed to post comment", severity="error")
             return
 
+        if event.worker.name == "_post_file_comment":
+            if event.state == WorkerState.SUCCESS:
+                self.post_message(
+                    Flash("File comment posted", style="success", duration=2.0)
+                )
+            elif event.state == WorkerState.ERROR:
+                self.notify(
+                    self._worker_error_message(
+                        event.worker,
+                        "Failed to post file comment",
+                    ),
+                    severity="error",
+                    markup=False,
+                )
+            return
+
         if event.worker.name == "_submit_review":
             if event.state == WorkerState.SUCCESS:
                 self.post_message(
@@ -1117,6 +1171,13 @@ class MainScreen(Screen[None]):
             if event.state == WorkerState.SUCCESS and event.worker.result is False:
                 self.post_message(
                     Flash("No diff line selected", style="warning", duration=2.0)
+                )
+            return
+
+        if event.worker.name == "_open_file_comment_editor":
+            if event.state == WorkerState.SUCCESS and event.worker.result is False:
+                self.post_message(
+                    Flash("No file header selected", style="warning", duration=2.0)
                 )
             return
 
@@ -1362,6 +1423,8 @@ class MainScreen(Screen[None]):
         )
 
         file.viewer_viewed_state = new_state
+        if new_state == FileViewedState.VIEWED:
+            self.file_changes.diff_view.collapse_viewed_file(filename)
         self.file_changes.update_file_view_state(filename)
 
         self.run_worker(

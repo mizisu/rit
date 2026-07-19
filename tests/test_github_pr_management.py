@@ -239,6 +239,70 @@ async def test_empty_participant_changes_skip_repo_lookup_and_gh_calls() -> None
 
 
 @pytest.mark.asyncio
+async def test_create_file_comment_posts_rest_file_subject_payload() -> None:
+    service = CaptureGitHubService(
+        outputs=[
+            json.dumps(
+                {
+                    "id": 300,
+                    "body": "check this file",
+                    "path": "app.py",
+                    "subject_type": "file",
+                    "pull_request_review_id": 80,
+                }
+            )
+        ]
+    )
+
+    comment = await service.create_file_comment(
+        123,
+        body="check this file",
+        commit_id="deadbeef",
+        path="app.py",
+    )
+
+    assert comment.id == 300
+    assert comment.subject_type == "file"
+    assert service.calls[0][0] == [
+        "api",
+        "--method",
+        "POST",
+        "/repos/owner/repo/pulls/123/comments",
+        "--input",
+        "-",
+    ]
+    assert service.calls[0][1] is not None
+    assert json.loads(service.calls[0][1]) == {
+        "body": "check this file",
+        "commit_id": "deadbeef",
+        "path": "app.py",
+        "subject_type": "file",
+    }
+
+
+@pytest.mark.asyncio
+async def test_update_review_comment_patches_existing_comment() -> None:
+    service = CaptureGitHubService(
+        outputs=[json.dumps({"id": 300, "body": "updated", "path": "app.py"})]
+    )
+
+    comment = await service.update_review_comment(300, "updated")
+
+    assert comment.id == 300
+    assert comment.body == "updated"
+    assert service.calls[0][0] == [
+        "api",
+        "--method",
+        "PATCH",
+        "/repos/owner/repo/pulls/comments/300",
+        "--input",
+        "-",
+    ]
+    assert service.calls[0][1] is not None
+    assert json.loads(service.calls[0][1]) == {"body": "updated"}
+
+
+@pytest.mark.asyncio
 async def test_create_review_comment_posts_submitted_review_graphql_payload() -> None:
     service = CaptureGitHubService(
         outputs=[

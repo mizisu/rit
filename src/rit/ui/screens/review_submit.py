@@ -12,6 +12,7 @@ from textual.widgets.option_list import Option
 
 from rit.state.models import PendingReviewComment
 from rit.ui.widgets.comment_card import CommentCard
+from rit.ui.widgets.emoji_picker import EMOJI_PICKER_BINDINGS, EmojiPicker
 
 ReviewEvent = Literal["APPROVE", "COMMENT", "REQUEST_CHANGES"]
 
@@ -104,6 +105,7 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
     """
 
     BINDINGS = [
+        *EMOJI_PICKER_BINDINGS,
         Binding("j", "cursor_down", "Next", show=False),
         Binding("k", "cursor_up", "Prev", show=False),
         Binding("tab", "focus_next", "Next Field", show=False),
@@ -121,6 +123,7 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
                 show_line_numbers=False,
                 placeholder="Write a review summary...",
             )
+            yield EmojiPicker(id="review-submit-emoji-options")
             yield OptionList(
                 Option("Comment", id="COMMENT"),
                 Option("Approve", id="APPROVE"),
@@ -148,7 +151,8 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
                                 classes="review-submit-pending-empty",
                             )
             yield Static(
-                "Write summary • Tab to action • Enter/Ctrl+S to submit • Esc to cancel"
+                "Write summary • :emoji to insert • Tab to action • "
+                "Enter/Ctrl+S to submit • Esc to cancel"
             )
 
     def on_mount(self) -> None:
@@ -157,6 +161,37 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
         body = self.query_one("#review-submit-body", TextArea)
         body.text = self._initial_body
         body.focus()
+
+    @on(TextArea.Changed, "#review-submit-body")
+    def _on_body_changed(self, event: TextArea.Changed) -> None:
+        self._emoji_picker().refresh_for(event.text_area)
+
+    @on(TextArea.SelectionChanged, "#review-submit-body")
+    def _on_body_selection_changed(self, event: TextArea.SelectionChanged) -> None:
+        self._emoji_picker().refresh_for(event.text_area)
+
+    @on(OptionList.OptionSelected, "#review-submit-emoji-options")
+    def _on_emoji_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        body = self.query_one("#review-submit-body", TextArea)
+        self._emoji_picker().accept(body, event.option_id)
+
+    def action_emoji_next(self) -> None:
+        self._emoji_picker().action_cursor_down()
+
+    def action_emoji_previous(self) -> None:
+        self._emoji_picker().action_cursor_up()
+
+    def action_emoji_accept(self) -> None:
+        body = self.query_one("#review-submit-body", TextArea)
+        self._emoji_picker().accept_highlighted(body)
+
+    def action_emoji_hide(self) -> None:
+        self._emoji_picker().hide_picker()
+        self.query_one("#review-submit-body", TextArea).focus()
+
+    def _emoji_picker(self) -> EmojiPicker:
+        return self.query_one("#review-submit-emoji-options", EmojiPicker)
 
     def action_cursor_down(self) -> None:
         self.query_one("#review-submit-actions", OptionList).action_cursor_down()
@@ -196,6 +231,8 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
         self.dismiss(None)
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action.startswith("emoji_"):
+            return self.is_mounted and self._emoji_picker().is_open
         if action in {"cursor_down", "cursor_up"} and isinstance(
             self.focused, TextArea
         ):

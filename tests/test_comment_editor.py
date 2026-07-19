@@ -50,6 +50,27 @@ async def test_inline_comment_editor_submits_trimmed_body_with_ctrl_s() -> None:
 
 
 @pytest.mark.asyncio
+async def test_inline_comment_editor_grows_with_content_up_to_max_height() -> None:
+    app = _make_app(kind="inline")
+    async with app.run_test(size=(80, 30)) as pilot:
+        await pilot.pause()
+
+        textarea = app.query_one("#comment-editor-body", TextArea)
+        initial_height = textarea.region.height
+
+        textarea.text = "long comment text " * 40
+        await pilot.pause()
+
+        assert textarea.region.height > initial_height
+        assert textarea.region.height <= 12
+
+        textarea.text = "\n".join(f"line {line}" for line in range(20))
+        await pilot.pause()
+
+        assert textarea.region.height == 12
+
+
+@pytest.mark.asyncio
 async def test_inline_comment_editor_queues_with_ctrl_s() -> None:
     """Ctrl+S should save inline comments as pending review drafts."""
 

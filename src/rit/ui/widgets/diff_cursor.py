@@ -100,8 +100,73 @@ def _activate_comment_cursor(view: DiffView, line_index: int) -> None:
         view.scroll_to_widget(widget, animate=False)
 
 
+def _file_header_before_row(view: DiffView, row: RenderedRow) -> int | None:
+    diff = view._diff
+    hunk_index = row.hunk_index
+    if diff is None or not 0 <= hunk_index < len(diff.hunks):
+        return None
+    if not diff.hunks[hunk_index].starts_file:
+        return None
+
+    first_row = _first_row_for_hunk(view, hunk_index)
+    if first_row is None or first_row.row_index != row.row_index:
+        return None
+    return hunk_index
+
+
+def _select_file_header(view: DiffView, hunk_index: int) -> bool:
+    selected = view._set_file_header_selection(hunk_index)
+    if selected:
+        _scroll_to_file_header(view, hunk_index)
+    return selected
+
+
+def _scroll_to_file_header(view: DiffView, hunk_index: int) -> None:
+    for widget in view.query(f"#file-header-{hunk_index}"):
+        if not widget.is_mounted:
+            continue
+        top = int(view.scroll_y) + (
+            widget.region.y - view.scrollable_content_region.y
+        )
+        _scroll_to_vertical_span(view, top, top + 1, animate=False)
+        return
+
+    if 0 <= hunk_index < len(view._hunk_header_top_offsets):
+        top = view._hunk_header_top_offsets[hunk_index]
+        _scroll_to_vertical_span(view, top, top + 1, animate=False)
+
+
+def _move_down_one_row_or_header(
+    view: DiffView,
+    *,
+    scroll_in_visual: bool,
+) -> bool:
+    rows = view._rows_for_current_mode()
+    if not rows:
+        return False
+    current = view._current_row_index()
+    target_index = current + 1
+    if not view.visual_mode and target_index < len(rows):
+        hunk_index = _file_header_before_row(view, rows[target_index])
+        if hunk_index is not None:
+            moved = _move_cursor_to_row(
+                view,
+                rows[target_index],
+                column=view._cursor_ui.desired_column,
+                scroll_in_visual=scroll_in_visual,
+                preserve_desired_column=True,
+            )
+            return _select_file_header(view, hunk_index) or moved
+    return _move_cursor_rows(view, 1, scroll_in_visual=scroll_in_visual)
+
+
 def _step_down_one(view: DiffView) -> bool:
     cur_line = view.cursor_line
+    if view._selected_file_header_hunk is not None:
+        view._set_file_header_selection(None)
+        _scroll_to_cursor(view)
+        return True
+
     n_comments = _comments.total_comments_at_line(view, cur_line)
     cur_offset = view._comment_cursor_index
 
@@ -113,7 +178,10 @@ def _step_down_one(view: DiffView) -> bool:
         # past last comment — leave the line entirely
         view._comment_cursor_index = 0
         _comments.update_cursor_highlight(view, cur_line, cur_line)
-        moved = _move_cursor_rows(view, 1, scroll_in_visual=view.visual_mode)
+        moved = _move_down_one_row_or_header(
+            view,
+            scroll_in_visual=view.visual_mode,
+        )
         if moved:
             _flush_cursor_ui_now_if_safe(view)
         return moved
@@ -127,13 +195,26 @@ def _step_down_one(view: DiffView) -> bool:
         _activate_comment_cursor(view, cur_line)
         return True
 
-    moved = _move_cursor_rows(view, 1, scroll_in_visual=view.visual_mode)
+    moved = _move_down_one_row_or_header(
+        view,
+        scroll_in_visual=view.visual_mode,
+    )
     if moved:
         _flush_cursor_ui_now_if_safe(view)
     return moved
 
 
 def _step_up_one(view: DiffView) -> bool:
+    if view._selected_file_header_hunk is not None:
+        current = view._current_row_index()
+        if current <= 0:
+            return False
+        view._set_file_header_selection(None)
+        moved = _move_cursor_rows(view, -1, scroll_in_visual=view.visual_mode)
+        if moved:
+            _flush_cursor_ui_now_if_safe(view)
+        return moved
+
     cur_line = view.cursor_line
     cur_offset = view._comment_cursor_index
 
@@ -148,6 +229,13 @@ def _step_up_one(view: DiffView) -> bool:
         view._update_line_cursor(cur_line)
         _scroll_to_cursor(view)
         return True
+
+    if not view.visual_mode:
+        row = view._current_row()
+        if row is not None:
+            hunk_index = _file_header_before_row(view, row)
+            if hunk_index is not None:
+                return _select_file_header(view, hunk_index)
 
     moved = _move_cursor_rows(view, -1, scroll_in_visual=view.visual_mode)
     if not moved:
@@ -569,6 +657,17 @@ def _row_is_visible(view: DiffView, row: RenderedRow) -> bool:
     return _geometry.row_is_visible(bounds, _viewport_geometry(view))
 
 
+def _row_is_near_viewport_center(view: DiffView, row: RenderedRow) -> bool:
+    bounds = _row_vertical_bounds(view, row)
+    if bounds is None:
+        return False
+
+    viewport = _viewport_geometry(view)
+    viewport_height = max(1, viewport.viewport_height)
+    viewport_center = viewport.scroll_y + viewport_height / 2
+    return abs(bounds[0] - viewport_center) <= max(1, viewport_height / 4)
+
+
 def _scroll_to_vertical_span(
     view: DiffView,
     top: int,
@@ -706,7 +805,7 @@ def _scroll_to_cursor_horizontal(view: DiffView) -> None:
         return
 
     scroll_widget = view._content_widget or view
-    prefix_width = view._unified_prefix_width_for_layout()
+    prefix_width = view._unified_prefix_width_for_layout(view._current_line())
     cursor_x = prefix_width + view.cursor_column
     viewport_width = max(1, scroll_widget.size.width)
     current_scroll = scroll_widget.scroll_x
@@ -944,6 +1043,7 @@ def _move_cursor(
     if not view._all_lines:
         return False
 
+    header_selection_cleared = view._set_file_header_selection(None)
     if not preserve_desired_column:
         view._cursor_ui.desired_column = None
 
@@ -954,12 +1054,10 @@ def _move_cursor(
     target_line = (
         old_line if line is None else max(0, min(line, len(view._all_lines) - 1))
     )
-    target_line_obj = view._all_lines[target_line]
     requested_pane = old_pane if pane is None else pane
     target_pane = requested_pane
-    target_side = view._resolve_active_pane_for_line(target_line_obj, target_pane)
 
-    target_text = _get_cursor_text_for_target(view, target_line, target_side)
+    target_text = _get_cursor_text_for_target(view, target_line, target_pane)
     requested_column = old_column if column is None else column
     target_column = _cursor_update.clamp_cursor_column(
         requested_column=requested_column,
@@ -972,7 +1070,7 @@ def _move_cursor(
         and target_pane == old_pane
         and (not update_active_pane or view.active_pane == target_pane)
     ):
-        return False
+        return header_selection_cleared
 
     view._cursor_ui.suspend_pane_watch = True
     view._cursor_ui.suspend_line_watch = True
