@@ -4,11 +4,13 @@ from bisect import bisect_left, bisect_right
 from collections.abc import Iterable, Iterator, Sequence
 from typing import overload
 
-from textual import highlight
 from textual.content import Content, Span
-from textual.highlight import HighlightTheme
 
 from rit.core.highlight_theme import RitHighlightTheme, RitLightHighlightTheme
+from rit.core.tree_sitter_highlighting import (
+    detect_tree_sitter_language,
+    highlight_with_tree_sitter,
+)
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 
 __all__ = (
@@ -22,29 +24,54 @@ __all__ = (
 
 
 _HIGHLIGHTER_PREWARMED = False
+_HIGHLIGHT_CONTEXT_LINES = 256
 WORD_DIFF_ADDED_STYLE = "on $success 20%"
 WORD_DIFF_DELETED_STYLE = "on $error 20%"
 
 
-def _syntax_theme_class(dark_mode: bool) -> type[HighlightTheme]:
+def _syntax_theme_class(
+    dark_mode: bool,
+) -> type[RitHighlightTheme] | type[RitLightHighlightTheme]:
     return RitHighlightTheme if dark_mode else RitLightHighlightTheme
 
 
+def _normalize_code(code: str) -> str:
+    if "\r" in code:
+        return "\n".join(code.splitlines())
+    if code.endswith("\n"):
+        return code[:-1]
+    return code
+
+
+def _highlight_code(
+    code: str,
+    *,
+    path: str,
+    dark_mode: bool,
+    language: str | None = None,
+) -> Content:
+    normalized_code = _normalize_code(code)
+    resolved_language = language or detect_tree_sitter_language(normalized_code, path)
+    theme = _syntax_theme_class(dark_mode)
+    return highlight_with_tree_sitter(
+        normalized_code,
+        language=resolved_language,
+        capture_styles=theme.STYLES,
+    )
+
+
 def prewarm_highlighter() -> None:
-    """Warm up Textual / Pygments highlight machinery once per process (expensive cold start)."""
+    """Warm up Tree-sitter highlighting once per process."""
     global _HIGHLIGHTER_PREWARMED
     if _HIGHLIGHTER_PREWARMED:
         return
 
-    sample = "def warmup():\n    return 1\n"
-    language = highlight.guess_language(sample, "warmup.py")
-    for dark_mode in (True, False):
-        highlight.highlight(
-            sample,
-            language=language,
-            path="warmup.py",
-            theme=_syntax_theme_class(dark_mode),
-        )
+    _highlight_code(
+        "def warmup():\n    return 1",
+        language="python",
+        path="warmup.py",
+        dark_mode=True,
+    )
     _HIGHLIGHTER_PREWARMED = True
 
 
@@ -111,6 +138,8 @@ def _count_side_lines(lines: Iterable[DiffLine]) -> tuple[int, int]:
     old_count = 0
     new_count = 0
     for line in lines:
+        if line.syntax_highlighting_disabled:
+            continue
         if line.has_old_side:
             old_count += 1
         if line.has_new_side:
@@ -190,14 +219,15 @@ def _diff_line_context_window_for_hunk(
 
     selected_start = max(0, start_line - hunk_start)
     selected_end = min(len(hunk.lines) - 1, end_line - hunk_start)
-    context_lines = _DiffLineWindow(hunk.lines, 0, selected_end + 1)
+    context_start = max(0, selected_start - _HIGHLIGHT_CONTEXT_LINES)
+    context_lines = _DiffLineWindow(hunk.lines, context_start, selected_end + 1)
     selected_lines = _DiffLineWindow(hunk.lines, selected_start, selected_end + 1)
-    if selected_start == 0:
+    if selected_start == context_start:
         old_offset = 0
         new_offset = 0
     else:
         old_offset, new_offset = _count_side_lines(
-            _DiffLineWindow(hunk.lines, 0, selected_start)
+            _DiffLineWindow(hunk.lines, context_start, selected_start)
         )
     filename = _filename_for_lines(selected_lines, fallback_filename)
     return filename, context_lines, selected_lines, old_offset, new_offset
@@ -208,6 +238,8 @@ def _collect_line_text(lines: Iterable[DiffLine]) -> tuple[list[str], list[str]]
     new_lines_text: list[str] = []
 
     for line in lines:
+        if line.syntax_highlighting_disabled:
+            continue
         if line.has_old_side:
             old_lines_text.append(line.old_content)
         if line.has_new_side:
@@ -223,27 +255,38 @@ def _highlight_text_lines(
     new_lines_text: list[str],
     dark_mode: bool = True,
 ) -> tuple[list[Content], list[Content]]:
-    language = highlight.guess_language(
-        "\n".join(old_lines_text or new_lines_text), filename
-    )
-    theme = _syntax_theme_class(dark_mode)
+    old_code = "\n".join(old_lines_text)
+    new_code = "\n".join(new_lines_text)
+    language = detect_tree_sitter_language(old_code or new_code, filename)
+
+    if old_lines_text == new_lines_text:
+        if not old_lines_text:
+            return [], []
+        highlighted = _highlight_code(
+            old_code,
+            language=language,
+            path=filename,
+            dark_mode=dark_mode,
+        )
+        content_lines = _highlighted_lines(highlighted, old_lines_text)
+        return content_lines, list(content_lines)
 
     old_highlighted = Content.empty()
     if old_lines_text:
-        old_highlighted = highlight.highlight(
-            "\n".join(old_lines_text),
+        old_highlighted = _highlight_code(
+            old_code,
             language=language,
             path=filename,
-            theme=theme,
+            dark_mode=dark_mode,
         )
 
     new_highlighted = Content.empty()
     if new_lines_text:
-        new_highlighted = highlight.highlight(
-            "\n".join(new_lines_text),
+        new_highlighted = _highlight_code(
+            new_code,
             language=language,
             path=filename,
-            theme=theme,
+            dark_mode=dark_mode,
         )
 
     old_content_lines = _highlighted_lines(old_highlighted, old_lines_text)
@@ -296,6 +339,8 @@ def _apply_highlighted_content_to_lines(
     new_idx = new_start_idx
 
     for line in lines:
+        if line.syntax_highlighting_disabled:
+            continue
         if line.has_old_side and old_idx < len(old_lines):
             line.highlighted_old_content = old_lines[old_idx]
             if include_word_diff and line.is_modified and line.old_segments:
