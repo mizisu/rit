@@ -1,3 +1,5 @@
+import pytest
+
 import rit.state.discussion_projection as discussion_projection
 from rit.state.discussion_projection import (
     RecentDiscussion,
@@ -7,12 +9,12 @@ from rit.state.discussion_projection import (
     update_thread_resolution,
 )
 from rit.state.models import (
-    NodeList,
     PR,
+    NodeList,
     PRComment,
     PRReview,
-    ReviewThread,
     ReviewState,
+    ReviewThread,
 )
 
 
@@ -395,9 +397,7 @@ def test_remember_submitted_review_only_replaces_target_review_comments() -> Non
         side="RIGHT",
     )
     review = PRReview(id=91, state=ReviewState.COMMENTED)
-    recent = RecentDiscussion(
-        review_comments={90: UnreachableComments([unrelated])}
-    )
+    recent = RecentDiscussion(review_comments={90: UnreachableComments([unrelated])})
 
     updated = discussion_projection.remember_submitted_review(
         recent,
@@ -536,6 +536,22 @@ def test_thread_from_submitted_comment_preserves_old_side_anchor() -> None:
 
     assert thread.line is None
     assert thread.original_line == 4
+    assert thread.root_comment == comment
+
+
+def test_thread_from_submitted_comment_preserves_file_subject() -> None:
+    comment = PRComment(
+        id=502,
+        body="whole file",
+        path="src/app.py",
+        subject_type="file",
+    )
+
+    thread = thread_from_submitted_comment(comment)
+
+    assert thread.subject_type == "FILE"
+    assert thread.line is None
+    assert thread.original_line is None
     assert thread.root_comment == comment
 
 

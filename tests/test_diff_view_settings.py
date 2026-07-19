@@ -34,7 +34,15 @@ def _combined_diff_with_single_sided_file(
                 file_status="modified",
                 file_additions=additions,
                 file_deletions=deletions,
-                lines=[changed_line],
+                lines=[
+                    changed_line,
+                    DiffLine(
+                        old_line_no=8,
+                        new_line_no=9,
+                        old_content="context",
+                        new_content="context",
+                    ),
+                ],
             ),
             DiffHunk(
                 old_start=1,
@@ -120,8 +128,14 @@ async def test_split_mode_renders_single_sided_combined_file_hunks_as_unified(
         assert _as_plain(diff_view.query_one("#line-0 .code-content", Static)) == (
             expected_text
         )
-        assert len(diff_view.query("#line-1-old")) == 1
-        assert len(diff_view.query("#line-1-new")) == 1
+        prefix = diff_view.query_one("#line-0 .line-prefix", Static)
+        assert _as_plain(prefix) == ("1 + " if additions else "1 - ")
+        assert prefix.size.width == 4
+        context_prefix = diff_view.query_one("#line-1 .line-prefix", Static)
+        assert _as_plain(context_prefix) == ("9   " if additions else "8   ")
+        assert context_prefix.size.width == 4
+        assert len(diff_view.query("#line-2-old")) == 1
+        assert len(diff_view.query("#line-2-new")) == 1
 
 
 @pytest.mark.asyncio

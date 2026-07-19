@@ -5,6 +5,7 @@ from rit.ui.widgets.diff_layout import (
     can_fit_auto_split_content,
     code_widths_for_layout,
     file_header_width_for_layout,
+    line_number_columns_for_change_counts,
     line_number_width_for_layout,
     preview_prefix_width_for_layout,
     should_force_unified_for_file,
@@ -250,6 +251,18 @@ def test_unified_and_preview_prefix_widths_for_layout() -> None:
         old_line_number_width=4,
         new_line_number_width=5,
     ) == 13
+    assert unified_prefix_width_for_layout(
+        show_line_numbers=True,
+        old_line_number_width=4,
+        new_line_number_width=5,
+        line_number_columns="old",
+    ) == 7
+    assert unified_prefix_width_for_layout(
+        show_line_numbers=True,
+        old_line_number_width=4,
+        new_line_number_width=5,
+        line_number_columns="new",
+    ) == 8
     assert preview_prefix_width_for_layout(
         show_line_numbers=False,
         new_line_number_width=5,
@@ -265,6 +278,13 @@ def test_line_number_width_for_layout_uses_visible_number_digits() -> None:
     assert line_number_width_for_layout(show_line_numbers=True, numbers=[]) == 1
     assert line_number_width_for_layout(show_line_numbers=True, numbers=[1, 9]) == 1
     assert line_number_width_for_layout(show_line_numbers=True, numbers=[1, 120]) == 3
+
+
+def test_line_number_columns_for_change_counts_hides_unused_side() -> None:
+    assert line_number_columns_for_change_counts(3, 0) == "new"
+    assert line_number_columns_for_change_counts(0, 3) == "old"
+    assert line_number_columns_for_change_counts(3, 2) == "both"
+    assert line_number_columns_for_change_counts(0, 0) == "both"
 
 
 def test_line_number_width_for_layout_single_number_skips_max(

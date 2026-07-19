@@ -187,10 +187,32 @@ class FileChanges(Horizontal):
             )
 
     def select_next_file(self) -> None:
-        self.file_tree.next_item()
+        self._select_relative_file(1)
 
     def select_prev_file(self) -> None:
-        self.file_tree.prev_item()
+        self._select_relative_file(-1)
+
+    def _select_relative_file(self, direction: Literal[-1, 1]) -> None:
+        files = self.store.state.files
+        file_count = len(files)
+        if file_count == 0:
+            return
+
+        current_filename = self.current_diff_file_target()
+        current_index = next(
+            (
+                index
+                for index, file in enumerate(files)
+                if file.filename == current_filename
+            ),
+            self.file_tree.get_current_index(),
+        )
+        target_index = (current_index + direction) % file_count
+        self.open_file(
+            files[target_index].filename,
+            focus_diff=True,
+            preserve_scroll_if_near_center=True,
+        )
 
     def next_hunk(self) -> None:
         self.diff_view.next_hunk()
@@ -198,12 +220,22 @@ class FileChanges(Horizontal):
     def prev_hunk(self) -> None:
         self.diff_view.prev_hunk()
 
-    def open_file(self, filename: str, *, focus_diff: bool) -> None:
+    def open_file(
+        self,
+        filename: str,
+        *,
+        focus_diff: bool,
+        preserve_scroll_if_near_center: bool = False,
+    ) -> None:
         """Open a file diff or jump within the combined diff."""
         if not filename:
             return
 
-        if self._jump_to_combined_file(filename, focus_diff=focus_diff):
+        if self._jump_to_combined_file(
+            filename,
+            focus_diff=focus_diff,
+            preserve_scroll_if_near_center=preserve_scroll_if_near_center,
+        ):
             self.file_tree.select_file(filename, emit_message=False)
             return
 
@@ -337,7 +369,13 @@ class FileChanges(Horizontal):
             return None
         return document
 
-    def _jump_to_combined_file(self, filename: str, *, focus_diff: bool) -> bool:
+    def _jump_to_combined_file(
+        self,
+        filename: str,
+        *,
+        focus_diff: bool,
+        preserve_scroll_if_near_center: bool = False,
+    ) -> bool:
         if not self._render_session.showing_combined_files:
             return False
 
@@ -352,7 +390,12 @@ class FileChanges(Horizontal):
             return False
 
         self.store.state.selected_file = filename
-        self.diff_view.jump_to_line_index(line_index, side="RIGHT", focus=focus_diff)
+        self.diff_view.jump_to_line_index(
+            line_index,
+            side="RIGHT",
+            focus=focus_diff,
+            preserve_scroll_if_near_center=preserve_scroll_if_near_center,
+        )
         return True
 
     def _combined_file_for_line(self, line_index: int) -> str | None:

@@ -62,7 +62,7 @@ def selected_text_for_visual_range(
             text = line_texts[line_idx]
 
             if line_idx == bounds.start_line:
-                selected_lines.append(text[bounds.first_line_col:])
+                selected_lines.append(text[bounds.first_line_col :])
             elif line_idx == bounds.end_line:
                 selected_lines.append(text[: bounds.last_line_col + 1])
             else:
@@ -99,11 +99,8 @@ def visual_yank_for_range(
         )
         line_count = bounds.end_line - bounds.start_line + 1
         suffix = "" if line_count == 1 else "s"
-        return VisualYank(text=text, success_message=f"Copied {line_count} line{suffix}")
+        return VisualYank(
+            text=text, success_message=f"Copied {line_count} line{suffix}"
+        )
 
-    char_count = len(text)
-    suffix = "" if char_count == 1 else "s"
-    return VisualYank(
-        text=text,
-        success_message=f"Copied {char_count} character{suffix}",
-    )
+    return VisualYank(text=text, success_message="Copied")

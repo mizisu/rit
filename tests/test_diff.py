@@ -1,5 +1,7 @@
 """Tests for diff algorithm."""
 
+from textual.content import Content
+
 from rit.core import diff as diff_module
 from rit.core import highlighting as highlighting_module
 from rit.core import types as types_module
@@ -10,8 +12,6 @@ from rit.core.diff import (
     parse_multi_file_patch,
     parse_patch,
 )
-from textual.content import Content
-
 from rit.core.highlighting import (
     apply_word_diff_spans,
     highlight_lines_for_diff,
@@ -103,9 +103,7 @@ class TestParsePatch:
                     old_count=1,
                     new_start=1,
                     new_count=0,
-                    lines=[
-                        DiffLine(old_line_no=1, new_line_no=None, is_deleted=True)
-                    ],
+                    lines=[DiffLine(old_line_no=1, new_line_no=None, is_deleted=True)],
                 )
             ],
         )
@@ -181,7 +179,9 @@ class TestParsePatch:
             types_module,
             "any",
             lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                AssertionError("empty hunk change check should not build an any iterator")
+                AssertionError(
+                    "empty hunk change check should not build an any iterator"
+                )
             ),
             raising=False,
         )
@@ -203,13 +203,16 @@ class TestParsePatch:
             raising=False,
         )
 
-        assert DiffHunk(
-            old_start=1,
-            old_count=0,
-            new_start=1,
-            new_count=1,
-            lines=[DiffLine(old_line_no=None, new_line_no=1, is_added=True)],
-        ).has_changes is True
+        assert (
+            DiffHunk(
+                old_start=1,
+                old_count=0,
+                new_start=1,
+                new_count=1,
+                lines=[DiffLine(old_line_no=None, new_line_no=1, is_added=True)],
+            ).has_changes
+            is True
+        )
 
     def test_parse_file_patch_summary_does_not_materialize_line_list(self):
         class NoSplitLines(str):
@@ -644,7 +647,9 @@ diff --git a/two.py b/two.py
         class NoSliceLines(list):
             def __getitem__(self, index):
                 if isinstance(index, slice):
-                    raise AssertionError("modified-line detection should not copy hunk slices")
+                    raise AssertionError(
+                        "modified-line detection should not copy hunk slices"
+                    )
                 return super().__getitem__(index)
 
         hunk = DiffHunk(
@@ -919,7 +924,9 @@ class TestComputeLineDiff:
 
     def test_single_line_replace_alignment_skips_matrix_setup(self, monkeypatch):
         def fail_range(*_args, **_kwargs):
-            raise AssertionError("single-line replace alignment should not build a matrix")
+            raise AssertionError(
+                "single-line replace alignment should not build a matrix"
+            )
 
         monkeypatch.setattr(diff_module, "range", fail_range, raising=False)
 
@@ -931,7 +938,9 @@ class TestComputeLineDiff:
         class NoSliceLines(list):
             def __getitem__(self, index):
                 if isinstance(index, slice):
-                    raise AssertionError("line diff replace chunks should not copy slices")
+                    raise AssertionError(
+                        "line diff replace chunks should not copy slices"
+                    )
                 return super().__getitem__(index)
 
         result = compute_line_diff(
@@ -1013,27 +1022,25 @@ class TestDiffHighlighting:
         assert content is not None
         start = content.plain.index(fragment)
         end = start + len(fragment)
+        style = None
         for span in content.spans:
-            if span.start == start and span.end == end:
-                return str(span.style)
-        return None
+            if span.start <= start and span.end >= end:
+                style = str(span.style)
+        return style
 
     def test_single_line_highlighting_avoids_content_split(self, monkeypatch):
         """Single-line highlight windows should reuse the highlighted content directly."""
 
         class SingleLineContent(Content):
             def split(self, *_args, **_kwargs):
-                raise AssertionError("single-line highlighting should not split content")
+                raise AssertionError(
+                    "single-line highlighting should not split content"
+                )
 
         def fake_highlight(text, **_kwargs):
             return SingleLineContent(text)
 
-        monkeypatch.setattr(highlighting_module.highlight, "highlight", fake_highlight)
-        monkeypatch.setattr(
-            highlighting_module.highlight,
-            "guess_language",
-            lambda *_args, **_kwargs: "python",
-        )
+        monkeypatch.setattr(highlighting_module, "_highlight_code", fake_highlight)
 
         diff = parse_patch("@@ -0,0 +1 @@\n+value = 1", "test.py")
         self._assign_line_indexes(diff)
@@ -1056,14 +1063,9 @@ class TestDiffHighlighting:
             ),
         )
         monkeypatch.setattr(
-            highlighting_module.highlight,
-            "highlight",
+            highlighting_module,
+            "_highlight_code",
             lambda text, **_kwargs: Content(text),
-        )
-        monkeypatch.setattr(
-            highlighting_module.highlight,
-            "guess_language",
-            lambda *_args, **_kwargs: "python",
         )
 
         diff = parse_patch("@@ -1 +1 @@\n-line 1\n+line 1", "test.py")
@@ -1127,22 +1129,25 @@ class TestDiffHighlighting:
                 dataclass_line.highlighted_new_content,
                 "@dataclass",
             )
-            == "#f4dbd6"
+            == "#8aadf4 not italic"
         )
         assert (
             self._style_for_fragment(
                 class_line.highlighted_new_content,
                 "ParsedFilePatchSummary",
             )
-            == "#eed49f"
+            == "#eed49f not italic"
         )
-        assert any(
-            str(span.style) == "#a6da95 italic"
-            for span in docstring_line.highlighted_new_content.spans
+        assert (
+            self._style_for_fragment(
+                docstring_line.highlighted_new_content,
+                "Lightweight metadata",
+            )
+            == "#a6da95 not italic"
         )
 
-    def test_generic_python_identifiers_use_body_text_style(self):
-        """Generic identifiers should stay at the body text color."""
+    def test_python_calls_and_constructors_use_semantic_styles(self):
+        """Tree-sitter should distinguish constructors and method calls."""
         diff = parse_patch(
             "@@ -0,0 +1,1 @@\n"
             "+reviewer_entity_ids = "
@@ -1154,13 +1159,15 @@ class TestDiffHighlighting:
         highlight_lines_for_diff(diff, include_word_diff=False)
 
         content = diff.hunks[0].lines[0].highlighted_new_content
-        assert self._style_for_fragment(content, "ReviewerService") == "#cad3f5"
+        assert (
+            self._style_for_fragment(content, "ReviewerService") == "#eed49f not italic"
+        )
         assert (
             self._style_for_fragment(
                 content,
                 "get_all_reviewer_entity_ids_by_review_cycle",
             )
-            == "#cad3f5"
+            == "#8aadf4 not italic"
         )
 
     def test_combined_diff_uses_line_file_path_for_python_highlighting(self):
@@ -1245,7 +1252,9 @@ class TestDiffHighlighting:
         class NoSliceLines(list):
             def __getitem__(self, index):
                 if isinstance(index, slice):
-                    raise AssertionError("range highlighting should not copy hunk slices")
+                    raise AssertionError(
+                        "range highlighting should not copy hunk slices"
+                    )
                 return super().__getitem__(index)
 
         patch = """@@ -1,4 +1,4 @@
@@ -1261,6 +1270,36 @@ class TestDiffHighlighting:
 
         assert diff.hunks[0].lines[1].highlighted_old_content is not None
         assert diff.hunks[0].lines[2].highlighted_new_content is not None
+
+    def test_range_highlighting_bounds_parser_context_for_late_windows(
+        self,
+        monkeypatch,
+    ):
+        patch = "@@ -1,20 +1,20 @@\n" + "\n".join(
+            f" line {line_number}" for line_number in range(1, 21)
+        )
+        diff = parse_patch(patch, "large.py")
+        self._assign_line_indexes(diff)
+        highlighted_sources = []
+
+        def capture_highlight(text, **_kwargs):
+            highlighted_sources.append(text)
+            return Content(text)
+
+        monkeypatch.setattr(highlighting_module, "_HIGHLIGHT_CONTEXT_LINES", 3)
+        monkeypatch.setattr(highlighting_module, "_highlight_code", capture_highlight)
+
+        highlight_lines_for_diff_range(
+            diff,
+            18,
+            18,
+            include_word_diff=False,
+        )
+
+        assert [source.splitlines() for source in highlighted_sources] == [
+            ["line 16", "line 17", "line 18", "line 19"],
+        ]
+        assert diff.hunks[0].lines[18].highlighted_new_content == Content("line 19")
 
     def test_highlight_lines_for_diff_range_uses_cached_hunk_indices(self):
         """Cached hunk ranges should avoid scanning every hunk for late windows."""

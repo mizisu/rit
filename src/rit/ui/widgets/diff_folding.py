@@ -73,7 +73,7 @@ def build_viewed_file_fold_diff(
 
 def is_folded_placeholder_line(line: DiffLine) -> bool:
     """Return whether a line is the synthetic folded-file placeholder."""
-    return (
+    return line.syntax_highlighting_disabled and (
         line.new_content == FOLDED_VIEWED_FILE_MESSAGE
         or line.old_content == FOLDED_VIEWED_FILE_MESSAGE
     )
@@ -110,6 +110,7 @@ def _collapsed_placeholder_line(source: DiffHunk, filename: str) -> DiffLine:
             old_content="",
             new_content=FOLDED_VIEWED_FILE_MESSAGE,
             file_path=filename,
+            syntax_highlighting_disabled=True,
         )
 
     return DiffLine(
@@ -118,4 +119,5 @@ def _collapsed_placeholder_line(source: DiffHunk, filename: str) -> DiffLine:
         old_content=FOLDED_VIEWED_FILE_MESSAGE,
         new_content="",
         file_path=filename,
+        syntax_highlighting_disabled=True,
     )

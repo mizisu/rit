@@ -84,9 +84,18 @@ class CommentCard(Vertical):
         display: none;
     }
 
+    CommentCard.-collapsed .comment-content,
+    CommentCard.-collapsed .inline-comment-preview {
+        display: none;
+    }
+
     CommentCard.thread-comment .comment-header,
     CommentCard.thread-reply .comment-header {
         margin: 0 0 1 0;
+    }
+
+    CommentCard.-collapsed .comment-header {
+        margin: 0;
     }
 
     CommentCard .comment-content {
@@ -235,6 +244,15 @@ class CommentCard(Vertical):
             self._preview_widget.update(self._build_preview(body))
         elif self._is_ready:
             self._schedule_body_mount()
+
+    @property
+    def collapsed(self) -> bool:
+        """Whether the comment body is collapsed."""
+        return self.has_class("-collapsed")
+
+    def toggle_collapsed(self) -> None:
+        """Toggle the comment body without unmounting its content."""
+        self.set_class(not self.collapsed, "-collapsed")
 
     def _schedule_body_mount(self) -> None:
         self._body_mount_generation += 1

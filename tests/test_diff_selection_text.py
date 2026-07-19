@@ -5,7 +5,9 @@ from rit.ui.widgets.diff_selection_text import (
 )
 
 
-def test_selected_text_for_visual_range_copies_line_mode_with_trailing_newline() -> None:
+def test_selected_text_for_visual_range_copies_line_mode_with_trailing_newline() -> (
+    None
+):
     assert (
         selected_text_for_visual_range(
             ["line1", "line2", "line3"],
@@ -123,7 +125,7 @@ def test_visual_yank_for_range_returns_line_mode_text_and_message() -> None:
     assert yank.success_message == "Copied 2 lines"
 
 
-def test_visual_yank_for_range_returns_singular_character_message() -> None:
+def test_visual_yank_for_range_returns_generic_character_mode_message() -> None:
     yank = visual_yank_for_range(
         ["abc"],
         visual_anchor_line=0,
@@ -134,10 +136,10 @@ def test_visual_yank_for_range_returns_singular_character_message() -> None:
     )
 
     assert yank.text == "b"
-    assert yank.success_message == "Copied 1 character"
+    assert yank.success_message == "Copied"
 
 
-def test_visual_yank_for_range_counts_copied_characters_in_multiline_text() -> None:
+def test_visual_yank_for_range_omits_multiline_character_count() -> None:
     yank = visual_yank_for_range(
         ["abc", "de"],
         visual_anchor_line=0,
@@ -148,4 +150,4 @@ def test_visual_yank_for_range_counts_copied_characters_in_multiline_text() -> N
     )
 
     assert yank.text == "bc\nde"
-    assert yank.success_message == "Copied 5 characters"
+    assert yank.success_message == "Copied"

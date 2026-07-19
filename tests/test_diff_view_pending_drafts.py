@@ -5,10 +5,12 @@ from textual.widgets import Static, TextArea
 from rit.core.diff import parse_patch
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.state.models import PendingReviewComment, PRComment, ReviewThread
+from rit.state.pending_review import merge_pending_review_drafts
 from rit.state.store import PRStore
 from rit.ui.widgets.comment_card import CommentCard
 from rit.ui.widgets.diff_comments import estimate_pending_draft_height
 from rit.ui.widgets.diff_view import DiffView
+from tests.conftest import wait_until
 
 
 def test_estimate_pending_draft_height_does_not_materialize_body_lines() -> None:
@@ -79,6 +81,221 @@ async def test_diff_view_renders_pending_draft_below_line() -> None:
         assert isinstance(draft_widget, CommentCard)
         assert len(app.query("CommentCard.pending-draft")) == 1
         assert draft_widget.region.y > line_widget.region.y
+
+
+@pytest.mark.asyncio
+async def test_virtualized_pending_draft_keeps_collapsed_state_after_remount() -> (
+    None
+):
+    context_lines = "\n".join(f" line{line}" for line in range(1, 41))
+    patch = f"@@ -1,40 +1,40 @@\n{context_lines}"
+    store = PRStore()
+    store.save_pending_inline_comment(
+        "line one\nline two\nline three",
+        path="test.py",
+        line=1,
+        side="RIGHT",
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(store=store, mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test(size=(80, 10)) as pilot:
+        diff_view = app.query_one(DiffView)
+        diff_view.VIRTUALIZE_LINE_THRESHOLD = 10
+        diff_view.VIRTUAL_WINDOW_RADIUS = 3
+        diff_view.VIRTUAL_WINDOW_SHIFT_MARGIN = 1
+
+        await diff_view.show_diff("test.py", parse_patch(patch, "test.py"))
+        await wait_until(
+            lambda: diff_view._virt.active
+            and len(diff_view.query("CommentCard.pending-draft")) == 1
+        )
+
+        diff_view.cursor_line = diff_view._comment_line_indices[0]
+        diff_view.focus()
+        await pilot.press("j")
+        await pilot.pause()
+
+        draft = diff_view.query_one("CommentCard.pending-draft", CommentCard)
+        assert "--cursor-line" in draft.classes
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert draft.collapsed is True
+
+        diff_view.scroll_to(y=diff_view.max_scroll_y, animate=False)
+        await wait_until(
+            lambda: diff_view._virt.window_start > 0
+            and len(diff_view.query("CommentCard.pending-draft")) == 0
+        )
+
+        diff_view.scroll_to(y=0, animate=False)
+        await wait_until(
+            lambda: diff_view._virt.window_start == 0
+            and len(diff_view.query("CommentCard.pending-draft")) == 1
+        )
+
+        remounted_draft = diff_view.query_one(
+            "CommentCard.pending-draft", CommentCard
+        )
+        assert remounted_draft.collapsed is True
+
+
+@pytest.mark.asyncio
+async def test_pending_draft_keeps_collapsed_state_when_sync_replaces_model() -> (
+    None
+):
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    diff = parse_patch(patch, "test.py")
+    store = PRStore()
+    original = store.save_pending_inline_comment(
+        "pending comment",
+        path="test.py",
+        line=1,
+        side="RIGHT",
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(store=store, mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        await diff_view.show_diff("test.py", diff)
+        await wait_until(
+            lambda: len(diff_view.query("CommentCard.pending-draft")) == 1
+        )
+
+        diff_view.cursor_line = diff_view._comment_line_indices[0]
+        diff_view.focus()
+        await pilot.press("j")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+
+        collapsed_draft = diff_view.query_one(
+            "CommentCard.pending-draft", CommentCard
+        )
+        assert collapsed_draft.collapsed is True
+
+        server_copy = original.model_copy(update={"review_comment_id": 91001})
+        replacement = merge_pending_review_drafts([original], [server_copy])[0]
+        assert replacement is not original
+        assert replacement.review_comment_id == 91001
+        store.state.pending_review_comments = [replacement]
+
+        await diff_view.show_diff("test.py", diff)
+        await wait_until(
+            lambda: len(diff_view.query("CommentCard.pending-draft")) == 1
+            and next(iter(diff_view._pending_comment_drafts_by_line.values()))[0]
+            is replacement
+        )
+
+        remounted_draft = diff_view.query_one(
+            "CommentCard.pending-draft", CommentCard
+        )
+        assert remounted_draft.collapsed is True
+
+
+@pytest.mark.asyncio
+async def test_virtualized_pending_draft_collapse_updates_scroll_geometry() -> None:
+    context_lines = "\n".join(f" line{line}" for line in range(1, 41))
+    patch = f"@@ -1,40 +1,40 @@\n{context_lines}"
+    store = PRStore()
+    store.save_pending_inline_comment(
+        "\n".join(f"comment line {line}" for line in range(1, 9)),
+        path="test.py",
+        line=1,
+        side="RIGHT",
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(store=store, mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test(size=(80, 10)) as pilot:
+        diff_view = app.query_one(DiffView)
+        diff_view.VIRTUALIZE_LINE_THRESHOLD = 10
+        diff_view.VIRTUAL_WINDOW_RADIUS = 3
+        diff_view.VIRTUAL_WINDOW_SHIFT_MARGIN = 1
+
+        await diff_view.show_diff("test.py", parse_patch(patch, "test.py"))
+        await wait_until(
+            lambda: diff_view._virt.active
+            and len(diff_view.query("CommentCard.pending-draft")) == 1
+        )
+
+        draft_line = diff_view._comment_line_indices[0]
+        next_line = draft_line + 1
+        diff_view.cursor_line = draft_line
+        diff_view.focus()
+        await pilot.press("j")
+        await pilot.pause()
+
+        draft = diff_view.query_one("CommentCard.pending-draft", CommentCard)
+        await wait_until(
+            lambda: len(draft.query(".comment-body-plain")) == 1
+            and draft.region.height > 0
+        )
+        expanded_widget_height = draft.region.height
+        expanded_virtual_height = diff_view._virtual_content_height
+        expanded_next_line_top = diff_view._line_top_offsets[next_line]
+        line_bottom_without_draft = (
+            diff_view._line_top_offsets[draft_line]
+            + diff_view._line_heights[draft_line]
+        )
+        expanded_draft_height = expanded_next_line_top - line_bottom_without_draft
+
+        await pilot.press("enter")
+        await wait_until(
+            lambda: draft.collapsed
+            and 0 < draft.region.height < expanded_widget_height
+        )
+
+        collapsed_draft_height = draft.region.height
+        geometry_delta = expanded_draft_height - collapsed_draft_height
+        assert geometry_delta > 0
+        assert (
+            diff_view._virtual_content_height
+            == expanded_virtual_height - geometry_delta
+        )
+        assert (
+            diff_view._line_top_offsets[next_line]
+            == expanded_next_line_top - geometry_delta
+        )
+
+        collapsed_virtual_height = diff_view._virtual_content_height
+        collapsed_next_line_top = diff_view._line_top_offsets[next_line]
+        collapsed_max_scroll_y = int(diff_view.max_scroll_y)
+
+        diff_view.scroll_to(y=diff_view.max_scroll_y, animate=False)
+        await wait_until(
+            lambda: diff_view._virt.window_start > 0
+            and len(diff_view.query("CommentCard.pending-draft")) == 0
+        )
+
+        assert diff_view._virtual_content_height == collapsed_virtual_height
+        assert diff_view._line_top_offsets[next_line] == collapsed_next_line_top
+        assert int(diff_view.max_scroll_y) == collapsed_max_scroll_y
+
+        diff_view.scroll_to(y=0, animate=False)
+        await wait_until(
+            lambda: diff_view._virt.window_start == 0
+            and len(diff_view.query("CommentCard.pending-draft")) == 1
+        )
+
+        remounted_draft = diff_view.query_one(
+            "CommentCard.pending-draft", CommentCard
+        )
+        assert remounted_draft.collapsed is True
+        assert diff_view._virtual_content_height == collapsed_virtual_height
+        assert diff_view._line_top_offsets[next_line] == collapsed_next_line_top
+        assert int(diff_view.max_scroll_y) == collapsed_max_scroll_y
 
 
 @pytest.mark.asyncio

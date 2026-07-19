@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Sequence
+from typing import Literal
 
 from rich.cells import cell_len
 
@@ -10,10 +11,12 @@ from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.state.models import PRFile
 
 __all__ = (
+    "LineNumberColumns",
     "can_fit_auto_split_content",
     "code_widths_for_layout",
     "file_header_width_for_layout",
     "line_number_width_for_layout",
+    "line_number_columns_for_change_counts",
     "preview_prefix_width_for_layout",
     "should_force_unified_for_file",
     "should_force_unified_for_hunk",
@@ -21,6 +24,9 @@ __all__ = (
     "split_prefix_width_for_layout",
     "unified_prefix_width_for_layout",
 )
+
+
+type LineNumberColumns = Literal["old", "new", "both"]
 
 
 def should_force_unified_for_file(
@@ -107,11 +113,29 @@ def unified_prefix_width_for_layout(
     show_line_numbers: bool,
     old_line_number_width: int,
     new_line_number_width: int,
+    line_number_columns: LineNumberColumns = "both",
 ) -> int:
     """Return prefix cell width for unified diff lines."""
     if not show_line_numbers:
         return 2
-    return old_line_number_width + new_line_number_width + 4
+    width = 2
+    if line_number_columns in {"old", "both"}:
+        width += old_line_number_width + 1
+    if line_number_columns in {"new", "both"}:
+        width += new_line_number_width + 1
+    return width
+
+
+def line_number_columns_for_change_counts(
+    additions: int,
+    deletions: int,
+) -> LineNumberColumns:
+    """Return the useful unified line-number columns for file change counts."""
+    if additions > 0 and deletions == 0:
+        return "new"
+    if deletions > 0 and additions == 0:
+        return "old"
+    return "both"
 
 
 def preview_prefix_width_for_layout(

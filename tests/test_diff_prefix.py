@@ -36,6 +36,48 @@ def test_build_unified_prefix_content_formats_line_numbers_and_change_marker() -
     )
 
 
+def test_build_unified_prefix_content_can_use_one_line_number_column() -> None:
+    context = DiffLine(old_line_no=7, new_line_no=80)
+    added = DiffLine(old_line_no=None, new_line_no=80, is_added=True)
+
+    assert (
+        str(
+            build_unified_prefix_content(
+                context,
+                show_line_numbers=True,
+                old_line_number_width=2,
+                new_line_number_width=3,
+                line_number_columns="new",
+            )
+        )
+        == " 80   "
+    )
+    assert (
+        str(
+            build_unified_prefix_content(
+                context,
+                show_line_numbers=True,
+                old_line_number_width=2,
+                new_line_number_width=3,
+                line_number_columns="old",
+            )
+        )
+        == " 7   "
+    )
+    assert (
+        str(
+            build_unified_prefix_content(
+                added,
+                show_line_numbers=True,
+                old_line_number_width=2,
+                new_line_number_width=3,
+                line_number_columns="new",
+            )
+        )
+        == " 80 + "
+    )
+
+
 def test_build_preview_prefix_content_formats_preview_markers() -> None:
     line = DiffLine(
         old_line_no=1,

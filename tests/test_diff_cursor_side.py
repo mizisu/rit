@@ -33,10 +33,14 @@ def test_resolve_active_pane_keeps_preferred_pane_for_modified_lines() -> None:
     assert resolve_active_pane_for_line(modified, "new") == "new"
 
 
-def test_cursor_side_for_split_mode_never_returns_auto() -> None:
+def test_cursor_side_for_split_mode_preserves_selected_pane() -> None:
     context = DiffLine(old_line_no=1, new_line_no=1)
+    added = DiffLine(old_line_no=None, new_line_no=2, is_added=True)
+    deleted = DiffLine(old_line_no=2, new_line_no=None, is_deleted=True)
 
     assert cursor_side_for_line(context, split=True, cursor_pane="old") == "old"
+    assert cursor_side_for_line(added, split=True, cursor_pane="old") == "old"
+    assert cursor_side_for_line(deleted, split=True, cursor_pane="new") == "new"
 
 
 def test_cursor_side_for_unified_mode_uses_auto_only_for_context_lines() -> None:

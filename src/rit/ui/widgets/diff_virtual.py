@@ -7,15 +7,15 @@ from collections.abc import Iterator, Sequence
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, overload
 
-from textual.widgets import Static
 from textual.containers import VerticalScroll
+from textual.widgets import Static
 
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_geometry as _geometry
 
-
 if TYPE_CHECKING:
     from rit.core.types import DiffLine
+    from rit.state.models import PendingReviewComment
 
 __all__ = ()
 
@@ -98,6 +98,8 @@ def _rebuild_virtual_layout(view) -> None:
             view, "_inline_comment_editor_line_index", None
         ),
         inline_editor_height=view._inline_comment_editor_height(),
+        file_editor_hunk_index=getattr(view, "_file_comment_editor_hunk_index", None),
+        file_editor_height=view._file_comment_editor_height(),
     )
     view._hunk_header_top_offsets = geometry.hunk_header_top_offsets
     view._line_top_offsets = geometry.line_top_offsets
@@ -109,18 +111,25 @@ def _rebuild_virtual_layout(view) -> None:
 
 def _extra_heights_by_line(view) -> dict[int, int]:
     from rit.ui.widgets.diff_comments import (
+        COLLAPSED_PENDING_DRAFT_HEIGHT,
         estimate_pending_draft_height,
         estimate_thread_height,
+        pending_draft_is_collapsed,
     )
 
     extra_heights: dict[int, int] = {}
 
+    def draft_height(draft: PendingReviewComment) -> int:
+        if pending_draft_is_collapsed(view, draft):
+            return COLLAPSED_PENDING_DRAFT_HEIGHT
+        return estimate_pending_draft_height(draft)
+
     pending_draft_map = getattr(view, "_pending_comment_drafts_by_line", {})
     for line_index, drafts in pending_draft_map.items():
         height = (
-            estimate_pending_draft_height(drafts[0])
+            draft_height(drafts[0])
             if len(drafts) == 1
-            else sum(estimate_pending_draft_height(draft) for draft in drafts)
+            else sum(draft_height(draft) for draft in drafts)
         )
         extra_heights[line_index] = extra_heights.get(line_index, 0) + height
 

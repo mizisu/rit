@@ -12,8 +12,26 @@ from rit.state.models import (
 )
 from rit.state.store import PRStore
 from rit.ui.components.file_changes import FileChanges
+from rit.ui.widgets.comment_card import CommentCard
 from rit.ui.widgets.diff_folding import FOLDED_VIEWED_FILE_MESSAGE
+from rit.ui.widgets.diff_view import DiffView
 from tests.conftest import wait_until
+
+
+def test_collapse_viewed_file_clears_manual_expansion() -> None:
+    filename = "one.py"
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename=filename, viewer_viewed_state=FileViewedState.VIEWED)
+    ]
+    diff_view = DiffView(store=store)
+    diff_view._expanded_viewed_files.add(filename)
+
+    assert diff_view._should_collapse_file(filename) is False
+
+    diff_view.collapse_viewed_file(filename)
+
+    assert diff_view._should_collapse_file(filename) is True
 
 
 def _make_review_thread(path: str, *, root_id: int, line: int) -> ReviewThread:
@@ -39,7 +57,7 @@ def _make_review_thread(path: str, *, root_id: int, line: int) -> ReviewThread:
 
 @pytest.mark.asyncio
 async def test_enter_toggles_viewed_file_fold_in_combined_diff() -> None:
-    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    patch = "@@ -1,1 +1,1 @@\n-old_value\n+new_value"
     store = PRStore()
     store.state.files_loading = LoadingState.LOADED
     store.state.files = [
@@ -62,8 +80,16 @@ async def test_enter_toggles_viewed_file_fold_in_combined_diff() -> None:
     app = TestApp()
     async with app.run_test() as pilot:
         file_changes = app.query_one(FileChanges)
+        file_changes.diff_view.mode = "split"
         file_changes.refresh_files()
         await wait_until(lambda: file_changes.diff_view.current_file == "All files")
+        await wait_until(
+            lambda: len(file_changes.diff_view.query("#file-header-0")) == 1
+        )
+        await wait_until(
+            lambda: len(file_changes.diff_view.query("#line-1-old")) == 1
+            and len(file_changes.diff_view.query("#line-1-new")) == 1
+        )
 
         diff_view = file_changes.diff_view
         first_header = diff_view.query_one("#file-header-0", Static)
@@ -72,6 +98,11 @@ async def test_enter_toggles_viewed_file_fold_in_combined_diff() -> None:
         assert header_text.startswith("▸ one.py")
         assert diff_view._folded_file_paths == frozenset({"one.py"})
         assert diff_view._all_lines[0].new_content == FOLDED_VIEWED_FILE_MESSAGE
+        assert diff_view.split is True
+        assert len(diff_view.query("#line-0-old")) == 0
+        assert len(diff_view.query("#line-0-new")) == 0
+        assert len(diff_view.query("#line-1-old")) == 1
+        assert len(diff_view.query("#line-1-new")) == 1
 
         diff_view.focus()
         await pilot.press("enter")
@@ -135,6 +166,69 @@ async def test_enter_toggles_unviewed_file_fold_in_combined_diff() -> None:
         first_header = diff_view.query_one("#file-header-0", Static)
         header_text = str(getattr(first_header.content, "plain", first_header.content))
         assert header_text.startswith("▾ one.py")
+
+
+@pytest.mark.asyncio
+async def test_enter_on_selected_pending_draft_does_not_fold_file() -> None:
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    store = PRStore()
+    store.state.files_loading = LoadingState.LOADED
+    store.state.files = [
+        PRFile(filename="one.py", status="modified", patch=patch),
+        PRFile(filename="two.py", status="modified", patch=patch),
+    ]
+    store.state.file_diffs = {
+        filename: parse_patch(patch, filename) for filename in ["one.py", "two.py"]
+    }
+    store.save_pending_inline_comment(
+        "pending comment",
+        path="one.py",
+        line=1,
+        side="RIGHT",
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await wait_until(lambda: file_changes.diff_view.current_file == "All files")
+        await wait_until(
+            lambda: len(file_changes.diff_view.query("CommentCard.pending-draft"))
+            == 1
+        )
+
+        diff_view = file_changes.diff_view
+        diff_view.cursor_line = diff_view._comment_line_indices[0]
+        diff_view.focus()
+        await pilot.press("j")
+        await pilot.pause()
+
+        draft = diff_view.query_one("CommentCard.pending-draft", CommentCard)
+        assert diff_view._comment_cursor_index == 1
+        assert "--cursor-line" in draft.classes
+        assert draft.has_class("-collapsed") is False
+        initial_height = draft.region.height
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert diff_view._folded_file_paths == frozenset()
+        assert diff_view._manually_folded_files == set()
+        assert draft.is_mounted is True
+        assert draft.has_class("-collapsed") is True
+        assert draft.region.height < initial_height
+
+        await pilot.press("enter")
+        await pilot.pause()
+
+        assert diff_view._folded_file_paths == frozenset()
+        assert diff_view._manually_folded_files == set()
+        assert draft.has_class("-collapsed") is False
+        assert draft.region.height == initial_height
 
 
 @pytest.mark.asyncio

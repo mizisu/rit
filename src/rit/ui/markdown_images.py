@@ -28,10 +28,11 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Static
+from textual.widgets import Markdown, Static
 from textual_image._terminal import get_cell_size
 from textual_image.widget import TGPImage as TerminalImage
 
+from rit.ui.github_markdown import github_markdown_parser
 from rit.ui.terminal_graphics import (
     configure_terminal_graphics,
     terminal_graphics_status_message,
@@ -722,15 +723,15 @@ def mount_markdown_image_parts(
     image_fetcher: ImageFetcher | None = None,
 ) -> None:
     """Mount markdown text and inline image widgets."""
-    from textual.widgets import Markdown
-
     for part in parse_markdown_image_parts(body, base_url=base_url):
         if part.table:
             container.mount(MarkdownImageTable(part.table, fetcher=image_fetcher))
         elif part.image:
             container.mount(MarkdownImageBlock(part.image, fetcher=image_fetcher))
         elif part.content:
-            container.mount(Markdown(part.content))
+            container.mount(
+                Markdown(part.content, parser_factory=github_markdown_parser)
+            )
 
 
 async def fetch_image_bytes_async(

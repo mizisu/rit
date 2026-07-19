@@ -7,6 +7,8 @@ from rit.ui.widgets.diff_selection_text import VisualYank
 
 
 class _YankView:
+    visual_mode = False
+
     def __init__(self) -> None:
         self.copied: str | None = None
         self.messages: list[Flash] = []
@@ -16,6 +18,9 @@ class _YankView:
 
     def post_message(self, message: Flash) -> None:
         self.messages.append(message)
+
+    def selected_file_header_path(self) -> str | None:
+        return None
 
 
 class _NoIterLines(list):
@@ -318,6 +323,36 @@ def test_single_line_selection_refresh_uses_singleton_tuple_for_grouped_blocks(
 
 def test_visual_yank_does_not_scan_every_diff_line() -> None:
     view = _VisualYankView()
+
+    diff_selection._yank(view)
+
+    assert view.copied == "line1\nline2\n"
+    assert view.visual_mode is False
+
+
+def test_yank_copies_selected_file_header_path() -> None:
+    class FileHeaderYankView(_YankView):
+        def selected_file_header_path(self) -> str | None:
+            return "src/rit/ui/widgets/diff_view.py"
+
+    view = FileHeaderYankView()
+
+    diff_selection._yank(view)
+
+    assert view.copied == "src/rit/ui/widgets/diff_view.py"
+    assert len(view.messages) == 1
+    assert view.messages[0].content == (
+        "Copied file path: src/rit/ui/widgets/diff_view.py"
+    )
+    assert view.messages[0].style == "success"
+
+
+def test_visual_yank_takes_precedence_over_selected_file_header() -> None:
+    class VisualFileHeaderYankView(_VisualYankView):
+        def selected_file_header_path(self) -> str | None:
+            return "src/rit/ui/widgets/diff_view.py"
+
+    view = VisualFileHeaderYankView()
 
     diff_selection._yank(view)
 

@@ -35,6 +35,25 @@ async def test_comment_card_mounts_markdown_without_delayed_preview(
 
 
 @pytest.mark.asyncio
+async def test_markdown_comment_card_preserves_github_line_breaks() -> None:
+    body = "[단순 질문]\n아래의 prefetch도 is_done 기준으로 가져오나요?"
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield CommentCard("Header", body)
+
+    app = TestApp()
+    async with app.run_test():
+        await wait_until(lambda: len(app.query("MarkdownParagraph")) == 1)
+
+        paragraph = app.query_one("MarkdownParagraph", Static)
+        await wait_until(lambda: paragraph.size.height == 2)
+        text = str(getattr(paragraph.content, "plain", paragraph.content))
+
+        assert text == body
+
+
+@pytest.mark.asyncio
 async def test_plain_comment_card_uses_single_static_body() -> None:
     class TestApp(App[None]):
         def compose(self) -> ComposeResult:

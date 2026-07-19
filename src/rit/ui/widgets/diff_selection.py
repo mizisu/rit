@@ -110,6 +110,17 @@ def _copy_yank_to_clipboard(view: DiffView, yank: _selection_text.VisualYank) ->
 
 
 def _yank(view: DiffView) -> None:
+    selected_file_path = view.selected_file_header_path()
+    if not view.visual_mode and selected_file_path is not None:
+        _copy_yank_to_clipboard(
+            view,
+            _selection_text.VisualYank(
+                text=selected_file_path,
+                success_message=f"Copied file path: {selected_file_path}",
+            ),
+        )
+        return
+
     if not view._all_lines:
         return
 
@@ -269,14 +280,21 @@ def _clear_line_selection(view: DiffView, line_idx: int) -> None:
     if not code_widgets:
         return
 
+    line = view._all_lines[line_idx]
     for widget in code_widgets:
         if widget.has_class("-placeholder"):
+            has_cursor = view._diff_line_cursor_active(
+                line_idx
+            ) and view._widget_matches_cursor_side(line, widget)
+            if has_cursor:
+                widget.add_class("-cursor")
+            else:
+                widget.remove_class("-cursor")
             continue
 
         widget.remove_class("-selected")
         widget.remove_class("-anchor")
 
-        line = view._all_lines[line_idx]
         side = view._get_line_side_for_widget(line, widget)
         has_cursor = view._diff_line_cursor_active(
             line_idx
@@ -313,6 +331,13 @@ def _apply_line_selection(
 
     for widget in code_widgets:
         if widget.has_class("-placeholder"):
+            has_cursor = view._diff_line_cursor_active(
+                line_idx
+            ) and view._widget_matches_cursor_side(line, widget)
+            if has_cursor:
+                widget.add_class("-cursor")
+            else:
+                widget.remove_class("-cursor")
             continue
 
         actual_end = end_col if end_col is not None else len(text) - 1

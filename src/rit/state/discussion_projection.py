@@ -228,6 +228,7 @@ def thread_from_submitted_comment(comment: PRComment) -> ReviewThread:
             "line": line,
             "originalLine": original_line,
             "diffSide": comment.side,
+            "subjectType": comment.subject_type.upper(),
             "comments": {"nodes": [comment]},
         }
     )

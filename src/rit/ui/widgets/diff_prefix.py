@@ -7,6 +7,7 @@ from typing import Literal
 from textual.content import Content
 
 from rit.core.types import DiffLine
+from rit.ui.widgets.diff_layout import LineNumberColumns
 
 __all__ = (
     "build_preview_prefix_content",
@@ -23,6 +24,7 @@ def build_unified_prefix_content(
     show_line_numbers: bool,
     old_line_number_width: int,
     new_line_number_width: int,
+    line_number_columns: LineNumberColumns = "both",
 ) -> Content:
     """Build the prefix for a normal unified diff line."""
     prefix = _unified_change_prefix(line)
@@ -31,6 +33,16 @@ def build_unified_prefix_content(
 
     old_no = str(line.old_line_no) if line.old_line_no else ""
     new_no = str(line.new_line_no) if line.new_line_no else ""
+    if line_number_columns == "old":
+        return Content.assemble(
+            (f"{old_no:>{old_line_number_width}} ", "$text-disabled"),
+            prefix + " ",
+        )
+    if line_number_columns == "new":
+        return Content.assemble(
+            (f"{new_no:>{new_line_number_width}} ", "$text-disabled"),
+            prefix + " ",
+        )
     return Content.assemble(
         (f"{old_no:>{old_line_number_width}} ", "$text-disabled"),
         (f"{new_no:>{new_line_number_width}} ", "$text-disabled"),

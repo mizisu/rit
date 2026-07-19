@@ -30,7 +30,7 @@ def cursor_side_for_line(
 ) -> Literal["old", "new", "auto"]:
     """Return the line side used for cursor/text operations."""
     if split:
-        return resolve_active_pane_for_line(line, cursor_pane)
+        return cursor_pane
     if line.is_modified:
         return resolve_active_pane_for_line(line, cursor_pane)
     if line.is_deleted:

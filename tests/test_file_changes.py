@@ -20,6 +20,7 @@ from rit.ui.components.combined_diff import CombinedDiffDocument
 from rit.ui.components.file_changes import FileChanges
 from rit.ui.widgets.diff_render import _create_file_header_widget
 from rit.ui.widgets.diff_view import DiffView
+from tests.conftest import wait_until
 
 
 class FakeRawDiffService:
@@ -1605,6 +1606,117 @@ async def test_combined_diff_maps_pending_drafts_by_file_path() -> None:
         await pilot.pause()
 
         assert sorted(file_changes.diff_view._pending_comment_drafts_by_line) == [3]
+
+
+@pytest.mark.asyncio
+async def test_bracket_file_navigation_preserves_centered_target_scroll() -> None:
+    lines = "\n".join(f" line {line}" for line in range(1, 17))
+    patch = f"@@ -1,16 +1,16 @@\n{lines}"
+    filenames = ["one.py", "two.py", "three.py"]
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename=filename, status="modified", patch=patch)
+        for filename in filenames
+    ]
+    store.state.file_diffs = {
+        filename: parse_patch(patch, filename) for filename in filenames
+    }
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test(size=(100, 10)) as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await wait_until(lambda: file_changes.diff_view.current_file == "All files")
+
+        diff_view = file_changes.diff_view
+        target_line = file_changes._combined_file_line_starts["two.py"]
+        target_row = diff_view._row_for_line_and_pane(target_line, "new")
+        assert target_row is not None
+        bounds = diff_view._row_vertical_bounds(target_row)
+        assert bounds is not None
+
+        viewport_height = diff_view.scrollable_content_region.height
+        centered_scroll = max(0, round(bounds[0] - viewport_height / 2))
+        diff_view.scroll_to(y=centered_scroll, animate=False)
+        diff_view.focus()
+        await pilot.pause()
+        initial_scroll = int(diff_view.scroll_y)
+        assert initial_scroll == centered_scroll
+
+        await pilot.press("]")
+        await wait_until(lambda: diff_view.cursor_line == target_line)
+
+        assert store.state.selected_file == "two.py"
+        assert file_changes.file_tree.selected_file == "two.py"
+        assert int(diff_view.scroll_y) == initial_scroll
+
+        third_line = file_changes._combined_file_line_starts["three.py"]
+        third_row = diff_view._row_for_line_and_pane(third_line, "new")
+        assert third_row is not None
+        third_bounds = diff_view._row_vertical_bounds(third_row)
+        assert third_bounds is not None
+
+        await pilot.press("]")
+        await wait_until(lambda: diff_view.cursor_line == third_line)
+
+        assert int(diff_view.scroll_y) == third_bounds[0] - 2
+
+
+@pytest.mark.asyncio
+async def test_bracket_file_navigation_uses_current_cursor_file() -> None:
+    patch = "@@ -1,1 +1,1 @@\n line"
+    filenames = ["one.py", "two.py", "three.py"]
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename=filename, status="modified", patch=patch)
+        for filename in filenames
+    ]
+    store.state.file_diffs = {
+        filename: parse_patch(patch, filename) for filename in filenames
+    }
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test(size=(100, 5)) as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await wait_until(lambda: file_changes.diff_view.current_file == "All files")
+
+        diff_view = file_changes.diff_view
+        second_file_line = file_changes._combined_file_line_starts["two.py"]
+        diff_view.jump_to_line_index(second_file_line, side="RIGHT", focus=True)
+        await wait_until(lambda: diff_view.cursor_line == second_file_line)
+        diff_view.scroll_to(y=0, animate=False)
+        await pilot.pause()
+
+        assert diff_view._all_lines[diff_view.cursor_line].file_path == "two.py"
+        assert int(diff_view.scroll_y) == 0
+
+        third_file_line = file_changes._combined_file_line_starts["three.py"]
+        await pilot.press("]")
+        await wait_until(lambda: diff_view.cursor_line == third_file_line)
+
+        assert store.state.selected_file == "three.py"
+        assert file_changes.file_tree.selected_file == "three.py"
+
+        diff_view.jump_to_line_index(second_file_line, side="RIGHT", focus=True)
+        await wait_until(lambda: diff_view.cursor_line == second_file_line)
+        diff_view.scroll_to(y=0, animate=False)
+        await pilot.pause()
+
+        first_file_line = file_changes._combined_file_line_starts["one.py"]
+        await pilot.press("[")
+        await wait_until(lambda: diff_view.cursor_line == first_file_line)
+
+        assert store.state.selected_file == "one.py"
+        assert file_changes.file_tree.selected_file == "one.py"
 
 
 @pytest.mark.asyncio

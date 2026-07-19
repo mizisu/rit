@@ -18,6 +18,7 @@ PRInfo #pr-info-layout {
 PRInfo #main-scroll {
     width: 1fr;
     height: 100%;
+    scrollbar-gutter: stable;
 }
 
 /* Inner container */

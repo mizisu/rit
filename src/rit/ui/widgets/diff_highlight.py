@@ -6,7 +6,7 @@ import asyncio
 from functools import partial
 from typing import TYPE_CHECKING
 
-from textual.message_pump import NoActiveAppError
+from textual._context import NoActiveAppError
 
 from rit.core.highlighting import (
     highlight_lines_for_diff,
@@ -14,7 +14,6 @@ from rit.core.highlighting import (
     prewarm_highlighter,
 )
 from rit.core.types import DiffLine, FileDiff
-
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_virtual as _virtual
 
@@ -23,6 +22,8 @@ if TYPE_CHECKING:
 
 
 __all__ = ()
+
+_HIGHLIGHT_WINDOW_CHUNK_LINES = 64
 
 
 async def _prewarm_highlighter(view) -> None:
@@ -185,6 +186,8 @@ def _use_windowed_highlight_strategy(view, diff: FileDiff | None = None) -> bool
 
 @staticmethod
 def _line_has_highlight(view, line: DiffLine) -> bool:
+    if line.syntax_highlighting_disabled:
+        return True
     if line.old_content and line.highlighted_old_content is None:
         return False
     if line.new_content and line.highlighted_new_content is None:
@@ -215,9 +218,18 @@ def _current_highlight_window(view) -> tuple[int, int]:
         visible_start = view._line_index_at_vertical_offset(viewport_top)
         visible_end = view._line_index_at_vertical_offset(viewport_bottom)
         buffer = min(buffer, max(12, viewport_height // 2))
+        last_line_index = len(view._all_lines) - 1
+        window_start = max(0, visible_start - buffer)
+        window_end = min(last_line_index, visible_end + buffer)
         return (
-            max(0, visible_start - buffer),
-            min(len(view._all_lines) - 1, visible_end + buffer),
+            window_start // _HIGHLIGHT_WINDOW_CHUNK_LINES
+            * _HIGHLIGHT_WINDOW_CHUNK_LINES,
+            min(
+                last_line_index,
+                (window_end // _HIGHLIGHT_WINDOW_CHUNK_LINES + 1)
+                * _HIGHLIGHT_WINDOW_CHUNK_LINES
+                - 1,
+            ),
         )
 
     return start, end

@@ -92,6 +92,7 @@ class UnifiedDiffBlock(Horizontal):
         classes: str | None = None,
     ) -> None:
         self.line_indices = _line_indices_tuple(line_indices)
+        self._row_ranges_by_line: dict[int, tuple[int, int]] = {}
         self._annotations = LineAnnotations([], classes="line-prefix")
         self._code = DiffCode(classes="code-content")
         super().__init__(
@@ -108,9 +109,33 @@ class UnifiedDiffBlock(Horizontal):
         code_lines: list[Content | None],
         line_styles: list[str],
         width: int | None = None,
+        row_ranges: dict[int, tuple[int, int]] | None = None,
     ) -> None:
+        if row_ranges is not None:
+            self._row_ranges_by_line = row_ranges
         self._annotations.numbers = annotations
         self._code.update(LineContent(code_lines, line_styles, width=width))
+
+    def update_rows(
+        self,
+        updates: dict[int, tuple[list[Content | None], list[str]]],
+    ) -> bool:
+        """Update source rows whose block structure is unchanged."""
+        code_updates: list[tuple[int, Content | None, str]] = []
+        for line_index, (code_lines, line_styles) in updates.items():
+            row_range = self._row_ranges_by_line.get(line_index)
+            if row_range is None:
+                return False
+            start, end = row_range
+            if len(code_lines) != end - start or len(line_styles) != end - start:
+                return False
+            code_updates.extend(
+                (row, code_line, line_style)
+                for row, code_line, line_style in zip(
+                    range(start, end), code_lines, line_styles, strict=True
+                )
+            )
+        return self._code.update_rows(code_updates)
 
 
 class SplitDiffBlock(Horizontal):
@@ -122,6 +147,9 @@ class SplitDiffBlock(Horizontal):
         classes: str | None = None,
     ) -> None:
         self.line_indices = _line_indices_tuple(line_indices)
+        self._rows_by_line = {
+            line_index: row for row, line_index in enumerate(self.line_indices)
+        }
         self._left_annotations = LineAnnotations([], classes="line-prefix")
         self._left_code = DiffCode(classes="code-content -old-side")
         self._left_scroll = SyncedCodeScroll(
@@ -177,6 +205,28 @@ class SplitDiffBlock(Horizontal):
         self._right_code.update(
             LineContent(right_code_lines, right_styles, width=right_width)
         )
+
+    def update_rows(
+        self,
+        updates: dict[
+            int,
+            tuple[Content | None, str, Content | None, str],
+        ],
+    ) -> bool:
+        """Update source rows whose split block structure is unchanged."""
+        left_updates: list[tuple[int, Content | None, str]] = []
+        right_updates: list[tuple[int, Content | None, str]] = []
+        for line_index, (left_code, left_style, right_code, right_style) in (
+            updates.items()
+        ):
+            row = self._rows_by_line.get(line_index)
+            if row is None:
+                return False
+            left_updates.append((row, left_code, left_style))
+            right_updates.append((row, right_code, right_style))
+        if not self._left_code.update_rows(left_updates):
+            return False
+        return self._right_code.update_rows(right_updates)
 
 
 @dataclass(frozen=True)

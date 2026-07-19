@@ -6,7 +6,7 @@ from rich.segment import Segment
 from rich.style import Style as RichStyle
 from textual.content import Content
 from textual.css.styles import RulesMap
-from textual.geometry import Size
+from textual.geometry import Region, Size
 from textual.reactive import reactive
 from textual.selection import Selection
 from textual.strip import Strip
@@ -78,54 +78,63 @@ class LineContent(Visual):
     def render_strips(
         self, width: int, height: int | None, style: Style, options: RenderOptions
     ) -> list[Strip]:
-        strips: list[Strip] = []
+        return [
+            self.render_strip(y, width, style, options)
+            for y in range(len(self.code_lines))
+        ]
+
+    def render_strip(
+        self,
+        y: int,
+        width: int,
+        style: Style,
+        options: RenderOptions,
+    ) -> Strip:
+        """Render one source row while preserving its global selection offset."""
+        line = self.code_lines[y]
+        color = self.line_styles[y]
         selection = options.selection
         selection_style = options.selection_style or Style.null()
 
-        for y, (line, color) in enumerate(zip(self.code_lines, self.line_styles)):
-            if line is None:
-                meta = {"offset": (0, y)}
-                missing_style = (
-                    style.rich_style
-                    + options.get_style(MISSING_SIDE_HATCH_STYLE).rich_style
-                    + RichStyle.from_meta(meta)
-                )
-                text = missing_side_hatch_text(width, row_index=y)
-                strips.append(Strip([Segment(text, missing_style)], width))
-                continue
+        if line is None:
+            meta = {"offset": (0, y)}
+            hatch_style = options.get_style(MISSING_SIDE_HATCH_STYLE).rich_style
+            row_style = (
+                options.get_style(color).rich_style if color else RichStyle()
+            )
+            missing_style = (
+                style.rich_style
+                + hatch_style
+                + row_style
+                + RichStyle.from_meta(meta)
+            )
+            text = missing_side_hatch_text(width, row_index=y)
+            return Strip([Segment(text, missing_style)], width)
+
+        if selection is not None:
+            if span := selection.get_span(y):
+                start, end = span
+                if end == -1:
+                    end = len(line)
+                line = line.stylize(selection_style, start, end)
+
+        if line.cell_length < width:
+            line = line.pad_right(width - line.cell_length)
+
+        line = line.stylize_before(color).stylize_before(style)
+
+        x = 0
+        meta = {"offset": (x, y)}
+        segments = []
+        for text, rich_style, _ in line.render_segments():
+            if rich_style is not None:
+                meta["offset"] = (x, y)
+                segments.append(Segment(text, rich_style + RichStyle.from_meta(meta)))
             else:
-                # Apply selection if present
-                if selection is not None:
-                    if span := selection.get_span(y):
-                        start, end = span
-                        if end == -1:
-                            end = len(line)
-                        line = line.stylize(selection_style, start, end)
+                segments.append(Segment(text, rich_style))
+            x += len(text)
 
-            # Pad line to width if needed
-            if line.cell_length < width:
-                line = line.pad_right(width - line.cell_length)
-
-            # Apply line background style and base style
-            line = line.stylize_before(color).stylize_before(style)
-
-            # Convert to segments with offset metadata
-            x = 0
-            meta = {"offset": (x, y)}
-            segments = []
-            for text, rich_style, _ in line.render_segments():
-                if rich_style is not None:
-                    meta["offset"] = (x, y)
-                    segments.append(
-                        Segment(text, rich_style + RichStyle.from_meta(meta))
-                    )
-                else:
-                    segments.append(Segment(text, rich_style))
-                x += len(text)
-
-            strips.append(Strip(segments, line.cell_length))
-
-        return strips
+        return Strip(segments, line.cell_length)
 
     def get_optimal_width(self, rules: RulesMap, container_width: int) -> int:
         if self._content_width is None:
@@ -262,6 +271,87 @@ class DiffCode(Static):
     """
 
     ALLOW_SELECT = True
+
+    def render_line(self, y: int) -> Strip:
+        self._dirty_regions.clear()
+        visual = self._render()
+        width = self.size.width
+        visual_style = self.visual_style
+        if not isinstance(visual, LineContent) or not 0 <= y < len(
+            visual.code_lines
+        ):
+            return Strip.blank(width, visual_style.rich_style)
+
+        selection = self.text_selection
+        selection_style = (
+            Style.from_styles(self.screen.get_component_styles("screen--selection"))
+            if selection is not None
+            else None
+        )
+        strip = visual.render_strip(
+            y,
+            width,
+            visual_style,
+            RenderOptions(
+                self._get_style,
+                self.styles.get_rules(),
+                selection,
+                selection_style,
+            ),
+        )
+        if self.auto_links and not self.is_container and not self.screen._selecting:
+            strip = strip._apply_link_style(self.link_style)
+        return strip
+
+    def update_rows(
+        self,
+        updates: Iterable[tuple[int, Content | None, str]],
+    ) -> bool:
+        """Update fixed-size rows without invalidating the entire visual."""
+        visual = self._render()
+        if not isinstance(visual, LineContent):
+            return False
+
+        pending = list(updates)
+        if not pending:
+            return True
+
+        row_count = len(visual.code_lines)
+        for row, content, _ in pending:
+            if not 0 <= row < row_count:
+                return False
+            old_content = visual.code_lines[row]
+            if visual._width is None and (
+                old_content is None
+                or content is None
+                or old_content.cell_length != content.cell_length
+            ):
+                return False
+
+        dirty_rows: set[int] = set()
+        for row, content, line_style in pending:
+            visual.code_lines[row] = content
+            visual.line_styles[row] = line_style
+            dirty_rows.add(row)
+
+        ordered_rows = sorted(dirty_rows)
+        regions: list[Region] = []
+        region_start = ordered_rows[0]
+        region_end = region_start + 1
+        for row in ordered_rows[1:]:
+            if row == region_end:
+                region_end += 1
+                continue
+            regions.append(
+                Region(0, region_start, self.size.width, region_end - region_start)
+            )
+            region_start = row
+            region_end = row + 1
+        regions.append(
+            Region(0, region_start, self.size.width, region_end - region_start)
+        )
+        self.refresh(*regions, layout=False)
+        return True
 
     def get_selection(self, selection: Selection) -> tuple[str, str] | None:
         visual = self._render()

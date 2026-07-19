@@ -7,10 +7,10 @@ from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.css.query import NoMatches
 
+import rit.ui.components.pr_info as pr_info_module
 from rit.state.models import PR, PRLabel, PRUser
 from rit.state.reviewer_status import ReviewerDisplayState
 from rit.state.store import PRStore
-import rit.ui.components.pr_info as pr_info_module
 from rit.ui.components.pr_info import PRInfo
 from rit.ui.components.pr_timeline import PRTimeline
 
@@ -352,6 +352,7 @@ def test_pr_info_css_uses_github_like_center_column() -> None:
     assert "max-width: 152;" in layout_block
     assert "width: 100%;" in layout_block
     assert "width: 1fr;" in main_scroll_block
+    assert "scrollbar-gutter: stable;" in main_scroll_block
     assert "padding: 0;" in wide_block
 
 

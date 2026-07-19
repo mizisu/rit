@@ -41,7 +41,6 @@ def _should_use_unified_block_renderer(view) -> bool:
     return (
         (view._virt.active or len(view._all_lines) >= view.BLOCK_RENDER_LINE_THRESHOLD)
         and not view.split
-        and view.mode in {"unified", "auto"}
     )
 
 
@@ -49,7 +48,6 @@ def _should_use_split_block_renderer(view) -> bool:
     return (
         (view._virt.active or len(view._all_lines) >= view.BLOCK_RENDER_LINE_THRESHOLD)
         and view.split
-        and view.mode in {"split", "auto"}
     )
 
 
@@ -295,11 +293,16 @@ def _refresh_unified_blocks_for_lines(view, line_indices: Collection[int]) -> bo
             block = view._unified_blocks_by_line.get(line_idx)
             if block is None:
                 return False
-            _refresh_unified_block(view, block)
+            if isinstance(block, UnifiedDiffBlock):
+                if not _refresh_unified_block_rows(view, block, (line_idx,)):
+                    _refresh_unified_block(view, block)
+            else:
+                _refresh_unified_block(view, block)
             return True
         return False
 
     seen: set[int] = set()
+    partial_blocks: dict[int, tuple[UnifiedDiffBlock, list[int]]] = {}
     refreshed = False
 
     for line_idx in line_indices:
@@ -307,33 +310,64 @@ def _refresh_unified_blocks_for_lines(view, line_indices: Collection[int]) -> bo
         if block is None:
             continue
         block_id = id(block)
+        if isinstance(block, UnifiedDiffBlock):
+            partial = partial_blocks.get(block_id)
+            if partial is None:
+                partial_blocks[block_id] = (block, [line_idx])
+            else:
+                partial[1].append(line_idx)
+            refreshed = True
+            continue
         if block_id in seen:
             continue
         seen.add(block_id)
         _refresh_unified_block(view, block)
         refreshed = True
 
+    for block, dirty_line_indices in partial_blocks.values():
+        if not _refresh_unified_block_rows(view, block, dirty_line_indices):
+            _refresh_unified_block(view, block)
+
     return refreshed
+
+
+def _refresh_unified_block_rows(
+    view,
+    block: UnifiedDiffBlock,
+    line_indices: Collection[int],
+) -> bool:
+    updates: dict[int, tuple[list[Content | None], list[str]]] = {}
+    for line_idx in line_indices:
+        if line_idx not in block._row_ranges_by_line:
+            return False
+        line = view._all_lines[line_idx]
+        _, code_lines, line_styles = _build_unified_block_row_data(view, line)
+        updates[line_idx] = (code_lines, line_styles)
+    return block.update_rows(updates)
 
 
 def _refresh_unified_block(view, block: UnifiedDiffBlock) -> None:
     annotations: list[Content] = []
     code_lines: list[Content | None] = []
     line_styles: list[str] = []
+    row_ranges: dict[int, tuple[int, int]] = {}
     for line_idx in block.line_indices:
         line = view._all_lines[line_idx]
+        row_start = len(code_lines)
         row_annotations, row_code_lines, row_styles = _build_unified_block_row_data(
             view, line
         )
         annotations.extend(row_annotations)
         code_lines.extend(row_code_lines)
         line_styles.extend(row_styles)
+        row_ranges[line_idx] = (row_start, len(code_lines))
 
     block.update_block(
         annotations=annotations,
         code_lines=code_lines,
         line_styles=line_styles,
         width=view._unified_code_width,
+        row_ranges=row_ranges,
     )
 
 
@@ -364,11 +398,16 @@ def _refresh_split_blocks_for_lines(view, line_indices: Collection[int]) -> bool
             block = view._split_blocks_by_line.get(line_idx)
             if block is None:
                 return False
-            _refresh_split_block(view, block)
+            if isinstance(block, SplitDiffBlock):
+                if not _refresh_split_block_rows(view, block, (line_idx,)):
+                    _refresh_split_block(view, block)
+            else:
+                _refresh_split_block(view, block)
             return True
         return False
 
     seen: set[int] = set()
+    partial_blocks: dict[int, tuple[SplitDiffBlock, list[int]]] = {}
     refreshed = False
 
     for line_idx in line_indices:
@@ -376,13 +415,49 @@ def _refresh_split_blocks_for_lines(view, line_indices: Collection[int]) -> bool
         if block is None:
             continue
         block_id = id(block)
+        if isinstance(block, SplitDiffBlock):
+            partial = partial_blocks.get(block_id)
+            if partial is None:
+                partial_blocks[block_id] = (block, [line_idx])
+            else:
+                partial[1].append(line_idx)
+            refreshed = True
+            continue
         if block_id in seen:
             continue
         seen.add(block_id)
         _refresh_split_block(view, block)
         refreshed = True
 
+    for block, dirty_line_indices in partial_blocks.values():
+        if not _refresh_split_block_rows(view, block, dirty_line_indices):
+            _refresh_split_block(view, block)
+
     return refreshed
+
+
+def _refresh_split_block_rows(
+    view,
+    block: SplitDiffBlock,
+    line_indices: Collection[int],
+) -> bool:
+    updates: dict[int, tuple[Content | None, str, Content | None, str]] = {}
+    for line_idx in line_indices:
+        if line_idx not in block._rows_by_line:
+            return False
+        line = view._all_lines[line_idx]
+        (
+            _,
+            _,
+            left_code,
+            left_style,
+            _,
+            _,
+            right_code,
+            right_style,
+        ) = _build_split_block_row_data(view, line)
+        updates[line_idx] = (left_code, left_style, right_code, right_style)
+    return block.update_rows(updates)
 
 
 def _refresh_split_block(view, block: SplitDiffBlock) -> None:
@@ -528,13 +603,16 @@ def _render_unified_line_block(
     annotations: list[Content] = []
     code_lines: list[Content | None] = []
     line_styles: list[str] = []
+    row_ranges: dict[int, tuple[int, int]] = {}
     for line in lines:
+        row_start = len(code_lines)
         row_annotations, row_code_lines, row_styles = _build_unified_block_row_data(
             view, line
         )
         annotations.extend(row_annotations)
         code_lines.extend(row_code_lines)
         line_styles.extend(row_styles)
+        row_ranges[line.line_index] = (row_start, len(code_lines))
 
     block = UnifiedDiffBlock(
         (line.line_index for line in lines),
@@ -547,6 +625,7 @@ def _render_unified_line_block(
         code_lines=code_lines,
         line_styles=line_styles,
         width=view._unified_code_width,
+        row_ranges=row_ranges,
     )
     if before is not None:
         container.mount(block, before=before)
@@ -565,15 +644,17 @@ def _refresh_non_block_line_content(view, line_idx: int) -> None:
     has_cursor_line = view._diff_line_cursor_active(line_idx)
 
     for code_widget in code_widgets:
+        show_cursor = has_cursor_line and view._widget_matches_cursor_side(
+            line, code_widget
+        )
         if code_widget.has_class("-placeholder"):
-            if code_widget.has_class("-cursor"):
+            if show_cursor:
+                code_widget.add_class("-cursor")
+            else:
                 code_widget.remove_class("-cursor")
             continue
 
         side = view._get_line_side_for_widget(line, code_widget)
-        show_cursor = has_cursor_line and view._widget_matches_cursor_side(
-            line, code_widget
-        )
 
         if selection_spec is not None:
             sel_start, sel_end, _ = selection_spec

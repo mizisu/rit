@@ -11,7 +11,7 @@ their parent diff line.
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, Literal
 
@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 
 __all__ = (
+    "COLLAPSED_PENDING_DRAFT_HEIGHT",
     "COLLAPSED_THREAD_HEIGHT",
     "COMMENT_HEIGHT_ESTIMATE",
     "PENDING_DRAFT_HEIGHT_ESTIMATE",
@@ -51,6 +52,7 @@ __all__ = (
     "mount_pending_drafts_for_line",
     "mount_side_aware_widget",
     "next_comment",
+    "pending_draft_is_collapsed",
     "prev_comment",
     "toggle_resolve",
     "total_comments_at_line",
@@ -63,6 +65,7 @@ __all__ = (
 # Height estimation for virtual layout
 # ---------------------------------------------------------------------------
 
+COLLAPSED_PENDING_DRAFT_HEIGHT = 5
 COLLAPSED_THREAD_HEIGHT = 1
 COMMENT_HEIGHT_ESTIMATE = 3  # header + ~2 body lines
 PENDING_DRAFT_HEIGHT_ESTIMATE = 4
@@ -96,6 +99,7 @@ def clear_state(view: DiffView) -> None:
 
 def build_comment_map(view: DiffView) -> None:
     clear_state(view)
+    _prune_collapsed_pending_drafts(view)
 
     if not view.store or not view.current_file:
         return
@@ -164,7 +168,7 @@ def refresh_thread_metadata(view: DiffView) -> None:
 
 def _add_thread_to_comment_map(view: DiffView, thread: ReviewThread) -> None:
     root = thread.root_comment
-    if root is None:
+    if root is None or thread.subject_type.upper() == "FILE":
         return
 
     line_index = _resolve_line_index(view, root, thread=thread)
@@ -594,9 +598,15 @@ def mount_side_aware_widget(
     widget: Widget,
     *,
     side: Literal["old", "new", "auto"],
+    line_index: int | None = None,
     before: Widget | None = None,
 ) -> Widget:
-    layout_widget = _build_side_aware_layout(view, widget, side=side)
+    layout_widget = _build_side_aware_layout(
+        view,
+        widget,
+        side=side,
+        line_index=line_index,
+    )
     if before is not None:
         container.mount(layout_widget, before=before)
     else:
@@ -627,12 +637,18 @@ def mount_pending_drafts_for_line(
     mounted: list[Widget] = []
     layout_widgets: list[Widget] = []
     for index, draft in enumerate(drafts):
-        widget = _build_pending_draft_widget(draft, line_index=line_index, index=index)
+        widget = _build_pending_draft_widget(
+            draft,
+            line_index=line_index,
+            index=index,
+            view=view,
+        )
         layout_widget = mount_side_aware_widget(
             view,
             container,
             widget,
             side=draft.anchor_side,
+            line_index=line_index,
             before=mount_before,
         )
         mounted.append(widget)
@@ -664,6 +680,7 @@ def mount_comments_for_line(
             container,
             widget,
             side=side,
+            line_index=line_index,
             before=before,
         )
         mounted.append(widget)
@@ -678,6 +695,7 @@ def _build_side_aware_layout(
     widget: Widget,
     *,
     side: Literal["old", "new", "auto"],
+    line_index: int | None,
 ) -> Widget:
     widget.styles.width = "1fr"
     widget.styles.max_width = INLINE_COMMENT_MAX_WIDTH
@@ -686,12 +704,22 @@ def _build_side_aware_layout(
         use_split = view.split
     if use_split:
         return _build_split_comment_layout(view, widget, side=side)
-    return _build_unified_comment_layout(view, widget)
+    return _build_unified_comment_layout(view, widget, line_index=line_index)
 
 
-def _build_unified_comment_layout(view: DiffView, widget: Widget) -> Horizontal:
+def _build_unified_comment_layout(
+    view: DiffView,
+    widget: Widget,
+    *,
+    line_index: int | None,
+) -> Horizontal:
+    line = (
+        view._all_lines[line_index]
+        if line_index is not None and 0 <= line_index < len(view._all_lines)
+        else None
+    )
     return Horizontal(
-        _spacer(view._unified_prefix_width_for_layout(), "diff-comment-gutter"),
+        _spacer(view._unified_prefix_width_for_layout(line), "diff-comment-gutter"),
         widget,
         classes="diff-comment-row diff-comment-row-unified",
     )
@@ -874,6 +902,15 @@ def try_toggle_current(view: DiffView) -> bool:
     if isinstance(target, Collapsible):
         target.collapsed = not target.collapsed
         return True
+    if isinstance(target, CommentCard):
+        draft = active_pending_draft(view, view.cursor_line)
+        target.toggle_collapsed()
+        if draft is not None:
+            _set_pending_draft_collapsed(view, draft, collapsed=target.collapsed)
+            from rit.ui.widgets import diff_virtual as _virtual
+
+            _virtual._rebuild_virtual_layout(view)
+        return True
     return False
 
 
@@ -1048,13 +1085,104 @@ def _build_pending_draft_widget(
     *,
     line_index: int,
     index: int,
+    view: DiffView | None = None,
 ) -> CommentCard:
     side = "left" if draft.side == "LEFT" else "right"
-    return CommentCard(
+    widget = CommentCard(
         f"{draft.path}:{_pending_draft_line_label(draft)} (pending)",
         draft.body,
         id=f"pending-draft-{line_index}-{side}-{index}",
         classes="pending-draft --pending-draft",
+    )
+    if view is not None:
+        widget.set_class(pending_draft_is_collapsed(view, draft), "-collapsed")
+    return widget
+
+
+def pending_draft_is_collapsed(
+    view: DiffView,
+    draft: PendingReviewComment,
+) -> bool:
+    collapsed_drafts = getattr(view, "_collapsed_pending_drafts", None)
+    return collapsed_drafts is not None and collapsed_drafts.get(id(draft)) is draft
+
+
+def _set_pending_draft_collapsed(
+    view: DiffView,
+    draft: PendingReviewComment,
+    *,
+    collapsed: bool,
+) -> None:
+    collapsed_drafts = getattr(view, "_collapsed_pending_drafts", None)
+    if collapsed_drafts is None:
+        return
+
+    draft_id = id(draft)
+    if collapsed:
+        collapsed_drafts[draft_id] = draft
+    else:
+        collapsed_drafts.pop(draft_id, None)
+
+
+def _prune_collapsed_pending_drafts(view: DiffView) -> None:
+    collapsed_drafts = getattr(view, "_collapsed_pending_drafts", None)
+    if collapsed_drafts is None:
+        return
+    if not view.store:
+        collapsed_drafts.clear()
+        return
+
+    pending_comments = list(
+        getattr(view.store.state, "pending_review_comments", ())
+    )
+    available = {id(draft): draft for draft in pending_comments}
+    retained: dict[int, PendingReviewComment] = {}
+    unmatched: list[PendingReviewComment] = []
+
+    for draft_id, draft in collapsed_drafts.items():
+        if available.get(draft_id) is draft:
+            retained[draft_id] = draft
+            available.pop(draft_id)
+        else:
+            unmatched.append(draft)
+
+    for previous in unmatched:
+        replacement = _matching_pending_draft(previous, available.values())
+        if replacement is None:
+            continue
+        replacement_id = id(replacement)
+        retained[replacement_id] = replacement
+        available.pop(replacement_id)
+
+    view._collapsed_pending_drafts = retained
+
+
+def _matching_pending_draft(
+    previous: PendingReviewComment,
+    candidates: Iterable[PendingReviewComment],
+) -> PendingReviewComment | None:
+    if previous.review_comment_id:
+        for candidate in candidates:
+            if candidate.review_comment_id == previous.review_comment_id:
+                return candidate
+
+    previous_key = _pending_draft_content_key(previous)
+    for candidate in candidates:
+        if _pending_draft_content_key(candidate) == previous_key:
+            return candidate
+    return None
+
+
+def _pending_draft_content_key(
+    draft: PendingReviewComment,
+) -> tuple[str, int, str, int | None, str | None, str]:
+    return (
+        draft.path,
+        draft.line,
+        draft.side,
+        draft.start_line,
+        draft.start_side,
+        draft.body,
     )
 
 
