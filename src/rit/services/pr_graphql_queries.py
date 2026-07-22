@@ -108,6 +108,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
           subjectType
           comments(first: 100) {
             nodes {
+              nodeId: id
               databaseId
               author {
                 login
@@ -128,6 +129,14 @@ query($owner: String!, $repo: String!, $number: Int!) {
               pullRequestReview {
                 databaseId
               }
+              commit {
+                oid
+              }
+              originalCommit {
+                oid
+              }
+              outdated
+              subjectType
             }
           }
         }
@@ -183,6 +192,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
           subjectType
           comments(first: 100) {
             nodes {
+              nodeId: id
               databaseId
               author {
                 login
@@ -203,6 +213,14 @@ query($owner: String!, $repo: String!, $number: Int!) {
               pullRequestReview {
                 databaseId
               }
+              commit {
+                oid
+              }
+              originalCommit {
+                oid
+              }
+              outdated
+              subjectType
             }
           }
         }
@@ -312,6 +330,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
           subjectType
           comments(first: 100) {
             nodes {
+              nodeId: id
               databaseId
               author {
                 login
@@ -332,6 +351,14 @@ query($owner: String!, $repo: String!, $number: Int!) {
               pullRequestReview {
                 databaseId
               }
+              commit {
+                oid
+              }
+              originalCommit {
+                oid
+              }
+              outdated
+              subjectType
             }
           }
         }

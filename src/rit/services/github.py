@@ -1,10 +1,6 @@
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import Iterator
 from contextlib import contextmanager
 
-from rit.core.pagination import (
-    PR_FILES_PAGE_CONCURRENCY,
-    PR_FILES_PER_PAGE,
-)
 from rit.services.gh_cli import GhCliError, run_gh, run_gh_sync
 from rit.services.github_repo import (
     GitHubRepo,
@@ -29,9 +25,7 @@ from rit.services.pr_file_comment_request import (
 )
 from rit.services.pr_file_request import (
     fetch_file_content,
-    fetch_pr_file_pages,
     fetch_pr_files,
-    fetch_pr_files_page,
 )
 from rit.services.pr_file_view_states import (
     FileViewMutationError,
@@ -51,17 +45,10 @@ from rit.services.pr_graphql_response import (
     fetch_pull_request_summary,
 )
 from rit.services.pr_issue_comment_request import (
-    create_issue_comment as create_issue_comment_via_rest,
-)
-from rit.services.pr_raw_diff import (
-    async_iter_pr_diff_sections,
-    fetch_pr_diff_text,
+    create_issue_comment as create_issue_comment_via_graphql,
 )
 from rit.services.pr_review_graphql import (
     create_pending_review as create_pending_review_via_graphql,
-)
-from rit.services.pr_review_graphql import (
-    create_review_comment as create_review_comment_via_graphql,
 )
 from rit.services.pr_review_graphql import (
     delete_pending_review as delete_pending_review_via_graphql,
@@ -76,10 +63,13 @@ from rit.services.pr_review_graphql import (
     submit_review as submit_review_via_graphql,
 )
 from rit.services.pr_review_comment_request import (
-    update_review_comment as update_review_comment_via_rest,
+    create_review_comment as create_review_comment_via_rest,
+)
+from rit.services.pr_review_comment_request import (
+    update_review_comment as update_review_comment_via_graphql,
 )
 from rit.services.pr_reviewer_request import (
-    add_assignees as add_assignees_via_rest,
+    add_assignees as add_assignees_via_graphql,
 )
 from rit.services.pr_reviewer_request import (
     fetch_assignee_candidates,
@@ -88,13 +78,13 @@ from rit.services.pr_reviewer_request import (
     fetch_reviewer_user_candidates,
 )
 from rit.services.pr_reviewer_request import (
-    remove_assignees as remove_assignees_via_rest,
+    remove_assignees as remove_assignees_via_graphql,
 )
 from rit.services.pr_reviewer_request import (
-    remove_requested_reviewers as remove_requested_reviewers_via_rest,
+    remove_requested_reviewers as remove_requested_reviewers_via_graphql,
 )
 from rit.services.pr_reviewer_request import (
-    request_reviewers as request_reviewers_via_rest,
+    request_reviewers as request_reviewers_via_graphql,
 )
 from rit.state.models import (
     PR,
@@ -195,26 +185,6 @@ class GitHubService:
                 runner=self._run_gh,
             )
 
-    async def get_pr_diff_text(self, pr_number: int) -> str:
-        """Fetch the full raw PR diff from GitHub's web diff endpoint."""
-        repo = await self.get_repo()
-        try:
-            return await fetch_pr_diff_text(repo.full_name, pr_number)
-        except OSError as error:
-            raise GitHubError(f"Failed to fetch raw PR diff: {error}") from error
-
-    async def iter_pr_diff_sections(self, pr_number: int) -> AsyncIterator[str]:
-        """Stream raw PR diff sections as each file patch arrives."""
-        repo = await self.get_repo()
-        try:
-            async for section in async_iter_pr_diff_sections(
-                repo.full_name,
-                pr_number,
-            ):
-                yield section
-        except OSError as error:
-            raise GitHubError(f"Failed to fetch raw PR diff: {error}") from error
-
     async def get_pr_files(
         self,
         pr_number: int,
@@ -223,65 +193,33 @@ class GitHubService:
     ) -> list[PRFile]:
         """Fetch PR files with a fast first page and concurrent remaining pages."""
         repo = await self.get_repo()
-        return await fetch_pr_files(
-            repo.full_name,
-            pr_number,
-            total_count=total_count,
-            runner=self._run_gh,
-        )
-
-    async def get_pr_files_page(
-        self,
-        pr_number: int,
-        *,
-        page: int,
-        per_page: int = 100,
-    ) -> list[PRFile]:
-        """Fetch one page of PR files via the REST API."""
-        repo = await self.get_repo()
-        return await fetch_pr_files_page(
-            repo.full_name,
-            pr_number,
-            page=page,
-            per_page=per_page,
-            runner=self._run_gh,
-        )
-
-    async def get_pr_file_pages(
-        self,
-        pr_number: int,
-        *,
-        pages: Sequence[int],
-        per_page: int = PR_FILES_PER_PAGE,
-        concurrency: int = PR_FILES_PAGE_CONCURRENCY,
-    ) -> dict[int, list[PRFile]]:
-        """Fetch multiple PR file pages concurrently and return them by page number."""
-        repo = await self.get_repo()
-        return await fetch_pr_file_pages(
-            repo.full_name,
-            pr_number,
-            pages=tuple(pages),
-            per_page=per_page,
-            concurrency=concurrency,
-            runner=self._run_gh,
-        )
+        try:
+            return await fetch_pr_files(
+                repo.owner,
+                repo.name,
+                pr_number,
+                total_count=total_count,
+                runner=self._run_gh,
+            )
+        except ValueError as error:
+            raise GitHubError(f"GraphQL error: {error}") from error
 
     async def get_reviewer_candidates(self) -> tuple[list[PRUser], list[PRTeam]]:
         """Fetch user and team candidates for PR review requests."""
         repo = await self.get_repo()
-        return await fetch_reviewer_candidates(repo.full_name, self._run_gh)
+        return await fetch_reviewer_candidates(repo.owner, repo.name, self._run_gh)
 
     async def get_reviewer_user_candidates(self) -> list[PRUser]:
         repo = await self.get_repo()
-        return await fetch_reviewer_user_candidates(repo.full_name, self._run_gh)
+        return await fetch_reviewer_user_candidates(repo.owner, repo.name, self._run_gh)
 
     async def get_reviewer_team_candidates(self) -> list[PRTeam]:
         repo = await self.get_repo()
-        return await fetch_reviewer_team_candidates(repo.full_name, self._run_gh)
+        return await fetch_reviewer_team_candidates(repo.owner, repo.name, self._run_gh)
 
     async def get_assignee_candidates(self) -> list[PRUser]:
         repo = await self.get_repo()
-        return await fetch_assignee_candidates(repo.full_name, self._run_gh)
+        return await fetch_assignee_candidates(repo.owner, repo.name, self._run_gh)
 
     async def request_reviewers(
         self,
@@ -294,8 +232,9 @@ class GitHubService:
         if not reviewers and not team_reviewers:
             return
         repo = await self.get_repo()
-        await request_reviewers_via_rest(
-            repo.full_name,
+        await request_reviewers_via_graphql(
+            repo.owner,
+            repo.name,
             pr_number,
             reviewers=reviewers,
             team_reviewers=team_reviewers,
@@ -313,8 +252,9 @@ class GitHubService:
         if not reviewers and not team_reviewers:
             return
         repo = await self.get_repo()
-        await remove_requested_reviewers_via_rest(
-            repo.full_name,
+        await remove_requested_reviewers_via_graphql(
+            repo.owner,
+            repo.name,
             pr_number,
             reviewers=reviewers,
             team_reviewers=team_reviewers,
@@ -326,8 +266,9 @@ class GitHubService:
         if not assignees:
             return
         repo = await self.get_repo()
-        await add_assignees_via_rest(
-            repo.full_name,
+        await add_assignees_via_graphql(
+            repo.owner,
+            repo.name,
             pr_number,
             assignees,
             runner=self._run_gh,
@@ -338,8 +279,9 @@ class GitHubService:
         if not assignees:
             return
         repo = await self.get_repo()
-        await remove_assignees_via_rest(
-            repo.full_name,
+        await remove_assignees_via_graphql(
+            repo.owner,
+            repo.name,
             pr_number,
             assignees,
             runner=self._run_gh,
@@ -350,10 +292,11 @@ class GitHubService:
         pr_number: int,
         body: str,
     ) -> PRIssueComment:
-        """Create a PR-level issue comment via the REST API."""
+        """Create a PR-level issue comment via GraphQL."""
         repo = await self.get_repo()
-        return await create_issue_comment_via_rest(
-            repo.full_name,
+        return await create_issue_comment_via_graphql(
+            repo.owner,
+            repo.name,
             pr_number,
             body=body,
             runner=self._run_gh,
@@ -371,11 +314,10 @@ class GitHubService:
         start_line: int | None = None,
         start_side: str | None = None,
     ) -> PRComment:
-        """Create an inline review comment via GraphQL."""
+        """Create a standalone inline review comment via REST."""
         repo = await self.get_repo()
-        return await create_review_comment_via_graphql(
-            repo.owner,
-            repo.name,
+        return await create_review_comment_via_rest(
+            repo.full_name,
             pr_number,
             body=body,
             commit_id=commit_id,
@@ -389,14 +331,12 @@ class GitHubService:
 
     async def update_review_comment(
         self,
-        comment_id: int,
+        comment_node_id: str,
         body: str,
     ) -> PRComment:
         """Update an existing pull request review comment."""
-        repo = await self.get_repo()
-        return await update_review_comment_via_rest(
-            repo.full_name,
-            comment_id,
+        return await update_review_comment_via_graphql(
+            comment_node_id,
             body=body,
             runner=self._run_gh,
         )
@@ -409,7 +349,7 @@ class GitHubService:
         commit_id: str,
         path: str,
     ) -> PRComment:
-        """Create a file-level review comment via the REST API."""
+        """Create a standalone file-level review comment via REST."""
         repo = await self.get_repo()
         return await create_file_comment_via_rest(
             repo.full_name,
@@ -507,12 +447,16 @@ class GitHubService:
     async def get_file_content(self, path: str, ref: str) -> str:
         """Fetch raw file content at a given ref (branch/sha)."""
         repo = await self.get_repo()
-        return await fetch_file_content(
-            repo.full_name,
-            path,
-            ref=ref,
-            runner=self._run_gh,
-        )
+        try:
+            return await fetch_file_content(
+                repo.owner,
+                repo.name,
+                path,
+                ref=ref,
+                runner=self._run_gh,
+            )
+        except ValueError as error:
+            raise GitHubError(f"GraphQL error: {error}") from error
 
     async def resolve_thread(self, thread_id: str) -> bool:
         try:

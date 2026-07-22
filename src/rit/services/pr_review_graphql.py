@@ -1,22 +1,17 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 from pydantic import TypeAdapter
 
-from rit.services.gh_request import (
-    GitHubInputRequest,
-    GitHubInputRunner,
-    run_input_request,
-)
-from rit.services.graphql_mutations import GraphQLMutationError, graphql_error_summary
-from rit.services.pr_review_comment_selection import (
-    review_comment_target,
-    select_created_review_comment,
-)
+from rit.services.gh_request import GitHubInputRunner
+from rit.services.graphql_request import connection_nodes as _connection_nodes
+from rit.services.graphql_request import graphql_request
+from rit.services.graphql_request import mapping as _mapping
+from rit.services.graphql_request import run_graphql
+from rit.services.graphql_mutations import GraphQLMutationError
 from rit.state.models import (
     PendingReviewComment,
     PRComment,
@@ -26,7 +21,6 @@ from rit.state.models import (
 
 __all__ = (
     "create_pending_review",
-    "create_review_comment",
     "delete_pending_review",
     "graphql_request",
     "list_review_comments",
@@ -49,6 +43,7 @@ submittedAt
 
 _REVIEW_COMMENT_FIELDS = """
 databaseId
+nodeId: id
 author {
   login
   avatarUrl
@@ -68,6 +63,14 @@ replyTo {
 pullRequestReview {
   databaseId
 }
+commit {
+  oid
+}
+originalCommit {
+  oid
+}
+outdated
+subjectType
 """
 
 _ADD_REVIEW_MUTATION = f"""
@@ -164,17 +167,6 @@ class _ReviewMutationResult:
     comments: list[PRComment]
 
 
-def graphql_request(
-    query: str,
-    variables: Mapping[str, object],
-) -> GitHubInputRequest:
-    """Build a gh GraphQL request that sends variables through stdin."""
-    return GitHubInputRequest(
-        args=("api", "graphql", "--input", "-"),
-        input_text=json.dumps({"query": query, "variables": variables}),
-    )
-
-
 async def create_pending_review(
     owner: str,
     repo: str,
@@ -233,56 +225,6 @@ async def submit_review(
             runner=runner,
         )
     ).review
-
-
-async def create_review_comment(
-    owner: str,
-    repo: str,
-    pr_number: int,
-    *,
-    body: str,
-    commit_id: str,
-    path: str,
-    line: int,
-    side: str,
-    start_line: int | None = None,
-    start_side: str | None = None,
-    runner: GitHubInputRunner,
-) -> PRComment:
-    """Create an inline review comment via a submitted GraphQL review."""
-    target = review_comment_target(
-        body=body,
-        path=path,
-        line=line,
-        side=side,
-        start_line=start_line,
-        start_side=start_side,
-    )
-    review = await submit_review(
-        owner,
-        repo,
-        pr_number,
-        event="COMMENT",
-        comments=[target.pending_comment()],
-        commit_id=commit_id,
-        runner=runner,
-    )
-    comments = (
-        await list_review_comments(
-            owner,
-            repo,
-            pr_number,
-            review_id=review.id,
-            runner=runner,
-        )
-        if review.id
-        else []
-    )
-    return select_created_review_comment(
-        comments,
-        target,
-        review_id=review.id if review.id else None,
-    )
 
 
 async def submit_pending_review(
@@ -433,15 +375,10 @@ async def _run_graphql(
     *,
     runner: GitHubInputRunner,
 ) -> Mapping[str, object]:
-    result = await run_input_request(graphql_request(query, variables), runner)
-    data = json.loads(result)
-    if not isinstance(data, Mapping):
-        raise GraphQLMutationError("GitHub GraphQL response was not an object")
-    errors = data.get("errors")
-    if errors:
-        message = graphql_error_summary(data) or str(errors)
-        raise GraphQLMutationError(message)
-    return data
+    try:
+        return await run_graphql(query, variables, runner=runner)
+    except ValueError as error:
+        raise GraphQLMutationError(str(error)) from error
 
 
 def _review_node_id(
@@ -455,12 +392,14 @@ def _review_node_id(
 
 
 def _thread_input(comment: PendingReviewComment) -> dict[str, object]:
+    if not comment.is_diff_line:
+        raise ValueError("Draft review threads must target diff lines")
     thread: dict[str, object] = {
         "path": comment.path,
-        "line": comment.line,
-        "side": comment.side,
         "body": comment.body,
     }
+    thread["line"] = comment.line
+    thread["side"] = comment.side
     if comment.start_line is not None:
         thread["startLine"] = comment.start_line
         thread["startSide"] = comment.start_side or comment.side
@@ -520,16 +459,17 @@ def _comment_with_thread_position(
     update: dict[str, Any] = {
         "path": comment.path or thread.path,
         "side": thread.diff_side or comment.side,
+        "subject_type": comment.subject_type or thread.subject_type,
     }
-    if thread.line is not None:
+    if comment.line is None and thread.line is not None:
         update["line"] = thread.line
-    if thread.original_line is not None:
+    if comment.original_line is None and thread.original_line is not None:
         update["original_line"] = thread.original_line
-    if thread.start_line is not None:
+    if comment.start_line is None and thread.start_line is not None:
         update["start_line"] = thread.start_line
-    if thread.original_start_line is not None:
+    if comment.original_start_line is None and thread.original_start_line is not None:
         update["original_start_line"] = thread.original_start_line
-    if thread.start_diff_side:
+    if not comment.start_side and thread.start_diff_side:
         update["start_side"] = thread.start_diff_side
     return comment.model_copy(update=update)
 
@@ -538,15 +478,3 @@ def _pull_request_mapping(data: Mapping[str, object]) -> Mapping[str, object]:
     graphql_data = _mapping(data.get("data"))
     repository = _mapping(graphql_data.get("repository"))
     return _mapping(repository.get("pullRequest"))
-
-
-def _connection_nodes(value: object) -> list[object]:
-    connection = _mapping(value)
-    nodes = connection.get("nodes")
-    if isinstance(nodes, list):
-        return cast("list[object]", nodes)
-    return []
-
-
-def _mapping(value: object) -> Mapping[str, object]:
-    return cast("Mapping[str, object]", value) if isinstance(value, Mapping) else {}

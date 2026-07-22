@@ -1,319 +1,187 @@
 import json
-from typing import get_type_hints
 
-import rit.services.pr_file_request as pr_file_request
+import pytest
+
 from rit.services.pr_file_request import (
     fetch_file_content,
-    fetch_pr_file_pages,
     fetch_pr_files,
-    fetch_pr_files_page,
-    file_content_request,
     parse_pr_files_page,
-    parse_pr_files_result,
-    pr_files_page_request,
 )
+from rit.state.models import FileViewedState
 
 
-def test_parse_pr_files_page_accepts_unknown_json_value_without_any_contract() -> None:
-    assert get_type_hints(parse_pr_files_page)["data"] is object
+def _files_page(
+    nodes: list[dict[str, object]],
+    *,
+    has_next_page: bool = False,
+    end_cursor: str | None = None,
+) -> dict[str, object]:
+    return {
+        "data": {
+            "repository": {
+                "pullRequest": {
+                    "files": {
+                        "nodes": nodes,
+                        "pageInfo": {
+                            "hasNextPage": has_next_page,
+                            "endCursor": end_cursor,
+                        },
+                    },
+                    "baseRefOid": "base-sha",
+                    "headRefOid": "head-sha",
+                }
+            }
+        }
+    }
 
 
-def test_pr_files_page_request_targets_pull_files_page() -> None:
-    assert pr_files_page_request(
-        "owner/repo",
-        123,
-        page=2,
-        per_page=50,
-    ) == (
-        "api",
-        "/repos/owner/repo/pulls/123/files?per_page=50&page=2",
-    )
-
-
-def test_parse_pr_files_page_accepts_list_response() -> None:
-    files = parse_pr_files_page(
-        [
-            {"filename": "a.py", "status": "modified", "patch": "@@ -1 +1 @@"},
-            {"filename": "b.py", "status": "added"},
-        ]
-    )
-
-    assert [file.filename for file in files] == ["a.py", "b.py"]
-
-
-def test_parse_pr_files_page_empty_list_skips_model_adapter(monkeypatch) -> None:
-    class Adapter:
-        def validate_python(self, _data: object) -> list[object]:
-            raise AssertionError("empty PR file pages should not enter model validation")
-
-    monkeypatch.setattr(pr_file_request, "_PRFileListAdapter", Adapter())
-
-    assert parse_pr_files_page([]) == []
-
-
-def test_parse_pr_files_page_single_object_skips_list_adapter(monkeypatch) -> None:
-    class Adapter:
-        def validate_python(self, _data: object) -> list[object]:
-            raise AssertionError("single PR file page item should not use list adapter")
-
-    monkeypatch.setattr(pr_file_request, "_PRFileListAdapter", Adapter())
-
-    files = parse_pr_files_page(
-        {"filename": "a.py", "status": "removed", "previous_filename": "old.py"}
-    )
-
-    assert len(files) == 1
-    assert files[0].filename == "a.py"
-
-
-def test_parse_pr_files_page_single_item_list_skips_list_adapter(monkeypatch) -> None:
-    class Adapter:
-        def validate_python(self, _data: object) -> list[object]:
-            raise AssertionError(
-                "single-item PR file pages should not use list adapter"
-            )
-
-    monkeypatch.setattr(pr_file_request, "_PRFileListAdapter", Adapter())
-
-    files = parse_pr_files_page(
-        [{"filename": "a.py", "status": "removed", "previous_filename": "old.py"}]
-    )
-
-    assert len(files) == 1
-    assert files[0].filename == "a.py"
-
-
-def test_parse_pr_files_result_decodes_json_page() -> None:
-    files = parse_pr_files_result(
-        json.dumps(
-            [
-                {"filename": "a.py", "status": "modified", "patch": "@@ -1 +1 @@"},
-                {"filename": "b.py", "status": "added"},
-            ]
-        )
-    )
-
-    assert [file.filename for file in files] == ["a.py", "b.py"]
-
-
-async def test_fetch_pr_files_page_runs_request_and_parses_files() -> None:
-    calls: list[tuple[list[str], str | None]] = []
-
-    async def runner(args: list[str], *, input_text: str | None = None) -> str:
-        calls.append((args, input_text))
-        return json.dumps(
-            [
-                {"filename": "a.py", "status": "modified", "patch": "@@ -1 +1 @@"},
-                {"filename": "b.py", "status": "added"},
-            ]
-        )
-
-    files = await fetch_pr_files_page(
-        "owner/repo",
-        123,
-        page=2,
-        per_page=50,
-        runner=runner,
-    )
-
-    assert [file.filename for file in files] == ["a.py", "b.py"]
-    assert calls == [
-        (
-            [
-                "api",
-                "/repos/owner/repo/pulls/123/files?per_page=50&page=2",
-            ],
-            None,
-        )
-    ]
-
-
-async def test_fetch_pr_file_pages_fetches_requested_pages_by_number() -> None:
-    calls: list[tuple[list[str], str | None]] = []
-
-    async def runner(args: list[str], *, input_text: str | None = None) -> str:
-        calls.append((args, input_text))
-        page = args[1].rsplit("page=", 1)[1]
-        return json.dumps(
+def test_parse_pr_files_page_projects_graphql_metadata() -> None:
+    page = parse_pr_files_page(
+        _files_page(
             [
                 {
-                    "filename": f"file-{page}.py",
-                    "status": "modified",
-                    "patch": "@@ -1 +1 @@",
+                    "path": "src/app.py",
+                    "changeType": "RENAMED",
+                    "additions": 3,
+                    "deletions": 2,
+                    "viewerViewedState": "VIEWED",
                 }
-            ]
+            ],
+            has_next_page=True,
+            end_cursor="cursor-1",
         )
-
-    pages = await fetch_pr_file_pages(
-        "owner/repo",
-        123,
-        pages=(2, 3),
-        per_page=50,
-        concurrency=1,
-        runner=runner,
     )
 
-    assert sorted(pages) == [2, 3]
-    assert [file.filename for file in pages[2]] == ["file-2.py"]
-    assert [file.filename for file in pages[3]] == ["file-3.py"]
-    assert [call[0] for call in calls] == [
-        ["api", "/repos/owner/repo/pulls/123/files?per_page=50&page=2"],
-        ["api", "/repos/owner/repo/pulls/123/files?per_page=50&page=3"],
-    ]
-    assert all(input_text is None for _, input_text in calls)
+    assert page.has_next_page is True
+    assert page.end_cursor == "cursor-1"
+    assert len(page.files) == 1
+    assert page.files[0].filename == "src/app.py"
+    assert page.files[0].status == "renamed"
+    assert page.files[0].changes == 5
+    assert page.files[0].viewer_viewed_state is FileViewedState.VIEWED
 
 
-async def test_fetch_pr_files_fetches_first_page_and_known_remaining_pages() -> None:
-    calls: list[tuple[list[str], str | None]] = []
+async def test_fetch_pr_files_uses_graphql_cursor_pagination() -> None:
+    calls: list[dict[str, object]] = []
 
     async def runner(args: list[str], *, input_text: str | None = None) -> str:
-        calls.append((args, input_text))
-        if args[1].endswith("&page=1"):
+        assert args == ["api", "graphql", "--input", "-"]
+        assert input_text is not None
+        payload = json.loads(input_text)
+        calls.append(payload)
+        if "fragment BlobText" in payload["query"]:
             return json.dumps(
-                [
-                    {
-                        "filename": f"file-{index}.py",
-                        "status": "modified",
-                        "patch": "@@ -1 +1 @@",
+                {
+                    "data": {
+                        "repository": {
+                            "base0": {"text": "old", "isBinary": False},
+                            "head0": {"text": "new", "isBinary": False},
+                            "head1": {"text": "added", "isBinary": False},
+                        }
                     }
-                    for index in range(100)
-                ]
+                }
+            )
+        after = payload["variables"]["after"]
+        if after is None:
+            return json.dumps(
+                _files_page(
+                    [{"path": "a.py", "changeType": "MODIFIED"}],
+                    has_next_page=True,
+                    end_cursor="cursor-1",
+                )
             )
         return json.dumps(
-            [{"filename": "file-100.py", "status": "added"}]
+            _files_page([{"path": "b.py", "changeType": "ADDED"}])
         )
 
-    files = await fetch_pr_files(
-        "owner/repo",
-        123,
-        total_count=101,
-        runner=runner,
-    )
+    files = await fetch_pr_files("owner", "repo", 123, runner=runner)
 
-    assert len(files) == 101
-    assert files[0].filename == "file-0.py"
-    assert files[-1].filename == "file-100.py"
-    assert [call[0] for call in calls] == [
-        ["api", "/repos/owner/repo/pulls/123/files?per_page=100&page=1"],
-        ["api", "/repos/owner/repo/pulls/123/files?per_page=100&page=2"],
+    assert [file.filename for file in files] == ["a.py", "b.py"]
+    file_calls = [call for call in calls if "files(first:" in call["query"]]
+    assert [call["variables"]["after"] for call in file_calls] == [
+        None,
+        "cursor-1",
     ]
-    assert all(input_text is None for _, input_text in calls)
+    assert files[0].patch.startswith("diff --git a/a.py b/a.py")
+    assert files[1].patch.startswith("diff --git a/b.py b/b.py\nnew file mode")
 
 
-async def test_fetch_pr_files_returns_short_first_page_without_collecting(
-    monkeypatch,
-) -> None:
-    calls: list[tuple[list[str], str | None]] = []
+async def test_fetch_pr_files_stops_at_known_total() -> None:
+    calls = 0
 
     async def runner(args: list[str], *, input_text: str | None = None) -> str:
-        calls.append((args, input_text))
-        return json.dumps(
-            [{"filename": "small.py", "status": "modified", "patch": "@@ -1 +1 @@"}]
-        )
-
-    async def fail_collect_all_page_items(*_args, **_kwargs):
-        raise AssertionError("short first PR files page should not enter pagination")
-
-    monkeypatch.setattr(
-        pr_file_request,
-        "collect_all_page_items",
-        fail_collect_all_page_items,
-    )
-
-    files = await fetch_pr_files(
-        "owner/repo",
-        123,
-        runner=runner,
-    )
-
-    assert [file.filename for file in files] == ["small.py"]
-    assert [call[0] for call in calls] == [
-        ["api", "/repos/owner/repo/pulls/123/files?per_page=100&page=1"],
-    ]
-
-
-async def test_fetch_pr_files_returns_known_complete_first_page_without_collecting(
-    monkeypatch,
-) -> None:
-    calls: list[tuple[list[str], str | None]] = []
-
-    async def runner(args: list[str], *, input_text: str | None = None) -> str:
-        calls.append((args, input_text))
-        return json.dumps(
-            [
+        nonlocal calls
+        calls += 1
+        assert input_text is not None
+        if "fragment BlobText" in json.loads(input_text)["query"]:
+            return json.dumps(
                 {
-                    "filename": f"file-{index}.py",
-                    "status": "modified",
-                    "patch": "@@ -1 +1 @@",
+                    "data": {
+                        "repository": {
+                            "base0": {"text": "old"},
+                            "head0": {"text": "new"},
+                        }
+                    }
                 }
-                for index in range(2)
-            ]
+            )
+        return json.dumps(
+            _files_page(
+                [{"path": "a.py", "changeType": "MODIFIED"}],
+                has_next_page=True,
+                end_cursor="cursor-1",
+            )
         )
-
-    async def fail_collect_all_page_items(*_args, **_kwargs):
-        raise AssertionError("known complete first page should not enter pagination")
-
-    monkeypatch.setattr(
-        pr_file_request,
-        "collect_all_page_items",
-        fail_collect_all_page_items,
-    )
 
     files = await fetch_pr_files(
-        "owner/repo",
-        123,
-        total_count=2,
-        per_page=2,
-        runner=runner,
+        "owner", "repo", 123, total_count=1, runner=runner
     )
 
-    assert [file.filename for file in files] == ["file-0.py", "file-1.py"]
-    assert [call[0] for call in calls] == [
-        ["api", "/repos/owner/repo/pulls/123/files?per_page=2&page=1"],
-    ]
+    assert [file.filename for file in files] == ["a.py"]
+    assert calls == 2
 
 
-def test_parse_pr_files_page_wraps_single_object_response() -> None:
-    files = parse_pr_files_page(
-        {"filename": "a.py", "status": "removed", "previous_filename": "old.py"}
-    )
-
-    assert len(files) == 1
-    assert files[0].filename == "a.py"
-
-
-def test_file_content_request_asks_for_raw_github_media_type() -> None:
-    assert file_content_request("owner/repo", "src/app.py", ref="deadbeef") == (
-        "api",
-        "/repos/owner/repo/contents/src/app.py?ref=deadbeef",
-        "-H",
-        "Accept: application/vnd.github.raw+json",
-    )
-
-
-async def test_fetch_file_content_runs_raw_content_request() -> None:
-    calls: list[tuple[list[str], str | None]] = []
+async def test_fetch_file_content_reads_graphql_blob_text() -> None:
+    calls: list[dict[str, object]] = []
 
     async def runner(args: list[str], *, input_text: str | None = None) -> str:
-        calls.append((args, input_text))
-        return "file contents"
+        assert input_text is not None
+        calls.append(json.loads(input_text))
+        return json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "object": {
+                            "text": "print('hello')\n",
+                            "isBinary": False,
+                            "isTruncated": False,
+                        }
+                    }
+                }
+            }
+        )
 
-    result = await fetch_file_content(
-        "owner/repo",
-        "src/app.py",
-        ref="deadbeef",
-        runner=runner,
+    content = await fetch_file_content(
+        "owner", "repo", "src/app.py", ref="deadbeef", runner=runner
     )
 
-    assert result == "file contents"
-    assert calls == [
-        (
-            [
-                "api",
-                "/repos/owner/repo/contents/src/app.py?ref=deadbeef",
-                "-H",
-                "Accept: application/vnd.github.raw+json",
-            ],
-            None,
+    assert content == "print('hello')\n"
+    assert calls[0]["variables"]["expression"] == "deadbeef:src/app.py"
+
+
+@pytest.mark.parametrize("field", ["isBinary", "isTruncated"])
+async def test_fetch_file_content_rejects_unavailable_graphql_text(field: str) -> None:
+    async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        return json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "object": {"text": None, field: True}
+                    }
+                }
+            }
         )
-    ]
+
+    with pytest.raises(ValueError):
+        await fetch_file_content(
+            "owner", "repo", "asset.bin", ref="deadbeef", runner=runner
+        )

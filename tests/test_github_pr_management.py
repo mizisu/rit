@@ -147,56 +147,135 @@ async def test_get_pr_discussion_fast_uses_graphql_review_threads() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_pr_files_fetches_remaining_pages_concurrently() -> None:
+async def test_get_pr_files_paginates_graphql_connection() -> None:
     first_page = [
-        {"filename": f"file-{index}.py", "status": "modified", "patch": "@@ -1 +1 @@"}
-        for index in range(100)
+        {"path": "file-0.py", "changeType": "MODIFIED"}
     ]
-    second_page = [
-        {"filename": "file-100.py", "status": "added", "patch": "@@ -0,0 +1 @@"}
-    ]
+    second_page = [{"path": "file-1.py", "changeType": "ADDED"}]
     service = CaptureGitHubService(
-        outputs=[json.dumps(first_page), json.dumps(second_page)]
+        outputs=[
+            json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "files": {
+                                    "nodes": first_page,
+                                    "pageInfo": {
+                                        "hasNextPage": True,
+                                        "endCursor": "cursor-1",
+                                    },
+                                },
+                                "baseRefOid": "base-sha",
+                                "headRefOid": "head-sha",
+                            }
+                        }
+                    }
+                }
+            ),
+            json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "files": {
+                                    "nodes": second_page,
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
+                                },
+                                "baseRefOid": "base-sha",
+                                "headRefOid": "head-sha",
+                            }
+                        }
+                    }
+                }
+            ),
+            json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "base0": {"text": "old"},
+                            "head0": {"text": "new"},
+                            "head1": {"text": "added"},
+                        }
+                    }
+                }
+            ),
+        ]
     )
 
-    files = await service.get_pr_files(123, total_count=101)
+    files = await service.get_pr_files(123, total_count=2)
 
-    assert len(files) == 101
+    assert len(files) == 2
     assert files[0].filename == "file-0.py"
-    assert files[-1].filename == "file-100.py"
-    assert [call[0] for call in service.calls] == [
-        ["api", "/repos/owner/repo/pulls/123/files?per_page=100&page=1"],
-        ["api", "/repos/owner/repo/pulls/123/files?per_page=100&page=2"],
-    ]
+    assert files[-1].filename == "file-1.py"
+    assert all(call[0] == ["api", "graphql", "--input", "-"] for call in service.calls)
+    assert json.loads(service.calls[1][1] or "{}")["variables"]["after"] == "cursor-1"
 
 
 @pytest.mark.asyncio
-async def test_get_pr_files_chunks_unknown_total_rest_pages() -> None:
-    first_page = [
-        {"filename": f"file-{index}.py", "status": "modified", "patch": "@@ -1 +1 @@"}
-        for index in range(100)
-    ]
+async def test_get_pr_files_stops_on_graphql_page_info() -> None:
+    first_page = [{"path": "file.py", "changeType": "MODIFIED"}]
     service = CaptureGitHubService(
-        outputs=[json.dumps(first_page), *(json.dumps([]) for _ in range(29))]
+        outputs=[
+            json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "files": {
+                                    "nodes": first_page,
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
+                                },
+                                "baseRefOid": "base-sha",
+                                "headRefOid": "head-sha",
+                            }
+                        }
+                    }
+                }
+            ),
+            json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "base0": {"text": "old"},
+                            "head0": {"text": "new"},
+                        }
+                    }
+                }
+            ),
+        ]
     )
 
     files = await service.get_pr_files(123)
 
-    assert len(files) == 100
-    assert [call[0] for call in service.calls] == [
-        ["api", "/repos/owner/repo/pulls/123/files?per_page=100&page=1"],
-        ["api", "/repos/owner/repo/pulls/123/files?per_page=100&page=2"],
-        ["api", "/repos/owner/repo/pulls/123/files?per_page=100&page=3"],
-        ["api", "/repos/owner/repo/pulls/123/files?per_page=100&page=4"],
-        ["api", "/repos/owner/repo/pulls/123/files?per_page=100&page=5"],
-        ["api", "/repos/owner/repo/pulls/123/files?per_page=100&page=6"],
-        ["api", "/repos/owner/repo/pulls/123/files?per_page=100&page=7"],
-    ]
+    assert len(files) == 1
+    assert all(call[0] == ["api", "graphql", "--input", "-"] for call in service.calls)
 
 
 @pytest.mark.asyncio
 async def test_request_reviewers_posts_user_and_team_payload() -> None:
-    service = CaptureGitHubService()
+    service = CaptureGitHubService(
+        outputs=[
+            json.dumps(
+                {"data": {"repository": {"pullRequest": {"id": "PR_node"}}}}
+            ),
+            json.dumps(
+                {
+                    "data": {
+                        "requestReviewsByLogin": {
+                            "pullRequest": {"id": "PR_node"}
+                        }
+                    }
+                }
+            ),
+        ]
+    )
 
     await service.request_reviewers(
         123,
@@ -204,27 +283,58 @@ async def test_request_reviewers_posts_user_and_team_payload() -> None:
         team_reviewers=["backend"],
     )
 
-    args, input_text = service.calls[0]
-    assert args[:3] == ["api", "--method", "POST"]
-    assert args[3] == "/repos/owner/repo/pulls/123/requested_reviewers"
+    args, input_text = service.calls[1]
+    assert args == ["api", "graphql", "--input", "-"]
     assert input_text is not None
-    assert json.loads(input_text) == {
-        "reviewers": ["alice"],
-        "team_reviewers": ["backend"],
+    assert json.loads(input_text)["variables"]["input"] == {
+        "pullRequestId": "PR_node",
+        "userLogins": ["alice"],
+        "teamSlugs": ["backend"],
+        "union": True,
     }
 
 
 @pytest.mark.asyncio
-async def test_remove_assignees_uses_issue_assignee_endpoint() -> None:
-    service = CaptureGitHubService()
+async def test_remove_assignees_uses_graphql_actor_id() -> None:
+    service = CaptureGitHubService(
+        outputs=[
+            json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "id": "PR_node",
+                                "assignedActors": {
+                                    "nodes": [
+                                        {"id": "U_alice", "login": "alice"}
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            ),
+            json.dumps(
+                {
+                    "data": {
+                        "removeAssigneesFromAssignable": {
+                            "assignable": {"__typename": "PullRequest"}
+                        }
+                    }
+                }
+            ),
+        ]
+    )
 
     await service.remove_assignees(123, ["alice"])
 
-    args, input_text = service.calls[0]
-    assert args[:3] == ["api", "--method", "DELETE"]
-    assert args[3] == "/repos/owner/repo/issues/123/assignees"
+    args, input_text = service.calls[1]
+    assert args == ["api", "graphql", "--input", "-"]
     assert input_text is not None
-    assert json.loads(input_text) == {"assignees": ["alice"]}
+    assert json.loads(input_text)["variables"]["input"] == {
+        "assignableId": "PR_node",
+        "assigneeIds": ["U_alice"],
+    }
 
 
 @pytest.mark.asyncio
@@ -239,16 +349,16 @@ async def test_empty_participant_changes_skip_repo_lookup_and_gh_calls() -> None
 
 
 @pytest.mark.asyncio
-async def test_create_file_comment_posts_rest_file_subject_payload() -> None:
+async def test_create_file_comment_posts_one_standalone_rest_comment() -> None:
     service = CaptureGitHubService(
         outputs=[
             json.dumps(
                 {
                     "id": 300,
+                    "node_id": "PRRC_node",
                     "body": "check this file",
                     "path": "app.py",
                     "subject_type": "file",
-                    "pull_request_review_id": 80,
                 }
             )
         ]
@@ -263,6 +373,7 @@ async def test_create_file_comment_posts_rest_file_subject_payload() -> None:
 
     assert comment.id == 300
     assert comment.subject_type == "file"
+    assert len(service.calls) == 1
     assert service.calls[0][0] == [
         "api",
         "--method",
@@ -271,8 +382,7 @@ async def test_create_file_comment_posts_rest_file_subject_payload() -> None:
         "--input",
         "-",
     ]
-    assert service.calls[0][1] is not None
-    assert json.loads(service.calls[0][1]) == {
+    assert json.loads(service.calls[0][1] or "{}") == {
         "body": "check this file",
         "commit_id": "deadbeef",
         "path": "app.py",
@@ -281,92 +391,52 @@ async def test_create_file_comment_posts_rest_file_subject_payload() -> None:
 
 
 @pytest.mark.asyncio
-async def test_update_review_comment_patches_existing_comment() -> None:
-    service = CaptureGitHubService(
-        outputs=[json.dumps({"id": 300, "body": "updated", "path": "app.py"})]
-    )
-
-    comment = await service.update_review_comment(300, "updated")
-
-    assert comment.id == 300
-    assert comment.body == "updated"
-    assert service.calls[0][0] == [
-        "api",
-        "--method",
-        "PATCH",
-        "/repos/owner/repo/pulls/comments/300",
-        "--input",
-        "-",
-    ]
-    assert service.calls[0][1] is not None
-    assert json.loads(service.calls[0][1]) == {"body": "updated"}
-
-
-@pytest.mark.asyncio
-async def test_create_review_comment_posts_submitted_review_graphql_payload() -> None:
+async def test_update_review_comment_uses_graphql_node_id() -> None:
     service = CaptureGitHubService(
         outputs=[
             json.dumps(
                 {
                     "data": {
-                        "repository": {
-                            "pullRequest": {
-                                "id": "PR_node",
-                                "reviews": {"nodes": []},
+                        "updatePullRequestReviewComment": {
+                            "pullRequestReviewComment": {
+                                "nodeId": "PRRC_node",
+                                "databaseId": 300,
+                                "body": "updated",
+                                "path": "app.py",
                             }
                         }
                     }
                 }
-            ),
+            )
+        ]
+    )
+
+    comment = await service.update_review_comment("PRRC_node", "updated")
+
+    assert comment.id == 300
+    assert comment.body == "updated"
+    assert service.calls[0][0] == ["api", "graphql", "--input", "-"]
+    assert service.calls[0][1] is not None
+    assert json.loads(service.calls[0][1])["variables"]["input"] == {
+        "pullRequestReviewCommentId": "PRRC_node",
+        "body": "updated",
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_review_comment_posts_one_standalone_rest_comment() -> None:
+    service = CaptureGitHubService(
+        outputs=[
             json.dumps(
                 {
-                    "data": {
-                        "addPullRequestReview": {
-                            "pullRequestReview": {
-                                "nodeId": "review_node",
-                                "databaseId": 80,
-                                "state": "COMMENTED",
-                                "body": "",
-                                "comments": {"nodes": []},
-                            }
-                        }
-                    }
+                    "id": 300,
+                    "node_id": "PRRC_node",
+                    "body": "ship it",
+                    "path": "app.py",
+                    "line": 42,
+                    "side": "RIGHT",
                 }
-            ),
-            json.dumps(
-                {
-                    "data": {
-                        "repository": {
-                            "pullRequest": {
-                                "reviewThreads": {
-                                    "nodes": [
-                                        {
-                                            "id": "thread-node",
-                                            "path": "app.py",
-                                            "line": 42,
-                                            "diffSide": "RIGHT",
-                                            "comments": {
-                                                "nodes": [
-                                                    {
-                                                        "databaseId": 300,
-                                                        "pullRequestReview": {
-                                                            "databaseId": 80
-                                                        },
-                                                        "body": "ship it",
-                                                        "path": "app.py",
-                                                        "line": 42,
-                                                        "author": {"login": "alice"},
-                                                    }
-                                                ]
-                                            },
-                                        }
-                                    ]
-                                }
-                            }
-                        }
-                    }
-                }
-            ),
+            )
         ]
     )
 
@@ -381,22 +451,21 @@ async def test_create_review_comment_posts_submitted_review_graphql_payload() ->
 
     assert comment.id == 300
     assert comment.side == "RIGHT"
-    assert len(service.calls) == 3
-    assert all(call[0] == ["api", "graphql", "--input", "-"] for call in service.calls)
-    assert service.calls[1][1] is not None
-    mutation_input = json.loads(service.calls[1][1])["variables"]["input"]
-    assert mutation_input == {
-        "pullRequestId": "PR_node",
-        "event": "COMMENT",
-        "commitOID": "deadbeef",
-        "threads": [
-            {
-                "path": "app.py",
-                "line": 42,
-                "side": "RIGHT",
-                "body": "ship it",
-            }
-        ],
+    assert len(service.calls) == 1
+    assert service.calls[0][0] == [
+        "api",
+        "--method",
+        "POST",
+        "/repos/owner/repo/pulls/123/comments",
+        "--input",
+        "-",
+    ]
+    assert json.loads(service.calls[0][1] or "{}") == {
+        "body": "ship it",
+        "commit_id": "deadbeef",
+        "path": "app.py",
+        "line": 42,
+        "side": "RIGHT",
     }
 
 
@@ -467,13 +536,15 @@ async def test_list_review_comments_reads_graphql_threads() -> None:
 
 
 @pytest.mark.asyncio
-async def test_team_reviewer_candidates_treat_repo_teams_404_as_empty() -> None:
-    service = CaptureGitHubService(outputs=[GitHubError("gh: Not Found (HTTP 404)")])
+async def test_team_reviewer_candidates_returns_empty_for_personal_repo() -> None:
+    service = CaptureGitHubService(
+        outputs=[json.dumps({"data": {"repository": {"owner": {}}}})]
+    )
 
     teams = await service.get_reviewer_team_candidates()
 
     assert teams == []
-    assert service.calls[0][0][1] == "/repos/owner/repo/teams?per_page=100"
+    assert service.calls[0][0] == ["api", "graphql", "--input", "-"]
 
 
 @pytest.mark.asyncio

@@ -100,7 +100,7 @@ async def test_create_pending_review_uses_graphql_threads_payload() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_review_comments_reads_graphql_review_thread_ranges() -> None:
+async def test_list_review_comments_prefers_comment_range_over_thread_range() -> None:
     async def runner(args: list[str], *, input_text: str | None = None) -> str:
         assert args == ["api", "graphql", "--input", "-"]
         assert input_text is not None
@@ -114,22 +114,27 @@ async def test_list_review_comments_reads_graphql_review_thread_ranges() -> None
                                     {
                                         "id": "thread_node",
                                         "path": "src/app.py",
-                                        "line": 12,
-                                        "originalLine": 12,
-                                        "startLine": 4,
-                                        "originalStartLine": 4,
+                                        "line": 205,
+                                        "originalLine": 205,
+                                        "startLine": 195,
+                                        "originalStartLine": 195,
                                         "diffSide": "RIGHT",
                                         "startDiffSide": "RIGHT",
                                         "comments": {
                                             "nodes": [
                                                 {
+                                                    "nodeId": "PRRC_node",
                                                     "databaseId": 300,
                                                     "body": "range",
                                                     "path": "src/app.py",
-                                                    "line": 12,
-                                                    "originalLine": 12,
-                                                    "startLine": 4,
-                                                    "originalStartLine": 4,
+                                                    "line": 205,
+                                                    "originalLine": 205,
+                                                    "startLine": 201,
+                                                    "originalStartLine": 201,
+                                                    "commit": {"oid": "old-head"},
+                                                    "originalCommit": {
+                                                        "oid": "old-head"
+                                                    },
                                                     "pullRequestReview": {
                                                         "databaseId": 80
                                                     },
@@ -155,10 +160,13 @@ async def test_list_review_comments_reads_graphql_review_thread_ranges() -> None
 
     assert len(comments) == 1
     assert comments[0].id == 300
-    assert comments[0].line == 12
-    assert comments[0].start_line == 4
+    assert comments[0].node_id == "PRRC_node"
+    assert comments[0].line == 205
+    assert comments[0].start_line == 201
     assert comments[0].side == "RIGHT"
     assert comments[0].start_side == "RIGHT"
+    assert comments[0].commit_id == "old-head"
+    assert comments[0].original_commit_id == "old-head"
 
 
 @pytest.mark.asyncio
