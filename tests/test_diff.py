@@ -709,6 +709,9 @@ class TestComputeWordDiff:
         assert old_segments[0].type == SegmentType.UNCHANGED
         assert old_segments[0].text == "hello world"
 
+    def test_identical_empty_strings_have_no_spans(self):
+        assert compute_word_diff("", "") == ([], [])
+
     def test_empty_old_text_word_diff_skips_tokenization(self, monkeypatch):
         def tokenize(_text: str):
             raise AssertionError("empty old text word diff should not tokenize")
@@ -729,40 +732,29 @@ class TestComputeWordDiff:
         assert any(s.type == SegmentType.DELETED for s in old_segments)
         assert any(s.type == SegmentType.ADDED for s in new_segments)
 
-    def test_single_token_replace_preserves_shared_substrings(self):
-        """Single-token replacements should keep shared prefix/suffix unhighlighted."""
+    def test_single_token_replace_highlights_the_whole_identifier(self):
         old_segments, new_segments = compute_word_diff("old_value", "new_value")
 
-        assert any(
-            s.type == SegmentType.DELETED and s.text == "old" for s in old_segments
-        )
-        assert any(
-            s.type == SegmentType.ADDED and s.text == "new" for s in new_segments
-        )
-        assert any(
-            s.type == SegmentType.UNCHANGED and s.text == "_value" for s in old_segments
-        )
-        assert any(
-            s.type == SegmentType.UNCHANGED and s.text == "_value" for s in new_segments
-        )
+        assert old_segments == [
+            InlineSegment(text="old_value", type=SegmentType.DELETED)
+        ]
+        assert new_segments == [
+            InlineSegment(text="new_value", type=SegmentType.ADDED)
+        ]
 
-    def test_single_token_replace_avoids_weird_middle_substring_matches(self):
-        """Single-token replacements should prefer clean boundary matches."""
+    def test_punctuation_is_a_separate_token(self):
         old_segments, new_segments = compute_word_diff("@classmethod", "@staticmethod")
 
         assert [(segment.text, segment.type) for segment in old_segments] == [
             ("@", SegmentType.UNCHANGED),
-            ("class", SegmentType.DELETED),
-            ("method", SegmentType.UNCHANGED),
+            ("classmethod", SegmentType.DELETED),
         ]
         assert [(segment.text, segment.type) for segment in new_segments] == [
             ("@", SegmentType.UNCHANGED),
-            ("static", SegmentType.ADDED),
-            ("method", SegmentType.UNCHANGED),
+            ("staticmethod", SegmentType.ADDED),
         ]
 
-    def test_multi_token_replace_keeps_code_changes_grouped_naturally(self):
-        """Code-oriented replacements should avoid single-character carryover."""
+    def test_multi_token_replace_preserves_matching_code_tokens(self):
         old_segments, new_segments = compute_word_diff(
             "def get_cache_key(cls, company_id: int) -> str:",
             "def get_cache_key(company_id: int, version_id: int | None) -> str:",
@@ -770,98 +762,101 @@ class TestComputeWordDiff:
 
         assert [(segment.text, segment.type) for segment in old_segments] == [
             ("def get_cache_key(", SegmentType.UNCHANGED),
-            ("cls, company_id: int)", SegmentType.DELETED),
-            (" -> str:", SegmentType.UNCHANGED),
+            ("cls", SegmentType.DELETED),
+            (", ", SegmentType.UNCHANGED),
+            ("company_id", SegmentType.DELETED),
+            (": int", SegmentType.UNCHANGED),
+            (") -> str:", SegmentType.UNCHANGED),
         ]
         assert [(segment.text, segment.type) for segment in new_segments] == [
             ("def get_cache_key(", SegmentType.UNCHANGED),
-            ("company_id: int, version_id: int | None)", SegmentType.ADDED),
-            (" -> str:", SegmentType.UNCHANGED),
+            ("company_id: int", SegmentType.ADDED),
+            (", ", SegmentType.UNCHANGED),
+            ("version_id", SegmentType.ADDED),
+            (": int", SegmentType.UNCHANGED),
+            (" | None", SegmentType.ADDED),
+            (") -> str:", SegmentType.UNCHANGED),
         ]
 
-    def test_compute_word_diff_joins_token_ranges_without_slicing(
-        self,
-        monkeypatch,
-    ):
-        class NoSliceTokens(list):
-            def __getitem__(self, index):
-                if isinstance(index, slice):
-                    raise AssertionError("word diff should not copy token slices")
-                return super().__getitem__(index)
+    def test_word_alt_absorbs_single_character_gaps_between_changes(self):
+        old_segments, new_segments = compute_word_diff("a+b+c", "a-b-c")
 
-        tokenized = {
-            "old": NoSliceTokens(["alpha", " ", "beta"]),
-            "new": NoSliceTokens(["alpha", " ", "gamma"]),
-        }
-        monkeypatch.setattr(diff_module, "_tokenize", lambda text: tokenized[text])
-
-        old_segments, new_segments = compute_word_diff("old", "new")
-
-        assert any(
-            segment.type == SegmentType.DELETED and segment.text
-            for segment in old_segments
-        )
-        assert any(
-            segment.type == SegmentType.ADDED and segment.text
-            for segment in new_segments
-        )
-
-    def test_join_range_single_token_skips_range_iteration(self, monkeypatch):
-        def fail_range(*_args, **_kwargs):
-            raise AssertionError("single-token join should not build a range")
-
-        monkeypatch.setattr(diff_module, "range", fail_range, raising=False)
-
-        assert diff_module._join_range(["alpha"], 0, 1) == "alpha"
-
-    def test_merge_segments_absorbs_whitespace_without_copying_input(self):
-        class NoIterSegments(list):
-            def __iter__(self):
-                raise AssertionError("segment merge should not copy segment lists")
-
-            def __getitem__(self, index):
-                if isinstance(index, slice):
-                    raise AssertionError("segment merge should not slice segment lists")
-                return super().__getitem__(index)
-
-        segments = NoIterSegments(
-            [
-                InlineSegment("old", SegmentType.DELETED),
-                InlineSegment(" ", SegmentType.UNCHANGED),
-                InlineSegment("new", SegmentType.DELETED),
-            ]
-        )
-
-        merged = diff_module._merge_segments(segments)
-
-        assert [(segment.text, segment.type) for segment in merged] == [
-            ("old new", SegmentType.DELETED)
+        assert [(segment.text, segment.type) for segment in old_segments] == [
+            ("a", SegmentType.UNCHANGED),
+            ("+b+", SegmentType.DELETED),
+            ("c", SegmentType.UNCHANGED),
+        ]
+        assert [(segment.text, segment.type) for segment in new_segments] == [
+            ("a", SegmentType.UNCHANGED),
+            ("-b-", SegmentType.ADDED),
+            ("c", SegmentType.UNCHANGED),
         ]
 
-    def test_single_segment_merge_skips_range_iteration(self, monkeypatch):
-        def fail_range(*_args, **_kwargs):
-            raise AssertionError("single segment merge should not build a range")
+    def test_word_alt_preserves_punctuation_around_a_changed_word(self):
+        old_segments, new_segments = compute_word_diff("foo.bar", "foo.baz")
 
-        monkeypatch.setattr(diff_module, "range", fail_range, raising=False)
-        segment = InlineSegment("old", SegmentType.DELETED)
+        assert [(segment.text, segment.type) for segment in old_segments] == [
+            ("foo.", SegmentType.UNCHANGED),
+            ("bar", SegmentType.DELETED),
+        ]
+        assert [(segment.text, segment.type) for segment in new_segments] == [
+            ("foo.", SegmentType.UNCHANGED),
+            ("baz", SegmentType.ADDED),
+        ]
 
-        assert diff_module._merge_segments([segment]) == [segment]
+    def test_word_alt_does_not_absorb_multi_character_gaps(self):
+        old_segments, new_segments = compute_word_diff("foo::bar", "qux::baz")
+
+        assert [(segment.text, segment.type) for segment in old_segments] == [
+            ("foo", SegmentType.DELETED),
+            ("::", SegmentType.UNCHANGED),
+            ("bar", SegmentType.DELETED),
+        ]
+        assert [(segment.text, segment.type) for segment in new_segments] == [
+            ("qux", SegmentType.ADDED),
+            ("::", SegmentType.UNCHANGED),
+            ("baz", SegmentType.ADDED),
+        ]
+
+    def test_word_diff_uses_myers_alignment_for_repeated_tokens(self):
+        old_segments, new_segments = compute_word_diff("foo bar", "bar baz")
+
+        assert [(segment.text, segment.type) for segment in old_segments] == [
+            ("foo ", SegmentType.DELETED),
+            ("bar", SegmentType.UNCHANGED),
+        ]
+        assert [(segment.text, segment.type) for segment in new_segments] == [
+            ("bar", SegmentType.UNCHANGED),
+            (" baz", SegmentType.ADDED),
+        ]
+
+    def test_word_alt_counts_single_character_gaps_as_utf16(self):
+        old_segments, new_segments = compute_word_diff("foo😀bar", "qux😀baz")
+
+        assert [(segment.text, segment.type) for segment in old_segments] == [
+            ("foo", SegmentType.DELETED),
+            ("😀", SegmentType.UNCHANGED),
+            ("bar", SegmentType.DELETED),
+        ]
+        assert [(segment.text, segment.type) for segment in new_segments] == [
+            ("qux", SegmentType.ADDED),
+            ("😀", SegmentType.UNCHANGED),
+            ("baz", SegmentType.ADDED),
+        ]
 
     def test_insertion(self):
         """Test insertion."""
         old_segments, new_segments = compute_word_diff("abc", "abXc")
 
-        # old should have 'abc' split into unchanged parts
-        # new should have 'X' as added
-        added = [s for s in new_segments if s.type == SegmentType.ADDED]
-        assert any("X" in s.text for s in added)
+        assert old_segments == [InlineSegment("abc", SegmentType.DELETED)]
+        assert new_segments == [InlineSegment("abXc", SegmentType.ADDED)]
 
     def test_deletion(self):
         """Test deletion."""
         old_segments, new_segments = compute_word_diff("abXc", "abc")
 
-        deleted = [s for s in old_segments if s.type == SegmentType.DELETED]
-        assert any("X" in s.text for s in deleted)
+        assert old_segments == [InlineSegment("abXc", SegmentType.DELETED)]
+        assert new_segments == [InlineSegment("abc", SegmentType.ADDED)]
 
 
 class TestComputeLineDiff:
@@ -1040,7 +1035,7 @@ class TestDiffHighlighting:
         def fake_highlight(text, **_kwargs):
             return SingleLineContent(text)
 
-        monkeypatch.setattr(highlighting_module, "_highlight_code", fake_highlight)
+        monkeypatch.setattr(highlighting_module, "highlight_code", fake_highlight)
 
         diff = parse_patch("@@ -0,0 +1 @@\n+value = 1", "test.py")
         self._assign_line_indexes(diff)
@@ -1064,7 +1059,7 @@ class TestDiffHighlighting:
         )
         monkeypatch.setattr(
             highlighting_module,
-            "_highlight_code",
+            "highlight_code",
             lambda text, **_kwargs: Content(text),
         )
 
@@ -1147,7 +1142,7 @@ class TestDiffHighlighting:
         )
 
     def test_python_calls_and_constructors_use_semantic_styles(self):
-        """Tree-sitter should distinguish constructors and method calls."""
+        """Lumis should distinguish constructors and method calls."""
         diff = parse_patch(
             "@@ -0,0 +1,1 @@\n"
             "+reviewer_entity_ids = "
@@ -1206,7 +1201,7 @@ class TestDiffHighlighting:
         diff = parse_patch(
             "@@ -1,1 +1,1 @@\n"
             "-def make_confirmed(self) -> None:\n"
-            "+def make_confirmed(self, with_save: bool = True) -> None:",
+            "+def make_verified(self, with_save: bool = True) -> None:",
             "test.py",
         )
         self._assign_line_indexes(diff)
@@ -1287,7 +1282,7 @@ class TestDiffHighlighting:
             return Content(text)
 
         monkeypatch.setattr(highlighting_module, "_HIGHLIGHT_CONTEXT_LINES", 3)
-        monkeypatch.setattr(highlighting_module, "_highlight_code", capture_highlight)
+        monkeypatch.setattr(highlighting_module, "highlight_code", capture_highlight)
 
         highlight_lines_for_diff_range(
             diff,

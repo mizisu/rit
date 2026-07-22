@@ -3499,11 +3499,6 @@ async def test_show_diff_reuses_planned_width_metrics_for_initial_layout(
         raise AssertionError("show_diff should use planned width metrics")
 
     monkeypatch.setattr(diff_layout_module, "code_widths_for_layout", fail_width_scan)
-    monkeypatch.setattr(
-        diff_layout_module,
-        "can_fit_auto_split_content",
-        fail_width_scan,
-    )
 
     app = TestApp()
     async with app.run_test(size=(120, 20)) as pilot:

@@ -27,11 +27,40 @@ __all__ = (
 
 WORD_DIFF_THRESHOLD = 0.2
 WORD_DIFF_MAX_LINE_LENGTH = 1000
-TOKEN_REFINEMENT_MAX_LENGTH = 200
 PARSE_REFINEMENT_CELL_BUDGET = 25
 TAB_SIZE = 4
 HUNK_PATTERN = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$")
 DIFF_GIT_PREFIX = "diff --git "
+# Python's Unicode word and whitespace classes differ from jsdiff's ranges.
+_WORD_DIFF_CHARS = (
+    "a-zA-Z0-9_"
+    "\u00ad"
+    "\u00c0-\u00d6"
+    "\u00d8-\u00f6"
+    "\u00f8-\u02c6"
+    "\u02c8-\u02d7"
+    "\u02de-\u02ff"
+    "\u1e00-\u1eff"
+)
+_WORD_DIFF_SPACE_CHARS = (
+    "\u0009"
+    "\u000b"
+    "\u000c"
+    "\u0020"
+    "\u00a0"
+    "\u1680"
+    "\u2000-\u200a"
+    "\u2028"
+    "\u2029"
+    "\u202f"
+    "\u205f"
+    "\u3000"
+    "\ufeff"
+)
+_WORD_DIFF_TOKEN_PATTERN = re.compile(
+    rf"\r?\n|[{_WORD_DIFF_CHARS}]+|[{_WORD_DIFF_SPACE_CHARS}]+|"
+    rf"[^{_WORD_DIFF_CHARS}]"
+)
 
 
 @dataclass(frozen=True)
@@ -705,187 +734,266 @@ def _compute_similarity(a: str, b: str) -> float:
 
 
 def _tokenize(text: str) -> list[str]:
-    return re.findall(r"\S+|\s+", text)
+    return _WORD_DIFF_TOKEN_PATTERN.findall(text)
 
 
-def _effective_merge_segment(
-    segments: Sequence[InlineSegment],
-    index: int,
-) -> InlineSegment:
-    segment = segments[index]
-    if not (0 < index < len(segments) - 1):
-        return segment
-
-    previous_type = segments[index - 1].type
-    next_type = segments[index + 1].type
-    if (
-        segment.type == SegmentType.UNCHANGED
-        and segment.text.strip() == ""
-        and previous_type != SegmentType.UNCHANGED
-        and next_type != SegmentType.UNCHANGED
-    ):
-        return InlineSegment(text=segment.text, type=previous_type)
-    return segment
+@dataclass(frozen=True, slots=True)
+class _TokenDiffComponent:
+    count: int
+    type: SegmentType
+    previous: _TokenDiffComponent | None
 
 
-def _merge_segments(segments: Sequence[InlineSegment]) -> list[InlineSegment]:
-    """Merge small unchanged gaps between changed segments.
-
-    Whitespace-only UNCHANGED segments between same-type changed segments
-    are absorbed into the changed region, producing one continuous highlight
-    instead of a fragmented patchwork.
-    """
-    segment_count = len(segments)
-    if segment_count == 0:
-        return []
-    if segment_count == 1:
-        return [segments[0]]
-    if segment_count == 2:
-        return [segments[0], segments[1]]
-
-    result: list[InlineSegment] = [_effective_merge_segment(segments, 0)]
-    for index in range(1, segment_count):
-        seg = _effective_merge_segment(segments, index)
-        if result[-1].type == seg.type:
-            prev = result[-1]
-            result[-1] = InlineSegment(text=prev.text + seg.text, type=prev.type)
-        else:
-            result.append(seg)
-
-    return result
+@dataclass(slots=True)
+class _TokenDiffPath:
+    old_position: int
+    last_component: _TokenDiffComponent | None
 
 
-def _join_range(words: Sequence[str], start: int, end: int) -> str:
-    token_count = end - start
-    if token_count <= 0:
-        return ""
-    if token_count == 1:
-        return words[start]
-    return "".join(words[index] for index in range(start, end))
+def _add_token_diff_component(
+    path: _TokenDiffPath,
+    segment_type: SegmentType,
+    old_position_increment: int,
+) -> _TokenDiffPath:
+    last_component = path.last_component
+    if last_component is not None and last_component.type == segment_type:
+        component = _TokenDiffComponent(
+            count=last_component.count + 1,
+            type=segment_type,
+            previous=last_component.previous,
+        )
+    else:
+        component = _TokenDiffComponent(
+            count=1,
+            type=segment_type,
+            previous=last_component,
+        )
+    return _TokenDiffPath(
+        old_position=path.old_position + old_position_increment,
+        last_component=component,
+    )
 
 
-def _can_refine_token_replace(
-    old_words: Sequence[str],
-    old_start: int,
-    old_end: int,
-    new_words: Sequence[str],
-    new_start: int,
-    new_end: int,
-) -> bool:
-    if old_end - old_start != 1 or new_end - new_start != 1:
-        return False
+def _extend_token_diff_match(
+    path: _TokenDiffPath,
+    new_tokens: Sequence[str],
+    old_tokens: Sequence[str],
+    diagonal: int,
+) -> int:
+    old_position = path.old_position
+    new_position = old_position - diagonal
+    common_count = 0
 
-    old_text = old_words[old_start]
-    new_text = new_words[new_start]
-    if old_text.isspace() or new_text.isspace():
-        return False
-
-    return max(len(old_text), len(new_text)) <= TOKEN_REFINEMENT_MAX_LENGTH
-
-
-def _is_word_char(char: str) -> bool:
-    return char.isalnum() or char == "_"
-
-
-def _trim_weak_prefix_match(prefix_len: int, text: str) -> int:
-    if prefix_len == 0:
-        return 0
-
-    fragment_len = 0
-    index = prefix_len - 1
-    while index >= 0 and _is_word_char(text[index]):
-        fragment_len += 1
-        index -= 1
-
-    if fragment_len == 1 and index >= 0 and not _is_word_char(text[index]):
-        return prefix_len - 1
-
-    return prefix_len
-
-
-def _trim_weak_suffix_match(suffix_len: int, text: str) -> int:
-    if suffix_len == 0:
-        return 0
-
-    start = len(text) - suffix_len
-    fragment_len = 0
-    index = start
-    while index < len(text) and _is_word_char(text[index]):
-        fragment_len += 1
-        index += 1
-
-    if fragment_len == 1 and index < len(text) and not _is_word_char(text[index]):
-        return suffix_len - 1
-
-    return suffix_len
-
-
-def _compute_char_diff_segments(
-    old_text: str,
-    new_text: str,
-) -> tuple[list[InlineSegment], list[InlineSegment]]:
-    prefix_len = 0
-    max_prefix = min(len(old_text), len(new_text))
-    while prefix_len < max_prefix and old_text[prefix_len] == new_text[prefix_len]:
-        prefix_len += 1
-
-    prefix_len = _trim_weak_prefix_match(prefix_len, old_text)
-
-    old_remaining = len(old_text) - prefix_len
-    new_remaining = len(new_text) - prefix_len
-    suffix_len = 0
-    max_suffix = min(old_remaining, new_remaining)
     while (
-        suffix_len < max_suffix
-        and old_text[len(old_text) - suffix_len - 1]
-        == new_text[len(new_text) - suffix_len - 1]
+        new_position + 1 < len(new_tokens)
+        and old_position + 1 < len(old_tokens)
+        and old_tokens[old_position + 1] == new_tokens[new_position + 1]
     ):
-        suffix_len += 1
+        old_position += 1
+        new_position += 1
+        common_count += 1
 
-    suffix_len = _trim_weak_suffix_match(suffix_len, old_text)
+    if common_count:
+        path.last_component = _TokenDiffComponent(
+            count=common_count,
+            type=SegmentType.UNCHANGED,
+            previous=path.last_component,
+        )
+    path.old_position = old_position
+    return new_position
 
-    old_middle_end = len(old_text) - suffix_len
-    new_middle_end = len(new_text) - suffix_len
 
+def _build_token_diff_segments(
+    last_component: _TokenDiffComponent | None,
+    old_tokens: Sequence[str],
+    new_tokens: Sequence[str],
+) -> list[InlineSegment]:
+    components: list[_TokenDiffComponent] = []
+    while last_component is not None:
+        components.append(last_component)
+        last_component = last_component.previous
+    components.reverse()
+
+    old_position = 0
+    new_position = 0
+    segments: list[InlineSegment] = []
+    for component in components:
+        if component.type == SegmentType.DELETED:
+            tokens = old_tokens[old_position : old_position + component.count]
+            old_position += component.count
+        else:
+            tokens = new_tokens[new_position : new_position + component.count]
+            new_position += component.count
+            if component.type == SegmentType.UNCHANGED:
+                old_position += component.count
+        segments.append(InlineSegment(text="".join(tokens), type=component.type))
+    return segments
+
+
+def _compute_token_diff(
+    old_tokens: Sequence[str],
+    new_tokens: Sequence[str],
+) -> list[InlineSegment]:
+    """Compute a Myers diff with jsdiff-compatible path selection."""
+    old_length = len(old_tokens)
+    new_length = len(new_tokens)
+    max_edit_length = old_length + new_length
+    best_paths: dict[int, _TokenDiffPath] = {
+        0: _TokenDiffPath(old_position=-1, last_component=None)
+    }
+
+    new_position = _extend_token_diff_match(
+        best_paths[0], new_tokens, old_tokens, 0
+    )
+    if best_paths[0].old_position + 1 >= old_length and new_position + 1 >= new_length:
+        return _build_token_diff_segments(
+            best_paths[0].last_component,
+            old_tokens,
+            new_tokens,
+        )
+
+    min_diagonal = -max_edit_length
+    max_diagonal = max_edit_length
+    for edit_length in range(1, max_edit_length + 1):
+        diagonal = max(min_diagonal, -edit_length)
+        while diagonal <= min(max_diagonal, edit_length):
+            remove_path = best_paths.get(diagonal - 1)
+            add_path = best_paths.get(diagonal + 1)
+            if remove_path is not None:
+                best_paths.pop(diagonal - 1, None)
+
+            can_add = False
+            if add_path is not None:
+                added_new_position = add_path.old_position - diagonal
+                can_add = 0 <= added_new_position < new_length
+            can_remove = (
+                remove_path is not None
+                and remove_path.old_position + 1 < old_length
+            )
+            if not can_add and not can_remove:
+                best_paths.pop(diagonal, None)
+                diagonal += 2
+                continue
+
+            choose_add = not can_remove or (
+                can_add
+                and add_path is not None
+                and remove_path is not None
+                and remove_path.old_position < add_path.old_position
+            )
+            if choose_add:
+                if add_path is None:
+                    raise RuntimeError("Missing insertion path")
+                base_path = _add_token_diff_component(
+                    add_path,
+                    SegmentType.ADDED,
+                    0,
+                )
+            else:
+                if remove_path is None:
+                    raise RuntimeError("Missing deletion path")
+                base_path = _add_token_diff_component(
+                    remove_path,
+                    SegmentType.DELETED,
+                    1,
+                )
+
+            new_position = _extend_token_diff_match(
+                base_path,
+                new_tokens,
+                old_tokens,
+                diagonal,
+            )
+            if (
+                base_path.old_position + 1 >= old_length
+                and new_position + 1 >= new_length
+            ):
+                return _build_token_diff_segments(
+                    base_path.last_component,
+                    old_tokens,
+                    new_tokens,
+                )
+
+            best_paths[diagonal] = base_path
+            if base_path.old_position + 1 >= old_length:
+                max_diagonal = min(max_diagonal, diagonal - 1)
+            if new_position + 1 >= new_length:
+                min_diagonal = max(min_diagonal, diagonal + 1)
+            diagonal += 2
+
+    raise RuntimeError("Unable to compute token diff")
+
+
+def _utf16_length(text: str) -> int:
+    return len(text.encode("utf-16-le", errors="surrogatepass")) // 2
+
+
+def _append_word_alt_segment(
+    target: list[InlineSegment],
+    segment: InlineSegment,
+    *,
+    is_last_change: bool,
+) -> None:
+    last_segment = target[-1] if target else None
+    is_neutral = segment.type == SegmentType.UNCHANGED
+    if last_segment is None or is_last_change:
+        target.append(InlineSegment(text=segment.text, type=segment.type))
+        return
+
+    last_is_neutral = last_segment.type == SegmentType.UNCHANGED
+    if is_neutral == last_is_neutral or (
+        is_neutral and _utf16_length(segment.text) == 1 and not last_is_neutral
+    ):
+        target[-1] = InlineSegment(
+            text=last_segment.text + segment.text,
+            type=last_segment.type,
+        )
+        return
+
+    target.append(InlineSegment(text=segment.text, type=segment.type))
+
+
+def _build_word_alt_segments(
+    changes: Sequence[InlineSegment],
+) -> tuple[list[InlineSegment], list[InlineSegment]]:
     old_segments: list[InlineSegment] = []
     new_segments: list[InlineSegment] = []
-
-    prefix = old_text[:prefix_len]
-    if prefix:
-        old_segments.append(InlineSegment(text=prefix, type=SegmentType.UNCHANGED))
-        new_segments.append(InlineSegment(text=prefix, type=SegmentType.UNCHANGED))
-
-    old_middle = old_text[prefix_len:old_middle_end]
-    new_middle = new_text[prefix_len:new_middle_end]
-    if old_middle:
-        old_segments.append(InlineSegment(text=old_middle, type=SegmentType.DELETED))
-    if new_middle:
-        new_segments.append(InlineSegment(text=new_middle, type=SegmentType.ADDED))
-
-    suffix = old_text[old_middle_end:]
-    if suffix:
-        old_segments.append(InlineSegment(text=suffix, type=SegmentType.UNCHANGED))
-        new_segments.append(InlineSegment(text=suffix, type=SegmentType.UNCHANGED))
-
-    return _merge_segments(old_segments), _merge_segments(new_segments)
+    last_index = len(changes) - 1
+    for index, segment in enumerate(changes):
+        is_last_change = index == last_index
+        if segment.type == SegmentType.UNCHANGED:
+            _append_word_alt_segment(
+                old_segments,
+                segment,
+                is_last_change=is_last_change,
+            )
+            _append_word_alt_segment(
+                new_segments,
+                segment,
+                is_last_change=is_last_change,
+            )
+        elif segment.type == SegmentType.DELETED:
+            _append_word_alt_segment(
+                old_segments,
+                segment,
+                is_last_change=is_last_change,
+            )
+        else:
+            _append_word_alt_segment(
+                new_segments,
+                segment,
+                is_last_change=is_last_change,
+            )
+    return old_segments, new_segments
 
 
 def compute_word_diff(
     old_text: str, new_text: str
 ) -> tuple[list[InlineSegment], list[InlineSegment]]:
-    """Compute word-level diff between two strings.
-
-    Uses word-level tokenization to produce clean, readable highlights
-    instead of character-level fragmentation.
-
-    Args:
-        old_text: Old version of the text
-        new_text: New version of the text
-
-    Returns:
-        Tuple of (old_segments, new_segments) for highlighting
-    """
+    """Compute a Word-Alt-style inline diff between two strings."""
     if old_text == new_text:
+        if not old_text:
+            return [], []
         return (
             [InlineSegment(text=old_text, type=SegmentType.UNCHANGED)],
             [InlineSegment(text=new_text, type=SegmentType.UNCHANGED)],
@@ -895,57 +1003,8 @@ def compute_word_diff(
     if not new_text:
         return ([InlineSegment(text=old_text, type=SegmentType.DELETED)], [])
 
-    old_words = _tokenize(old_text)
-    new_words = _tokenize(new_text)
-
-    matcher = SequenceMatcher(None, old_words, new_words)
-    old_segments: list[InlineSegment] = []
-    new_segments: list[InlineSegment] = []
-
-    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
-        if tag == "equal":
-            text = _join_range(old_words, i1, i2)
-            old_segments.append(InlineSegment(text=text, type=SegmentType.UNCHANGED))
-            new_segments.append(InlineSegment(text=text, type=SegmentType.UNCHANGED))
-        elif tag == "replace":
-            if _can_refine_token_replace(old_words, i1, i2, new_words, j1, j2):
-                refined_old_segments, refined_new_segments = (
-                    _compute_char_diff_segments(
-                        old_words[i1],
-                        new_words[j1],
-                    )
-                )
-                old_segments.extend(refined_old_segments)
-                new_segments.extend(refined_new_segments)
-            else:
-                old_segments.append(
-                    InlineSegment(
-                        text=_join_range(old_words, i1, i2),
-                        type=SegmentType.DELETED,
-                    )
-                )
-                new_segments.append(
-                    InlineSegment(
-                        text=_join_range(new_words, j1, j2),
-                        type=SegmentType.ADDED,
-                    )
-                )
-        elif tag == "delete":
-            old_segments.append(
-                InlineSegment(
-                    text=_join_range(old_words, i1, i2),
-                    type=SegmentType.DELETED,
-                )
-            )
-        elif tag == "insert":
-            new_segments.append(
-                InlineSegment(
-                    text=_join_range(new_words, j1, j2),
-                    type=SegmentType.ADDED,
-                )
-            )
-
-    return _merge_segments(old_segments), _merge_segments(new_segments)
+    changes = _compute_token_diff(_tokenize(old_text), _tokenize(new_text))
+    return _build_word_alt_segments(changes)
 
 
 def compute_line_diff(old_lines: Sequence[str], new_lines: Sequence[str]) -> list[DiffLine]:
@@ -988,7 +1047,10 @@ def compute_line_diff(old_lines: Sequence[str], new_lines: Sequence[str]) -> lis
                             )
                         )
                     else:
-                        max_line_length = max(len(old_text), len(new_text))
+                        max_line_length = max(
+                            _utf16_length(old_text),
+                            _utf16_length(new_text),
+                        )
                         if max_line_length > WORD_DIFF_MAX_LINE_LENGTH:
                             result.append(
                                 DiffLine(

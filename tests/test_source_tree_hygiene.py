@@ -30,6 +30,7 @@ def test_project_tree_does_not_contain_local_artifact_files() -> None:
         "__pycache__",
         "build",
         "dist",
+        "target",
     }
 
     artifacts = sorted(
