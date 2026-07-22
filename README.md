@@ -11,6 +11,7 @@ A terminal UI for reviewing GitHub pull requests.
 - Python 3.14+
 - uv
 - GitHub CLI (`gh`)
+- Rust 1.91+ when installing from source
 
 ## Installation
 

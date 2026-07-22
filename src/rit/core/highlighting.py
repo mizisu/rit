@@ -6,11 +6,7 @@ from typing import overload
 
 from textual.content import Content, Span
 
-from rit.core.highlight_theme import RitHighlightTheme, RitLightHighlightTheme
-from rit.core.tree_sitter_highlighting import (
-    detect_tree_sitter_language,
-    highlight_with_tree_sitter,
-)
+from rit.core.syntax_highlighting import highlight_code
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 
 __all__ = (
@@ -19,60 +15,12 @@ __all__ = (
     "apply_word_diff_spans",
     "highlight_lines_for_diff",
     "highlight_lines_for_diff_range",
-    "prewarm_highlighter",
 )
 
 
-_HIGHLIGHTER_PREWARMED = False
 _HIGHLIGHT_CONTEXT_LINES = 256
 WORD_DIFF_ADDED_STYLE = "on $success 20%"
 WORD_DIFF_DELETED_STYLE = "on $error 20%"
-
-
-def _syntax_theme_class(
-    dark_mode: bool,
-) -> type[RitHighlightTheme] | type[RitLightHighlightTheme]:
-    return RitHighlightTheme if dark_mode else RitLightHighlightTheme
-
-
-def _normalize_code(code: str) -> str:
-    if "\r" in code:
-        return "\n".join(code.splitlines())
-    if code.endswith("\n"):
-        return code[:-1]
-    return code
-
-
-def _highlight_code(
-    code: str,
-    *,
-    path: str,
-    dark_mode: bool,
-    language: str | None = None,
-) -> Content:
-    normalized_code = _normalize_code(code)
-    resolved_language = language or detect_tree_sitter_language(normalized_code, path)
-    theme = _syntax_theme_class(dark_mode)
-    return highlight_with_tree_sitter(
-        normalized_code,
-        language=resolved_language,
-        capture_styles=theme.STYLES,
-    )
-
-
-def prewarm_highlighter() -> None:
-    """Warm up Tree-sitter highlighting once per process."""
-    global _HIGHLIGHTER_PREWARMED
-    if _HIGHLIGHTER_PREWARMED:
-        return
-
-    _highlight_code(
-        "def warmup():\n    return 1",
-        language="python",
-        path="warmup.py",
-        dark_mode=True,
-    )
-    _HIGHLIGHTER_PREWARMED = True
 
 
 def _filename_for_lines(lines: Iterable[DiffLine], fallback: str) -> str:
@@ -257,14 +205,12 @@ def _highlight_text_lines(
 ) -> tuple[list[Content], list[Content]]:
     old_code = "\n".join(old_lines_text)
     new_code = "\n".join(new_lines_text)
-    language = detect_tree_sitter_language(old_code or new_code, filename)
 
     if old_lines_text == new_lines_text:
         if not old_lines_text:
             return [], []
-        highlighted = _highlight_code(
+        highlighted = highlight_code(
             old_code,
-            language=language,
             path=filename,
             dark_mode=dark_mode,
         )
@@ -273,18 +219,16 @@ def _highlight_text_lines(
 
     old_highlighted = Content.empty()
     if old_lines_text:
-        old_highlighted = _highlight_code(
+        old_highlighted = highlight_code(
             old_code,
-            language=language,
             path=filename,
             dark_mode=dark_mode,
         )
 
     new_highlighted = Content.empty()
     if new_lines_text:
-        new_highlighted = _highlight_code(
+        new_highlighted = highlight_code(
             new_code,
-            language=language,
             path=filename,
             dark_mode=dark_mode,
         )
