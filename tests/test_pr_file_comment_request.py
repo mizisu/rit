@@ -49,7 +49,7 @@ def test_parse_file_comment_response_preserves_subject_type() -> None:
     assert comment.subject_type == "file"
 
 
-async def test_create_file_comment_runs_request_and_parses_response() -> None:
+async def test_create_file_comment_runs_one_rest_request() -> None:
     calls: list[tuple[list[str], str | None]] = []
 
     async def runner(args: list[str], *, input_text: str | None = None) -> str:
@@ -73,6 +73,7 @@ async def test_create_file_comment_runs_request_and_parses_response() -> None:
     )
 
     assert comment.subject_type == "file"
+    assert len(calls) == 1
     assert calls[0][0] == [
         "api",
         "--method",

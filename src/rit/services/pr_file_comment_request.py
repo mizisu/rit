@@ -18,7 +18,7 @@ def create_file_comment_request(
     commit_id: str,
     path: str,
 ) -> GitHubInputRequest:
-    """Build a REST request for a file-level PR review comment."""
+    """Build a REST request for a standalone file-level review comment."""
     return GitHubInputRequest(
         args=(
             "api",
@@ -40,7 +40,7 @@ def create_file_comment_request(
 
 
 def parse_file_comment_response(result: str) -> PRComment:
-    """Parse a file-level review comment response."""
+    """Parse a standalone file-level review comment response."""
     comment = PRComment.model_validate(json.loads(result))
     if comment.subject_type.lower() == "file":
         return comment
@@ -56,7 +56,7 @@ async def create_file_comment(
     path: str,
     runner: GitHubInputRunner,
 ) -> PRComment:
-    """Create a file-level PR review comment through the REST API."""
+    """Create a standalone file-level review comment through REST."""
     request = create_file_comment_request(
         repo_full_name,
         pr_number,

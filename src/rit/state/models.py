@@ -1,4 +1,4 @@
-"""PR data models matching GitHub GraphQL/REST response structures."""
+"""PR data models projected from GitHub GraphQL and raw diff data."""
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -111,6 +111,7 @@ class PRUser(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     login: str = ""
+    node_id: str = Field(default="", validation_alias=AliasChoices("id", "node_id"))
     avatar_url: str = Field(
         default="", validation_alias=AliasChoices("avatarUrl", "avatar_url")
     )
@@ -198,6 +199,16 @@ class PRComment(BaseModel):
         validation_alias=AliasChoices("originalPosition", "original_position"),
     )
     node_id: str = Field(default="", validation_alias=AliasChoices("nodeId", "node_id"))
+    commit_id: str = Field(
+        default="", validation_alias=AliasChoices("commit", "commitOid", "commit_id")
+    )
+    original_commit_id: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            "originalCommit", "originalCommitOid", "original_commit_id"
+        ),
+    )
+    outdated: bool = False
     subject_type: str = Field(
         default="line", validation_alias=AliasChoices("subjectType", "subject_type")
     )
@@ -242,6 +253,13 @@ class PRComment(BaseModel):
             return _dict_value(v, "databaseId")
         return v
 
+    @field_validator("commit_id", "original_commit_id", mode="before")
+    @classmethod
+    def parse_commit_oid(cls, v: object) -> object:
+        if isinstance(v, dict):
+            return _dict_value(v, "oid")
+        return v
+
 
 class PendingReviewComment(BaseModel):
     """Locally staged inline review comment awaiting review submission."""
@@ -254,6 +272,7 @@ class PendingReviewComment(BaseModel):
     start_side: Literal["LEFT", "RIGHT"] | None = None
     is_diff_line: bool = True
     review_comment_id: int = 0
+    review_comment_node_id: str = ""
 
     @property
     def anchor_side(self) -> Literal["old", "new"]:
@@ -413,7 +432,7 @@ class PRReview(BaseModel):
 
 
 class PRFile(BaseModel):
-    """A file changed in the PR (REST API response with patch data)."""
+    """A changed file assembled from GraphQL metadata and raw diff data."""
 
     model_config = ConfigDict(populate_by_name=True)
 
@@ -422,7 +441,7 @@ class PRFile(BaseModel):
     additions: int = 0
     deletions: int = 0
     changes: int = 0
-    patch: str = ""  # Unified diff patch - only available via REST API
+    patch: str = ""
     previous_filename: str | None = Field(
         default=None,
         validation_alias=AliasChoices("previousFilename", "previous_filename"),

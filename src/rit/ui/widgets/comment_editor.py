@@ -51,7 +51,7 @@ class InlineCommentEditor(Vertical):
 
     InlineCommentEditor .comment-editor-body {
         height: auto;
-        min-height: 4;
+        min-height: 5;
         max-height: 12;
         margin-bottom: 1;
     }

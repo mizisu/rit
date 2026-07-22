@@ -6,7 +6,6 @@ from collections.abc import (
     Awaitable,
     Callable,
     Iterable,
-    Mapping,
     Sequence,
 )
 from typing import Protocol
@@ -15,11 +14,6 @@ from rit.core.diff import (
     ParsedFilePatch,
     ParsedFilePatchSummary,
     parse_multi_file_patch,
-)
-from rit.core.pagination import (
-    PR_FILES_PER_PAGE,
-    PRFilePageProgress,
-    collect_ordered_page_items,
 )
 from rit.core.types import FileDiff
 from rit.state.file_collection import (
@@ -32,16 +26,13 @@ __all__ = (
     "DiffSectionStreamer",
     "DiffSummaryParser",
     "MutableFileIngestState",
-    "PRFilePageGetter",
-    "PRFilePagesGetter",
     "RawDiffTextGetter",
     "append_file_batch",
     "append_file_summaries",
     "append_parsed_files",
     "begin_file_ingest",
-    "file_page_progress",
     "load_raw_diff_text",
-    "load_rest_file_pages",
+    "load_file_metadata",
     "load_streamed_diff_summaries",
 )
 
@@ -57,24 +48,13 @@ class MutableFileIngestState(Protocol):
     pr: PR | None
 
 
-class PRFilePageGetter(Protocol):
+class PRFilesGetter(Protocol):
     def __call__(
         self,
         pr_number: int,
         *,
-        page: int,
-        per_page: int,
+        total_count: int | None = None,
     ) -> Awaitable[Sequence[PRFile]]: ...
-
-
-class PRFilePagesGetter(Protocol):
-    def __call__(
-        self,
-        pr_number: int,
-        *,
-        pages: tuple[int, ...],
-        per_page: int,
-    ) -> Awaitable[Mapping[int, Sequence[PRFile]]]: ...
 
 
 class DiffSectionStreamer(Protocol):
@@ -103,7 +83,7 @@ def append_file_batch(
     state: MutableFileIngestState,
     batch: Sequence[PRFile],
 ) -> int:
-    """Append REST-loaded files and return the number newly inserted."""
+    """Append remotely loaded files and return the number newly inserted."""
     if not batch:
         return 0
 
@@ -130,6 +110,26 @@ def append_file_batch(
             total_count if total_count >= loaded_count else loaded_count
         )
     return added_count
+
+
+async def load_file_metadata(
+    state: MutableFileIngestState,
+    *,
+    pr_number: int,
+    get_files: PRFilesGetter,
+    on_progress: Callable[[], None],
+) -> bool:
+    """Load changed-file metadata from a complete GraphQL source."""
+    total_count = state.files_total_count or None
+    try:
+        files = await get_files(pr_number, total_count=total_count)
+    except RuntimeError:
+        return False
+    if not files:
+        return False
+    append_file_batch(state, files)
+    on_progress()
+    return True
 
 
 def append_parsed_files(
@@ -159,7 +159,7 @@ def append_file_summaries(
     summaries: Iterable[ParsedFilePatchSummary],
 ) -> int:
     """Apply lightweight streamed raw-diff summaries to the ingest state."""
-    added_count = 0
+    applied_count = 0
     for summary in summaries:
         result = apply_file_summary(
             state.files,
@@ -170,85 +170,8 @@ def append_file_summaries(
         )
         state.files_loaded_count = result.loaded_count
         state.files_total_count = result.total_count
-        if result.added:
-            added_count += 1
-    return added_count
-
-
-def file_page_progress(state: MutableFileIngestState) -> PRFilePageProgress:
-    """Return REST pagination progress for the current ingest state."""
-    changed_files = state.pr.changed_files if state.pr is not None else 0
-    return PRFilePageProgress(
-        loaded_count=state.files_loaded_count,
-        total_count_hint=state.files_total_count,
-        changed_files=changed_files,
-    )
-
-
-async def load_rest_file_pages(
-    state: MutableFileIngestState,
-    *,
-    pr_number: int,
-    get_page: PRFilePageGetter,
-    get_pages: PRFilePagesGetter,
-    on_progress: Callable[[], None],
-    per_page: int = PR_FILES_PER_PAGE,
-) -> bool:
-    """Load PR files from the REST file pages source."""
-    try:
-        first_page = await get_page(
-            pr_number,
-            page=1,
-            per_page=per_page,
-        )
-    except RuntimeError:
-        return False
-
-    if not first_page:
-        return False
-
-    append_file_batch(state, first_page)
-    on_progress()
-
-    progress = file_page_progress(state)
-    if progress.rest_limit_exceeded:
-        return False
-
-    remaining_pages = progress.initial_remaining_pages()
-    saw_last_page = len(first_page) < per_page
-    while remaining_pages:
-        page_chunk, remaining_pages = progress.next_page_chunk(remaining_pages)
-        if not page_chunk:
-            break
-
-        try:
-            page_batches = await get_pages(
-                pr_number,
-                pages=page_chunk,
-                per_page=per_page,
-            )
-        except RuntimeError:
-            return False
-
-        collected = collect_ordered_page_items(
-            page_chunk,
-            page_batches,
-            per_page=per_page,
-        )
-        append_file_batch(state, collected.items)
-        saw_last_page = collected.saw_last_page
-        progress = file_page_progress(state)
-        if collected.saw_last_page:
-            break
-        if progress.rest_limit_exceeded:
-            return False
-
-    if not progress.rest_list_complete(saw_last_page=saw_last_page):
-        return False
-
-    state.files_loading = LoadingState.LOADED
-    on_progress()
-    return True
+        applied_count += 1
+    return applied_count
 
 
 async def load_raw_diff_text(

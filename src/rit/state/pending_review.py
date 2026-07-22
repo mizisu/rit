@@ -245,7 +245,12 @@ def upsert_pending_comment(
         and _same_anchor(comments[draft_index], path=path, line=line, side=side)
     ):
         draft = draft.model_copy(
-            update={"review_comment_id": comments[draft_index].review_comment_id}
+            update={
+                "review_comment_id": comments[draft_index].review_comment_id,
+                "review_comment_node_id": comments[
+                    draft_index
+                ].review_comment_node_id,
+            }
         )
         updated = list(comments)
         updated[draft_index] = draft
@@ -255,7 +260,10 @@ def upsert_pending_comment(
         for index, existing in enumerate(comments):
             if _same_anchor(existing, path=path, line=line, side=side):
                 draft = draft.model_copy(
-                    update={"review_comment_id": existing.review_comment_id}
+                    update={
+                        "review_comment_id": existing.review_comment_id,
+                        "review_comment_node_id": existing.review_comment_node_id,
+                    }
                 )
                 if len(comments) == 1:
                     return [draft], draft
@@ -912,6 +920,7 @@ def _pending_comment_from_review_thread_comment(
         start_line=normalized_start_line,
         start_side=start_side if normalized_start_line is not None else None,
         review_comment_id=comment.id,
+        review_comment_node_id=comment.node_id,
     )
 
 
@@ -937,22 +946,22 @@ def _thread_start_line(
 ) -> int | None:
     if start_side == "LEFT":
         return (
-            thread.original_start_line
-            if thread.original_start_line is not None
-            else comment.original_start_line
+            comment.original_start_line
             if comment.original_start_line is not None
-            else thread.start_line
-            if thread.start_line is not None
             else comment.start_line
+            if comment.start_line is not None
+            else thread.original_start_line
+            if thread.original_start_line is not None
+            else thread.start_line
         )
     return (
-        thread.start_line
-        if thread.start_line is not None
-        else comment.start_line
+        comment.start_line
         if comment.start_line is not None
-        else thread.original_start_line
-        if thread.original_start_line is not None
         else comment.original_start_line
+        if comment.original_start_line is not None
+        else thread.start_line
+        if thread.start_line is not None
+        else thread.original_start_line
     )
 
 
@@ -963,22 +972,22 @@ def _thread_anchor_line(
 ) -> int | None:
     if side == "LEFT":
         return (
-            thread.original_line
-            if thread.original_line is not None
-            else comment.original_line
+            comment.original_line
             if comment.original_line is not None
-            else thread.line
-            if thread.line is not None
             else comment.line
+            if comment.line is not None
+            else thread.original_line
+            if thread.original_line is not None
+            else thread.line
         )
     return (
-        thread.line
-        if thread.line is not None
-        else comment.line
+        comment.line
         if comment.line is not None
-        else thread.original_line
-        if thread.original_line is not None
         else comment.original_line
+        if comment.original_line is not None
+        else thread.line
+        if thread.line is not None
+        else thread.original_line
     )
 
 
@@ -1008,6 +1017,7 @@ def _pending_comment_from_review_comment(
         start_line=normalized_start_line,
         start_side=start_side if normalized_start_line is not None else None,
         review_comment_id=comment.id,
+        review_comment_node_id=comment.node_id,
     )
 
 
@@ -1060,14 +1070,17 @@ def _remember_server_comment_id(
     comments: list[PendingReviewComment],
     server_comment: PendingReviewComment,
 ) -> None:
-    if not server_comment.review_comment_id:
+    if not server_comment.review_comment_id and not server_comment.review_comment_node_id:
         return
     server_key = _comment_content_key(server_comment)
     for index, comment in enumerate(comments):
         if _comment_content_key(comment) != server_key:
             continue
         comments[index] = comment.model_copy(
-            update={"review_comment_id": server_comment.review_comment_id}
+            update={
+                "review_comment_id": server_comment.review_comment_id,
+                "review_comment_node_id": server_comment.review_comment_node_id,
+            }
         )
         return
 
@@ -1077,10 +1090,13 @@ def _remember_server_comment_id(
             server_comment,
         ):
             continue
-        if comment.review_comment_id:
+        if comment.review_comment_id or comment.review_comment_node_id:
             return
         comments[index] = comment.model_copy(
-            update={"review_comment_id": server_comment.review_comment_id}
+            update={
+                "review_comment_id": server_comment.review_comment_id,
+                "review_comment_node_id": server_comment.review_comment_node_id,
+            }
         )
         return
 

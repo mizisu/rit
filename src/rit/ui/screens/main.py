@@ -832,6 +832,7 @@ class MainScreen(Screen[None]):
         if diff is None:
             return
 
+        scroll_y = diff_view.scroll_y
         if diff_view._showing_full_file:
             content = await self.store.get_file_content(current_file)
             if content is not None:
@@ -854,6 +855,12 @@ class MainScreen(Screen[None]):
             )
         if focus_diff:
             diff_view.focus()
+
+        def restore_scroll() -> None:
+            if diff_view.current_file == current_file:
+                diff_view.scroll_to(y=scroll_y, animate=False)
+
+        diff_view.call_after_refresh(restore_scroll)
 
     async def _submit_issue_comment(self, body: str) -> bool:
         await self.store.submit_issue_comment(body)

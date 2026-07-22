@@ -42,11 +42,8 @@ def split_line_style(
     line: DiffLine,
     *,
     side: Literal["old", "new"],
-    word_diff_enabled: bool,
 ) -> str:
     """Return the background style for one split diff side."""
-    if line.is_modified and line.has_word_diff and word_diff_enabled:
-        return ""
     if side == "old" and (line.is_deleted or line.is_modified):
         return "on $error 6%"
     if side == "new" and (line.is_added or line.is_modified):
@@ -94,19 +91,17 @@ def split_code_classes(
     line: DiffLine,
     *,
     side: Literal["old", "new"],
-    word_diff_enabled: bool = True,
 ) -> str:
     """Return CSS classes for one split code side."""
     classes = f"code-content -{side}-side"
-    inline_word_diff = line.is_modified and word_diff_enabled and line.has_word_diff
 
     if side == "old":
-        if line.is_deleted or (line.is_modified and not inline_word_diff):
+        if line.is_deleted or line.is_modified:
             classes += " -removed"
         if line.is_added:
             classes += " -placeholder"
     else:
-        if line.is_added or (line.is_modified and not inline_word_diff):
+        if line.is_added or line.is_modified:
             classes += " -added"
         if line.is_deleted:
             classes += " -placeholder"

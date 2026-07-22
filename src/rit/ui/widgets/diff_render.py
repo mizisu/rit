@@ -59,7 +59,6 @@ def _should_force_unified_for_current_file(view: DiffView) -> bool:
         showing_full_file=view._showing_full_file,
         file=file,
         diff=view._diff,
-        lines=view._all_lines,
     )
 
 
@@ -82,22 +81,6 @@ def _split_prefix_width_for_layout(
     )
 
 
-def _can_fit_auto_split_content(view: DiffView) -> bool:
-    if not view._all_lines:
-        return True
-
-    split_gap = 2
-    required_width = (
-        _split_prefix_width_for_layout(view, "old")
-        + view._split_old_code_width
-        + _split_prefix_width_for_layout(view, "new")
-        + view._split_new_code_width
-        + split_gap
-        + split_gap
-    )
-    return view.size.width >= required_width
-
-
 def _update_split_state(view: DiffView) -> None:
     old_split = view.split
 
@@ -106,10 +89,7 @@ def _update_split_state(view: DiffView) -> None:
     elif view.mode == "unified":
         view.split = False
     else:
-        view.split = (
-            view.size.width >= view.LAYOUT.auto_split_min_width
-            and _can_fit_auto_split_content(view)
-        )
+        view.split = view.size.width >= view.LAYOUT.auto_split_min_width
 
     if view.split and _should_force_unified_for_current_file(view):
         view.split = False
@@ -731,7 +711,6 @@ def _split_line_style(
     return _styles.split_line_style(
         line,
         side=side,
-        word_diff_enabled=getattr(view, "word_diff_enabled", True),
     )
 
 
@@ -1178,12 +1157,10 @@ def _split_code_classes(
     line: DiffLine,
     *,
     side: Literal["old", "new"],
-    word_diff_enabled: bool,
 ) -> str:
     return _styles.split_code_classes(
         line,
         side=side,
-        word_diff_enabled=word_diff_enabled,
     )
 
 
@@ -1255,7 +1232,6 @@ def _render_line_split(
     left_classes = _split_code_classes(
         line,
         side="old",
-        word_diff_enabled=view.word_diff_enabled,
     )
 
     right_prefix = _build_split_prefix_content(view, line, side="new")
@@ -1270,7 +1246,6 @@ def _render_line_split(
     right_classes = _split_code_classes(
         line,
         side="new",
-        word_diff_enabled=view.word_diff_enabled,
     )
 
     left_prefix_widget = Static(

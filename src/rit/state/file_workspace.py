@@ -3,14 +3,14 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from typing import Any, Protocol
 
-from rit.core.pagination import PR_FILES_PER_PAGE
 from rit.state.file_ingest import (
     MutableFileIngestState,
     begin_file_ingest,
+    load_file_metadata,
     load_raw_diff_text,
-    load_rest_file_pages,
     load_streamed_diff_summaries,
 )
+from rit.state.models import LoadingState
 
 __all__ = ("FileSummaryParser", "load_file_workspace")
 
@@ -34,15 +34,23 @@ async def load_file_workspace(
     begin_file_ingest(state)
 
     try:
-        if await _load_from_rest_pages(state, pr_number, source, on_progress):
-            return None
-        if await _load_from_streamed_raw_diff(
-            state,
-            pr_number,
-            source,
-            parse_summaries,
-            on_progress,
-        ):
+        metadata_loaded = await _load_from_graphql_files(
+            state, pr_number, source, on_progress
+        )
+        try:
+            diff_loaded = await _load_from_streamed_raw_diff(
+                state,
+                pr_number,
+                source,
+                parse_summaries,
+                on_progress,
+            )
+        except RuntimeError:
+            if not metadata_loaded:
+                raise
+            diff_loaded = False
+        if metadata_loaded or diff_loaded:
+            state.files_loading = LoadingState.LOADED
             return None
         if await _load_from_raw_diff(state, pr_number, source, on_progress):
             return None
@@ -52,24 +60,21 @@ async def load_file_workspace(
     return "No changed files could be loaded"
 
 
-async def _load_from_rest_pages(
+async def _load_from_graphql_files(
     state: MutableFileIngestState,
     pr_number: int,
     source: Any,
     on_progress: ProgressCallback,
 ) -> bool:
-    get_page = getattr(source, "get_pr_files_page", None)
-    get_pages = getattr(source, "get_pr_file_pages", None)
-    if get_page is None or get_pages is None:
+    get_files = getattr(source, "get_pr_files", None)
+    if get_files is None:
         return False
 
-    return await load_rest_file_pages(
+    return await load_file_metadata(
         state,
         pr_number=pr_number,
-        get_page=get_page,
-        get_pages=get_pages,
+        get_files=get_files,
         on_progress=on_progress,
-        per_page=PR_FILES_PER_PAGE,
     )
 
 

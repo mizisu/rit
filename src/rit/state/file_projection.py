@@ -69,7 +69,7 @@ def file_from_summary(summary: ParsedFilePatchSummary) -> PRFile:
 
 
 def diff_from_file_patch(file: PRFile) -> FileDiff:
-    """Parse a PR file patch and restore REST metadata on the diff."""
+    """Parse a PR file patch and restore changed-file metadata on the diff."""
     diff = parse_patch(file.patch, file.filename)
     status = file.status
     diff.old_filename = file.previous_filename

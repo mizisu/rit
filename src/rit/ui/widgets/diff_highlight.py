@@ -11,8 +11,8 @@ from textual._context import NoActiveAppError
 from rit.core.highlighting import (
     highlight_lines_for_diff,
     highlight_lines_for_diff_range,
-    prewarm_highlighter,
 )
+from rit.core.syntax_highlighting import prewarm_highlighter
 from rit.core.types import DiffLine, FileDiff
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_virtual as _virtual

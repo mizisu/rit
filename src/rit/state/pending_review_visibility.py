@@ -288,9 +288,9 @@ def _old_anchor_line(
     *,
     thread: ReviewThread | None = None,
 ) -> int | None:
-    if thread is not None and thread.original_line is not None:
-        return thread.original_line
-    return comment.original_line
+    if comment.original_line is not None:
+        return comment.original_line
+    return thread.original_line if thread is not None else None
 
 
 def _new_anchor_line(
@@ -298,9 +298,9 @@ def _new_anchor_line(
     *,
     thread: ReviewThread | None = None,
 ) -> int | None:
-    if thread is not None and thread.line is not None:
-        return thread.line
-    return comment.line
+    if comment.line is not None:
+        return comment.line
+    return thread.line if thread is not None else None
 
 
 def _anchor_line_for_side(
@@ -331,24 +331,27 @@ def _start_line_for_side(
     thread: ReviewThread | None = None,
 ) -> int | None:
     if target_side == "old":
-        if thread is not None and thread.original_start_line is not None:
-            return thread.original_start_line
         if comment.original_start_line is not None:
             return comment.original_start_line
-        if thread is not None and thread.start_line is not None:
-            return thread.start_line
-        return comment.start_line
-    if target_side == "new":
-        if thread is not None and thread.start_line is not None:
-            return thread.start_line
         if comment.start_line is not None:
             return comment.start_line
-        if thread is not None and thread.original_start_line is not None:
-            return thread.original_start_line
-        return comment.original_start_line
-    if thread is not None:
+        if thread is None:
+            return None
+        return thread.original_start_line or thread.start_line
+    if target_side == "new":
+        if comment.start_line is not None:
+            return comment.start_line
+        if comment.original_start_line is not None:
+            return comment.original_start_line
+        if thread is None:
+            return None
         return thread.start_line or thread.original_start_line
-    return comment.start_line or comment.original_start_line
+    comment_start = comment.start_line or comment.original_start_line
+    if comment_start is not None:
+        return comment_start
+    return (
+        thread.start_line or thread.original_start_line if thread is not None else None
+    )
 
 
 def _start_side_for_side(

@@ -120,7 +120,9 @@ def apply_file_summary(
     total_count: int,
 ) -> FileAppendResult:
     """Apply a lightweight raw-diff summary to file indexes."""
-    if summary.filename in files_by_filename:
+    existing = files_by_filename.get(summary.filename)
+    if existing is not None:
+        _replace_file_metadata(existing, file_from_summary(summary))
         return FileAppendResult(
             added=False,
             loaded_count=len(files),

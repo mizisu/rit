@@ -971,11 +971,11 @@ class PRStore:
         if after_local_save is not None:
             await after_local_save()
 
-        if removed_comment is not None and removed_comment.review_comment_id:
+        if removed_comment is not None and removed_comment.review_comment_node_id:
             try:
                 async with self._pending_review_sync_lock:
                     await self._service.update_review_comment(
-                        removed_comment.review_comment_id,
+                        removed_comment.review_comment_node_id,
                         normalized,
                     )
             except Exception:
