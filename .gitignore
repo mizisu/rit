@@ -6,6 +6,11 @@ dist/
 wheels/
 *.egg-info
 
+# Rust-generated files
+target/
+*.so
+*.pyd
+
 # Virtual environments
 .venv
 

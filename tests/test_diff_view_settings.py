@@ -96,13 +96,13 @@ def _combined_diff_with_single_sided_file(
     ],
 )
 @pytest.mark.asyncio
-async def test_split_mode_renders_single_sided_combined_file_hunks_as_unified(
+async def test_split_mode_keeps_single_sided_modified_hunks_split(
     changed_line: DiffLine,
     additions: int,
     deletions: int,
     expected_text: str,
 ) -> None:
-    """Single-sided files in a combined diff should not waste a split pane."""
+    """Modified-file hunks should follow the selected layout mode."""
 
     class TestApp(App):
         def compose(self) -> ComposeResult:
@@ -123,17 +123,17 @@ async def test_split_mode_renders_single_sided_combined_file_hunks_as_unified(
         await pilot.pause()
 
         assert diff_view.split is True
-        assert len(diff_view.query("#line-0-old")) == 0
-        assert len(diff_view.query("#line-0-new")) == 0
-        assert _as_plain(diff_view.query_one("#line-0 .code-content", Static)) == (
-            expected_text
-        )
-        prefix = diff_view.query_one("#line-0 .line-prefix", Static)
-        assert _as_plain(prefix) == ("1 + " if additions else "1 - ")
-        assert prefix.size.width == 4
-        context_prefix = diff_view.query_one("#line-1 .line-prefix", Static)
-        assert _as_plain(context_prefix) == ("9   " if additions else "8   ")
-        assert context_prefix.size.width == 4
+        assert len(diff_view.query("#line-0-old")) == 1
+        assert len(diff_view.query("#line-0-new")) == 1
+        changed_side = "new" if additions else "old"
+        assert _as_plain(
+            diff_view.query_one(
+                f"#line-0-{changed_side} .code-content",
+                Static,
+            )
+        ) == expected_text
+        assert len(diff_view.query("#line-1-old")) == 1
+        assert len(diff_view.query("#line-1-new")) == 1
         assert len(diff_view.query("#line-2-old")) == 1
         assert len(diff_view.query("#line-2-new")) == 1
 

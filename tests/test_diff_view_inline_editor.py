@@ -170,9 +170,11 @@ async def test_open_inline_comment_editor_mounts_below_current_line() -> None:
 
         line_widget = app.query_one("#line-0")
         editor = app.query_one("#diff-inline-comment-editor")
+        body = editor.query_one("#comment-editor-body", TextArea)
         context = editor.query_one(".comment-editor-context", Static)
 
         assert editor.region.y > line_widget.region.y
+        assert body.region.height >= 5
         assert diff_view.inline_comment_target() == ("test.py", 1, "LEFT")
         assert str(context.content) == "Selected: test.py:1 (old)"
 

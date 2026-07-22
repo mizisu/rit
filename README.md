@@ -28,4 +28,3 @@ rit owner/repo#123
 rit https://github.com/owner/repo/pull/123
 ```
 
-

@@ -176,8 +176,8 @@ def test_base_content_cache_invalidation_pops_indexed_line_keys_only() -> None:
 
 
 @pytest.mark.asyncio
-async def test_split_modified_word_diff_avoids_whole_line_change_classes() -> None:
-    """Split modified rows should let inline word-diff carry small changes."""
+async def test_split_modified_word_diff_keeps_whole_line_change_classes() -> None:
+    """Split modified rows should layer word and whole-line backgrounds."""
 
     patch = (
         "@@ -64,1 +64,1 @@\n"
@@ -203,8 +203,8 @@ async def test_split_modified_word_diff_avoids_whole_line_change_classes() -> No
         new_code = diff_view.query_one("#line-0-new .code-content", Static)
 
         assert diff.hunks[0].lines[0].has_word_diff
-        assert not old_code.has_class("-removed")
-        assert not new_code.has_class("-added")
+        assert old_code.has_class("-removed")
+        assert new_code.has_class("-added")
 
 
 @pytest.mark.asyncio
@@ -554,8 +554,8 @@ async def test_deleted_only_file_forces_unified_even_in_auto_split_layout() -> N
 
 
 @pytest.mark.asyncio
-async def test_added_only_change_with_context_forces_unified_in_split_mode() -> None:
-    """One-sided additions should stay unified even when the file has context lines."""
+async def test_added_only_change_in_modified_file_stays_split() -> None:
+    """One-sided additions in a modified file should follow split mode."""
 
     patch = """@@ -1,2 +1,3 @@
  line1
@@ -574,15 +574,15 @@ async def test_added_only_change_with_context_forces_unified_in_split_mode() -> 
         await diff_view.show_diff("test.py", diff)
         await pilot.pause()
 
-        code = diff_view.query_one("#line-1 .code-content", Static)
+        code = diff_view.query_one("#line-1-new .code-content", Static)
 
-        assert diff_view.split is False
+        assert diff_view.split is True
         assert "line2" in _as_plain(code)
 
 
 @pytest.mark.asyncio
-async def test_deleted_only_change_with_context_forces_unified_in_split_mode() -> None:
-    """One-sided deletions should stay unified even when the file has context lines."""
+async def test_deleted_only_change_in_modified_file_stays_split() -> None:
+    """One-sided deletions in a modified file should follow split mode."""
 
     patch = """@@ -1,3 +1,2 @@
  line1
@@ -601,15 +601,15 @@ async def test_deleted_only_change_with_context_forces_unified_in_split_mode() -
         await diff_view.show_diff("test.py", diff)
         await pilot.pause()
 
-        code = diff_view.query_one("#line-1 .code-content", Static)
+        code = diff_view.query_one("#line-1-old .code-content", Static)
 
-        assert diff_view.split is False
+        assert diff_view.split is True
         assert "line2" in _as_plain(code)
 
 
 @pytest.mark.asyncio
-async def test_add_delete_only_change_forces_unified_in_split_mode() -> None:
-    """Changes without comparable modified rows should stay unified."""
+async def test_unpaired_add_delete_change_stays_split() -> None:
+    """Unpaired add/delete rows in a modified file should follow split mode."""
 
     patch = """@@ -1,3 +1,3 @@
  line1
@@ -629,46 +629,17 @@ async def test_add_delete_only_change_forces_unified_in_split_mode() -> None:
         await diff_view.show_diff("test.py", diff)
         await pilot.pause()
 
-        deleted_code = diff_view.query_one("#line-1 .code-content", Static)
-        added_code = diff_view.query_one("#line-2 .code-content", Static)
+        deleted_code = diff_view.query_one("#line-1-old .code-content", Static)
+        added_code = diff_view.query_one("#line-2-new .code-content", Static)
 
-        assert diff_view.split is False
+        assert diff_view.split is True
         assert "aaaaaaa" in _as_plain(deleted_code)
         assert "zzzzzzz" in _as_plain(added_code)
 
 
 @pytest.mark.asyncio
-async def test_auto_mode_uses_split_when_lines_fit_available_width() -> None:
-    """Auto mode should choose split when the viewport is wide enough for both panes."""
-
-    patch = """@@ -1,3 +1,3 @@
- line1
--old short
-+new short
- line2"""
-
-    class TestApp(App):
-        def compose(self) -> ComposeResult:
-            yield DiffView(mode="auto", id="diff-view")
-
-    app = TestApp()
-    async with app.run_test(size=(140, 20)) as pilot:
-        diff_view = app.query_one(DiffView)
-        diff = parse_patch(patch, "test.py")
-
-        await diff_view.show_diff("test.py", diff)
-        await pilot.pause()
-
-        assert diff_view.split is True
-        assert diff_view.query_one("#line-1-old .code-content", Static) is not None
-        assert diff_view.query_one("#line-1-new .code-content", Static) is not None
-
-
-@pytest.mark.asyncio
-async def test_auto_mode_falls_back_to_unified_when_lines_do_not_fit_split_width() -> (
-    None
-):
-    """Auto mode should avoid split when the code panes would still overflow badly."""
+async def test_auto_mode_uses_split_when_lines_overflow() -> None:
+    """Auto mode should let split panes scroll when the viewport is wide enough."""
 
     patch = (
         "@@ -1,3 +1,3 @@\n"
@@ -683,16 +654,37 @@ async def test_auto_mode_falls_back_to_unified_when_lines_do_not_fit_split_width
             yield DiffView(mode="auto", id="diff-view")
 
     app = TestApp()
-    async with app.run_test(size=(140, 20)) as pilot:
+    async with app.run_test(size=(120, 20)) as pilot:
         diff_view = app.query_one(DiffView)
         diff = parse_patch(patch, "test.py")
 
         await diff_view.show_diff("test.py", diff)
         await pilot.pause()
 
-        assert diff_view.split is False
+        assert diff_view.size.width == 120
+        assert diff_view.split is True
         assert diff_view.query_one("#line-1-old .code-content", Static) is not None
         assert diff_view.query_one("#line-1-new .code-content", Static) is not None
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_uses_unified_below_viewport_threshold() -> None:
+    """Auto mode should depend on viewport width rather than content width."""
+
+    patch = "@@ -1 +1 @@\n-old value\n+new value"
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="auto", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test(size=(119, 20)) as pilot:
+        diff_view = app.query_one(DiffView)
+        await diff_view.show_diff("test.py", parse_patch(patch, "test.py"))
+        await pilot.pause()
+
+        assert diff_view.size.width == 119
+        assert diff_view.split is False
 
 
 @pytest.mark.asyncio

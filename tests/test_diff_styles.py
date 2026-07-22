@@ -29,7 +29,7 @@ def test_unified_line_style_uses_change_backgrounds_outside_full_preview() -> No
     assert unified_line_style(added, showing_full_file=True) == ""
 
 
-def test_split_line_style_lets_inline_word_diff_carry_modified_background() -> None:
+def test_split_line_style_keeps_background_behind_inline_word_diff() -> None:
     modified = DiffLine(
         old_line_no=1,
         new_line_no=1,
@@ -38,16 +38,8 @@ def test_split_line_style_lets_inline_word_diff_carry_modified_background() -> N
         new_segments=[InlineSegment("new", SegmentType.ADDED)],
     )
 
-    assert split_line_style(modified, side="old", word_diff_enabled=True) == ""
-    assert split_line_style(modified, side="new", word_diff_enabled=True) == ""
-    assert (
-        split_line_style(modified, side="old", word_diff_enabled=False)
-        == "on $error 6%"
-    )
-    assert (
-        split_line_style(modified, side="new", word_diff_enabled=False)
-        == "on $success 6%"
-    )
+    assert split_line_style(modified, side="old") == "on $error 6%"
+    assert split_line_style(modified, side="new") == "on $success 6%"
 
 
 def test_split_missing_side_policy_uses_quiet_annotation_background() -> None:
@@ -67,5 +59,7 @@ def test_code_classes_mark_change_sides_and_placeholders() -> None:
 
     assert unified_code_classes(modified, side="old") == "code-content -removed"
     assert unified_code_classes(modified, side="new") == "code-content -added"
+    assert split_code_classes(modified, side="old") == "code-content -old-side -removed"
+    assert split_code_classes(modified, side="new") == "code-content -new-side -added"
     assert split_code_classes(added, side="old") == "code-content -old-side -placeholder"
     assert split_code_classes(added, side="new") == "code-content -new-side -added"

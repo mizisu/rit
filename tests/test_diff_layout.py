@@ -2,7 +2,6 @@ from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.state.models import PRFile
 import rit.ui.widgets.diff_layout as diff_layout_module
 from rit.ui.widgets.diff_layout import (
-    can_fit_auto_split_content,
     code_widths_for_layout,
     file_header_width_for_layout,
     line_number_columns_for_change_counts,
@@ -16,13 +15,12 @@ from rit.ui.widgets.diff_layout import (
 )
 
 
-def test_should_force_unified_for_full_preview_and_single_sided_file() -> None:
+def test_should_force_unified_for_full_preview_and_added_file() -> None:
     assert (
         should_force_unified_for_file(
             showing_full_file=True,
             file=None,
             diff=None,
-            lines=[],
         )
         is True
     )
@@ -31,28 +29,17 @@ def test_should_force_unified_for_full_preview_and_single_sided_file() -> None:
             showing_full_file=False,
             file=PRFile(filename="new.py", status="added", additions=2),
             diff=None,
-            lines=[],
-        )
-        is True
-    )
-    assert (
-        should_force_unified_for_file(
-            showing_full_file=False,
-            file=PRFile(filename="changed.py", additions=2, deletions=0),
-            diff=None,
-            lines=[],
         )
         is True
     )
 
 
-def test_should_force_unified_for_diff_flags_and_refined_add_delete_lines() -> None:
+def test_should_force_unified_for_new_and_deleted_diff_flags() -> None:
     assert (
         should_force_unified_for_file(
             showing_full_file=False,
             file=None,
             diff=FileDiff(filename="new.py", is_new=True),
-            lines=[],
         )
         is True
     )
@@ -61,47 +48,39 @@ def test_should_force_unified_for_diff_flags_and_refined_add_delete_lines() -> N
             showing_full_file=False,
             file=None,
             diff=FileDiff(filename="deleted.py", is_deleted=True),
-            lines=[],
-        )
-        is True
-    )
-    assert (
-        should_force_unified_for_file(
-            showing_full_file=False,
-            file=None,
-            diff=FileDiff(filename="changed.py"),
-            lines=[
-                DiffLine(old_line_no=1, new_line_no=1),
-                DiffLine(old_line_no=2, new_line_no=None, is_deleted=True),
-                DiffLine(old_line_no=None, new_line_no=2, is_added=True),
-            ],
         )
         is True
     )
 
 
-def test_should_not_force_unified_for_comparable_or_unrefined_changes() -> None:
+def test_should_not_force_unified_for_modified_files() -> None:
     assert (
         should_force_unified_for_file(
             showing_full_file=False,
             file=PRFile(filename="changed.py", additions=1, deletions=1),
             diff=FileDiff(filename="changed.py"),
-            lines=[DiffLine(old_line_no=1, new_line_no=1, is_modified=True)],
         )
         is False
     )
     assert (
         should_force_unified_for_file(
             showing_full_file=False,
-            file=None,
-            diff=FileDiff(filename="changed.py", is_fully_refined=False),
-            lines=[DiffLine(old_line_no=None, new_line_no=1, is_added=True)],
+            file=PRFile(filename="changed.py", additions=1, deletions=0),
+            diff=FileDiff(filename="changed.py"),
+        )
+        is False
+    )
+    assert (
+        should_force_unified_for_file(
+            showing_full_file=False,
+            file=PRFile(filename="changed.py", additions=1, deletions=1),
+            diff=FileDiff(filename="changed.py"),
         )
         is False
     )
 
 
-def test_should_force_unified_for_single_sided_hunks() -> None:
+def test_should_force_unified_only_for_added_or_removed_hunks() -> None:
     assert (
         should_force_unified_for_hunk(
             DiffHunk(
@@ -119,13 +98,25 @@ def test_should_force_unified_for_single_sided_hunks() -> None:
             DiffHunk(
                 old_start=1,
                 old_count=1,
+                new_start=0,
+                new_count=0,
+                file_status="removed",
+            )
+        )
+        is True
+    )
+    assert (
+        should_force_unified_for_hunk(
+            DiffHunk(
+                old_start=1,
+                old_count=1,
                 new_start=1,
                 new_count=1,
                 file_additions=0,
                 file_deletions=1,
             )
         )
-        is True
+        is False
     )
     assert (
         should_force_unified_for_hunk(
@@ -139,68 +130,6 @@ def test_should_force_unified_for_single_sided_hunks() -> None:
             )
         )
         is False
-    )
-
-
-def test_can_fit_auto_split_content_uses_display_cell_width() -> None:
-    ascii_line = DiffLine(
-        old_line_no=1,
-        new_line_no=1,
-        old_content="abcd",
-        new_content="new",
-    )
-    wide_line = DiffLine(
-        old_line_no=1,
-        new_line_no=1,
-        old_content="界界界界",
-        new_content="new",
-    )
-
-    assert can_fit_auto_split_content(
-        [ascii_line],
-        old_prefix_width=4,
-        new_prefix_width=4,
-        available_width=19,
-    )
-    assert not can_fit_auto_split_content(
-        [wide_line],
-        old_prefix_width=4,
-        new_prefix_width=4,
-        available_width=19,
-    )
-
-
-def test_can_fit_auto_split_content_scans_lines_once() -> None:
-    class SinglePassLines(list[DiffLine]):
-        iterations = 0
-
-        def __iter__(self):
-            self.iterations += 1
-            if self.iterations > 1:
-                raise AssertionError("split fit should scan lines only once")
-            return super().__iter__()
-
-    lines = SinglePassLines(
-        [
-            DiffLine(old_line_no=1, new_line_no=1, old_content="old"),
-            DiffLine(old_line_no=2, new_line_no=2, new_content="new"),
-        ]
-    )
-
-    assert can_fit_auto_split_content(
-        lines,
-        old_prefix_width=4,
-        new_prefix_width=4,
-        available_width=20,
-    )
-
-
-def test_can_fit_auto_split_content_allows_empty_diffs() -> None:
-    assert can_fit_auto_split_content(
-        [],
-        old_prefix_width=4,
-        new_prefix_width=4,
-        available_width=0,
     )
 
 

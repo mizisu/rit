@@ -489,7 +489,7 @@ def test_apply_file_summary_appends_new_summary_file() -> None:
     assert files_by_filename["src/app.py"] is files[0]
 
 
-def test_apply_file_summary_skips_existing_filename() -> None:
+def test_apply_file_summary_enriches_existing_graphql_metadata() -> None:
     file_collection = _file_collection_module()
     existing = PRFile(filename="src/app.py", additions=1, patch="existing")
     files = [existing]
@@ -513,8 +513,8 @@ def test_apply_file_summary_skips_existing_filename() -> None:
     assert result.loaded_count == 1
     assert result.total_count == 5
     assert files == [existing]
-    assert existing.patch == "existing"
-    assert existing.additions == 1
+    assert existing.patch == "new summary"
+    assert existing.additions == 9
 
 
 def test_apply_file_view_states_updates_valid_states() -> None:

@@ -13,9 +13,7 @@ from rit.state.file_ingest import (
     append_file_summaries,
     append_parsed_files,
     begin_file_ingest,
-    file_page_progress,
     load_raw_diff_text,
-    load_rest_file_pages,
     load_streamed_diff_summaries,
 )
 
@@ -196,18 +194,6 @@ def test_append_file_summaries_applies_lightweight_file_metadata() -> None:
     assert state.files[0].deletions == 2
 
 
-def test_file_page_progress_reads_loaded_total_and_pr_changed_files() -> None:
-    state = IngestState(
-        pr=PR(number=123, changedFiles=101),
-        files_loaded_count=100,
-        files_total_count=0,
-    )
-
-    progress = file_page_progress(state)
-
-    assert progress.initial_remaining_pages() == (2,)
-
-
 @pytest.mark.asyncio
 async def test_load_raw_diff_text_fetches_parses_and_posts_progress() -> None:
     state = IngestState(pr=PR(number=123, changedFiles=2), files_total_count=2)
@@ -267,7 +253,6 @@ async def test_load_raw_diff_text_returns_false_without_parsed_files() -> None:
 
     assert loaded is False
     assert state.files_loading == LoadingState.IDLE
-
 
 @pytest.mark.asyncio
 async def test_load_raw_diff_text_propagates_non_runtime_source_errors() -> None:
@@ -414,169 +399,6 @@ async def test_load_streamed_diff_summaries_propagates_parser_errors() -> None:
             pr_number=123,
             stream_sections=stream_sections,
             parse_summaries=parse_summaries,
-            on_progress=lambda: None,
-        )
-
-    assert state.files_loading == LoadingState.IDLE
-
-
-@pytest.mark.asyncio
-async def test_load_rest_file_pages_posts_first_page_then_final_state() -> None:
-    first_page = [PRFile(filename=f"file-{index}.py") for index in range(100)]
-    second_page = [PRFile(filename="file-100.py")]
-    state = IngestState(pr=PR(number=123, changedFiles=101), files_total_count=101)
-    progress_updates: list[tuple[int, int]] = []
-    page_calls: list[tuple[int, int, int]] = []
-    multi_page_calls: list[tuple[int, tuple[int, ...], int]] = []
-
-    async def get_page(
-        pr_number: int,
-        *,
-        page: int,
-        per_page: int,
-    ) -> list[PRFile]:
-        page_calls.append((pr_number, page, per_page))
-        return first_page
-
-    async def get_pages(
-        pr_number: int,
-        *,
-        pages: tuple[int, ...],
-        per_page: int,
-    ) -> dict[int, list[PRFile]]:
-        multi_page_calls.append((pr_number, pages, per_page))
-        return {2: second_page}
-
-    loaded = await load_rest_file_pages(
-        state,
-        pr_number=123,
-        get_page=get_page,
-        get_pages=get_pages,
-        on_progress=lambda: progress_updates.append(
-            (state.files_loaded_count, state.files_total_count)
-        ),
-    )
-
-    assert loaded is True
-    assert page_calls == [(123, 1, 100)]
-    assert multi_page_calls == [(123, (2,), 100)]
-    assert progress_updates == [(100, 101), (101, 101)]
-    assert state.files_loading == LoadingState.LOADED
-    assert [file.filename for file in state.files][-1] == "file-100.py"
-
-
-@pytest.mark.asyncio
-async def test_load_rest_file_pages_reuses_progress_between_decisions(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    first_page = [PRFile(filename=f"file-{index}.py") for index in range(100)]
-    second_page = [PRFile(filename="file-100.py")]
-    state = IngestState(pr=PR(number=123, changedFiles=101), files_total_count=101)
-    progress_calls = 0
-    real_file_page_progress = file_ingest_module.file_page_progress
-
-    def counting_file_page_progress(state: IngestState):
-        nonlocal progress_calls
-        progress_calls += 1
-        return real_file_page_progress(state)
-
-    async def get_page(
-        pr_number: int,
-        *,
-        page: int,
-        per_page: int,
-    ) -> list[PRFile]:
-        return first_page
-
-    async def get_pages(
-        pr_number: int,
-        *,
-        pages: tuple[int, ...],
-        per_page: int,
-    ) -> dict[int, list[PRFile]]:
-        return {2: second_page}
-
-    monkeypatch.setattr(
-        file_ingest_module,
-        "file_page_progress",
-        counting_file_page_progress,
-    )
-
-    loaded = await load_rest_file_pages(
-        state,
-        pr_number=123,
-        get_page=get_page,
-        get_pages=get_pages,
-        on_progress=lambda: None,
-    )
-
-    assert loaded is True
-    assert progress_calls == 2
-
-
-@pytest.mark.asyncio
-async def test_load_rest_file_pages_returns_false_when_rest_limit_is_exceeded() -> (
-    None
-):
-    first_page = [PRFile(filename=f"file-{index}.py") for index in range(100)]
-    state = IngestState(pr=PR(number=123, changedFiles=3001), files_total_count=3001)
-    progress_updates: list[int] = []
-
-    async def get_page(
-        pr_number: int,
-        *,
-        page: int,
-        per_page: int,
-    ) -> list[PRFile]:
-        return first_page
-
-    async def get_pages(
-        pr_number: int,
-        *,
-        pages: tuple[int, ...],
-        per_page: int,
-    ) -> dict[int, list[PRFile]]:
-        raise AssertionError("remaining pages should not be fetched")
-
-    loaded = await load_rest_file_pages(
-        state,
-        pr_number=123,
-        get_page=get_page,
-        get_pages=get_pages,
-        on_progress=lambda: progress_updates.append(state.files_loaded_count),
-    )
-
-    assert loaded is False
-    assert progress_updates == [100]
-    assert state.files_loading == LoadingState.IDLE
-
-
-@pytest.mark.asyncio
-async def test_load_rest_file_pages_propagates_non_runtime_first_page_errors() -> None:
-    state = IngestState()
-
-    async def get_page(
-        pr_number: int,
-        *,
-        page: int,
-        per_page: int,
-    ) -> list[PRFile]:
-        raise ValueError("bad REST page adapter state")
-
-    async def get_pages(
-        pr_number: int,
-        *,
-        pages: tuple[int, ...],
-        per_page: int,
-    ) -> dict[int, list[PRFile]]:
-        raise AssertionError("remaining pages should not be fetched")
-
-    with pytest.raises(ValueError, match="bad REST page adapter state"):
-        await load_rest_file_pages(
-            state,
-            pr_number=123,
-            get_page=get_page,
-            get_pages=get_pages,
             on_progress=lambda: None,
         )
 

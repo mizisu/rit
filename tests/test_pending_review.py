@@ -741,7 +741,7 @@ async def test_load_pending_review_projection_fetches_comments_for_latest_pendin
 
 
 @pytest.mark.asyncio
-async def test_load_pending_review_projection_uses_review_threads_before_rest_comments() -> (
+async def test_load_pending_review_projection_uses_loaded_review_threads() -> (
     None
 ):
     pending = PRReview(id=91, state=ReviewState.PENDING, body="pending body")
@@ -812,8 +812,8 @@ async def test_load_pending_review_projection_drops_thread_single_line_shadow() 
             "path": "src/app.py",
             "line": 12,
             "originalLine": 12,
-            "startLine": 4,
-            "originalStartLine": 4,
+            "startLine": 195,
+            "originalStartLine": 195,
             "diffSide": "RIGHT",
             "startDiffSide": "RIGHT",
             "comments": {
@@ -824,8 +824,8 @@ async def test_load_pending_review_projection_drops_thread_single_line_shadow() 
                         "path": "src/app.py",
                         "line": 12,
                         "originalLine": 12,
-                        "startLine": 4,
-                        "originalStartLine": 4,
+                        "startLine": 201,
+                        "originalStartLine": 201,
                         "pullRequestReview": {"databaseId": 91},
                     }
                 ]
@@ -865,7 +865,7 @@ async def test_load_pending_review_projection_drops_thread_single_line_shadow() 
             path="src/app.py",
             line=12,
             side="RIGHT",
-            start_line=4,
+            start_line=201,
             start_side="RIGHT",
             review_comment_id=5,
         )

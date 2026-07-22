@@ -9,24 +9,14 @@ class BrokenSummaryAdapter:
         raise ValueError("bad summary adapter state")
 
 
-class BrokenFilePageAdapter:
-    async def get_pr_files_page(
+class BrokenFileMetadataAdapter:
+    async def get_pr_files(
         self,
         pr_number: int,
         *,
-        page: int,
-        per_page: int = 100,
+        total_count: int | None = None,
     ) -> list[PRFile]:
-        raise ValueError("bad file page adapter state")
-
-    async def get_pr_file_pages(
-        self,
-        pr_number: int,
-        *,
-        pages: tuple[int, ...],
-        per_page: int = 100,
-    ) -> dict[int, list[PRFile]]:
-        raise AssertionError("remaining pages should not be fetched")
+        raise ValueError("bad file metadata adapter state")
 
 
 class BrokenFileViewStateAdapter:
@@ -46,9 +36,9 @@ async def test_load_pr_summary_propagates_non_runtime_adapter_errors() -> None:
 @pytest.mark.asyncio
 async def test_load_files_propagates_non_runtime_adapter_errors() -> None:
     store = PRStore(pr_number=123)
-    store._service = BrokenFilePageAdapter()  # type: ignore[assignment]
+    store._service = BrokenFileMetadataAdapter()  # type: ignore[assignment]
 
-    with pytest.raises(ValueError, match="bad file page adapter state"):
+    with pytest.raises(ValueError, match="bad file metadata adapter state"):
         await store.load_files()
 
 

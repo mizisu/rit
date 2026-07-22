@@ -1,7 +1,6 @@
 """Tests for file-selection behavior in the Files tab."""
 
 import asyncio
-from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -72,28 +71,16 @@ class FakeSlowSummaryStreamingService:
 class FakeFilesService:
     def __init__(self, pages: dict[int, list[PRFile]]) -> None:
         self.pages = pages
-        self.page_calls: list[tuple[int, int, int]] = []
-        self.multi_page_calls: list[tuple[int, tuple[int, ...], int]] = []
+        self.calls: list[tuple[int, int | None]] = []
 
-    async def get_pr_files_page(
+    async def get_pr_files(
         self,
         pr_number: int,
         *,
-        page: int,
-        per_page: int = 100,
+        total_count: int | None = None,
     ) -> list[PRFile]:
-        self.page_calls.append((pr_number, page, per_page))
-        return self.pages.get(page, [])
-
-    async def get_pr_file_pages(
-        self,
-        pr_number: int,
-        *,
-        pages: Sequence[int],
-        per_page: int = 100,
-    ) -> dict[int, list[PRFile]]:
-        self.multi_page_calls.append((pr_number, tuple(pages), per_page))
-        return {page: self.pages.get(page, []) for page in pages}
+        self.calls.append((pr_number, total_count))
+        return [file for page in sorted(self.pages) for file in self.pages[page]]
 
 
 class FakeFilesAndStreamingService(FakeFilesService):
@@ -335,7 +322,7 @@ async def test_store_load_all_starts_streaming_files_before_summary_finishes() -
 
 
 @pytest.mark.asyncio
-async def test_store_load_files_paints_first_page_then_concurrent_rest_without_eager_parsing() -> (
+async def test_store_load_files_uses_complete_graphql_metadata_without_eager_parsing() -> (
     None
 ):
     patch = "@@ -1,1 +1,1 @@\n-old\n+new"
@@ -357,16 +344,15 @@ async def test_store_load_files_paints_first_page_then_concurrent_rest_without_e
     loaded_messages = [
         message for message in messages if isinstance(message, PRStore.FilesLoaded)
     ]
-    assert service.page_calls == [(123, 1, 100)]
-    assert service.multi_page_calls == [(123, (2,), 100)]
-    assert [message.loaded_count for message in loaded_messages] == [100, 101]
+    assert service.calls == [(123, 101)]
+    assert [message.loaded_count for message in loaded_messages] == [101]
     assert len(store.state.files) == 101
     assert store.state.file_diffs == {}
     assert store.state.files_by_filename["file-100.py"].filename == "file-100.py"
 
 
 @pytest.mark.asyncio
-async def test_store_load_files_prefers_rest_files_before_raw_diff_stream() -> None:
+async def test_store_load_files_enriches_graphql_files_from_raw_diff_stream() -> None:
     patch = "@@ -1,1 +1,1 @@\n-old\n+new"
     raw_section = """diff --git a/raw.py b/raw.py
 --- a/raw.py
@@ -376,7 +362,7 @@ async def test_store_load_files_prefers_rest_files_before_raw_diff_stream() -> N
 +new
 """
     service = FakeFilesAndStreamingService(
-        {1: [PRFile(filename="rest.py", status="modified", patch=patch)]},
+        {1: [PRFile(filename="raw.py", status="modified")]},
         raw_section,
     )
     store = PRStore(pr_number=123)
@@ -384,13 +370,14 @@ async def test_store_load_files_prefers_rest_files_before_raw_diff_stream() -> N
 
     await store.load_files()
 
-    assert service.page_calls == [(123, 1, 100)]
-    assert service.stream_calls == []
-    assert [file.filename for file in store.state.files] == ["rest.py"]
+    assert service.calls == [(123, None)]
+    assert service.stream_calls == [123]
+    assert [file.filename for file in store.state.files] == ["raw.py"]
+    assert store.state.files[0].patch.startswith("diff --git")
 
 
 @pytest.mark.asyncio
-async def test_store_load_files_fetches_rest_until_empty_when_total_unknown() -> None:
+async def test_store_load_files_fetches_graphql_metadata_when_total_unknown() -> None:
     patch = "@@ -1,1 +1,1 @@\n-old\n+new"
     first_page = [
         PRFile(filename=f"file-{index}.py", status="modified", patch=patch)
@@ -408,14 +395,13 @@ async def test_store_load_files_fetches_rest_until_empty_when_total_unknown() ->
     loaded_messages = [
         message for message in messages if isinstance(message, PRStore.FilesLoaded)
     ]
-    assert service.page_calls == [(123, 1, 100)]
-    assert service.multi_page_calls == [(123, tuple(range(2, 8)), 100)]
-    assert [message.loaded_count for message in loaded_messages] == [100, 101]
+    assert service.calls == [(123, None)]
+    assert [message.loaded_count for message in loaded_messages] == [101]
     assert len(store.state.files) == 101
 
 
 @pytest.mark.asyncio
-async def test_store_load_files_switches_to_raw_stream_when_rest_limit_is_exceeded() -> (
+async def test_store_load_files_keeps_graphql_metadata_when_raw_stream_differs() -> (
     None
 ):
     patch = "@@ -1,1 +1,1 @@\n-old\n+new"
@@ -438,8 +424,7 @@ async def test_store_load_files_switches_to_raw_stream_when_rest_limit_is_exceed
 
     await store.load_files()
 
-    assert service.page_calls == [(123, 1, 100)]
-    assert service.multi_page_calls == []
+    assert service.calls == [(123, 3001)]
     assert service.stream_calls == [123]
     assert store.state.files[-1].filename == "raw.py"
 
@@ -454,7 +439,7 @@ async def test_store_load_files_marks_error_when_all_file_sources_are_empty() ->
 
     await store.load_files()
 
-    assert service.page_calls == [(123, 1, 100)]
+    assert service.calls == [(123, None)]
     assert service.stream_calls == [123]
     assert service.raw_diff_calls == [123]
     assert store.state.files_loading == LoadingState.ERROR

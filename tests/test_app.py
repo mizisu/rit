@@ -530,6 +530,62 @@ class TestRitApp:
             draft = diff_view.query_one("#pending-draft-1-right-0", CommentCard)
             assert draft._body == "hello draft"
 
+    async def test_post_inline_comment_preserves_diff_scroll_position(
+        self,
+        app: RitApp,
+    ) -> None:
+        from rit.ui.screens.main import MainScreen
+
+        line_count = 30
+        patch = f"@@ -0,0 +1,{line_count} @@\n" + "\n".join(
+            f"+line {line}" for line in range(1, line_count + 1)
+        )
+        source_diff = parse_patch(patch, "preview.py")
+
+        class CommentService:
+            async def create_review_comment(self, *args, **kwargs) -> PRComment:
+                return PRComment(
+                    id=901,
+                    body="hello comment",
+                    path="preview.py",
+                    line=20,
+                    side="RIGHT",
+                )
+
+            async def get_pr_all(self, pr_number: int) -> PR:
+                return PR(number=pr_number, head_sha="deadbeef")
+
+        async with app.run_test(size=(100, 12)) as pilot:
+            screen = cast(MainScreen, app.screen)
+            screen.switch_tab(1)
+            await pilot.pause()
+            screen.store.state.pr = PR(number=123, head_sha="deadbeef")
+            screen.store.state.file_diffs = {"preview.py": source_diff}
+            screen.store._service = CommentService()  # type: ignore[assignment]
+            diff_view = screen.file_changes.diff_view
+            await diff_view.show_diff("preview.py", source_diff)
+            await pilot.pause()
+            current_line = diff_view._line_index_by_new_number[20]
+            diff_view.cursor_line = current_line
+            await pilot.pause()
+            await pilot.pause()
+            assert await diff_view.open_inline_comment_editor() is True
+            await pilot.pause()
+            await pilot.pause()
+            scroll_before = int(diff_view.scroll_y)
+            assert scroll_before > 0
+
+            await screen._post_inline_comment(
+                "hello comment",
+                path="preview.py",
+                line=20,
+                side="RIGHT",
+            )
+            await pilot.pause()
+
+            assert diff_view.inline_comment_target() is None
+            assert int(diff_view.scroll_y) == scroll_before
+
     async def test_update_inline_comment_draft_renders_before_sync_finishes(
         self,
         app: RitApp,

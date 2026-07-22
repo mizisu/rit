@@ -365,7 +365,7 @@ async def test_inline_comments_do_not_fill_wide_unified_view() -> None:
 
 
 @pytest.mark.asyncio
-async def test_comments_follow_forced_unified_hunk_inside_split_view() -> None:
+async def test_comments_follow_single_sided_hunk_inside_split_view() -> None:
     store = PRStore()
     store.save_pending_inline_comment(
         "hello draft",
@@ -420,7 +420,7 @@ async def test_comments_follow_forced_unified_hunk_inside_split_view() -> None:
         await pilot.pause()
         await pilot.pause()
 
-        code_widget = app.query_one("#line-1 .code-content", Static)
+        code_widget = app.query_one("#line-1-new .code-content", Static)
         draft_widget = app.query_one("#pending-draft-1-right-0")
         thread_widget = app.query_one("#inline-thread-201")
 

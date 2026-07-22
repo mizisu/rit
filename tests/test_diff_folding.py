@@ -71,7 +71,7 @@ def test_folded_placeholder_bypasses_syntax_highlighting(monkeypatch) -> None:
 
     monkeypatch.setattr(
         highlighting_module,
-        "_highlight_code",
+        "highlight_code",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(
             AssertionError("folded placeholders must not be syntax highlighted")
         ),

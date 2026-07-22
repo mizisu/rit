@@ -24,6 +24,7 @@ def _created_review_comment(
 ) -> PRComment:
     data: dict[str, object] = {
         "id": review_id * 1000 + index,
+        "node_id": f"PRRC_{review_id}_{index}",
         "body": comment.body,
         "path": comment.path,
         "line": comment.line,
@@ -41,7 +42,7 @@ class FakeInlineCommentService:
         self.inline_comment_calls: list[tuple[int, str, str, str, int, str]] = []
         self.file_comment_calls: list[tuple[int, str, str, str]] = []
         self.issue_comment_calls: list[tuple[int, str]] = []
-        self.update_review_comment_calls: list[tuple[int, str]] = []
+        self.update_review_comment_calls: list[tuple[str, str]] = []
         self.create_pending_review_calls: list[list[tuple[str, int, str, str]]] = []
         self.delete_pending_review_calls: list[tuple[int, int]] = []
         self.list_review_comments_result: list[PRComment] = []
@@ -93,11 +94,11 @@ class FakeInlineCommentService:
 
     async def update_review_comment(
         self,
-        comment_id: int,
+        comment_node_id: str,
         body: str,
     ) -> PRComment:
-        self.update_review_comment_calls.append((comment_id, body))
-        return PRComment(id=comment_id, body=body)
+        self.update_review_comment_calls.append((comment_node_id, body))
+        return PRComment(node_id=comment_node_id, body=body)
 
     async def create_issue_comment(self, pr_number: int, body: str) -> PRIssueComment:
         self.issue_comment_calls.append((pr_number, body))
@@ -183,15 +184,15 @@ class BlockingReviewCommentUpdateService(FakeInlineCommentService):
 
     async def update_review_comment(
         self,
-        comment_id: int,
+        comment_node_id: str,
         body: str,
     ) -> PRComment:
-        self.update_review_comment_calls.append((comment_id, body))
+        self.update_review_comment_calls.append((comment_node_id, body))
         self.update_started.set()
         await self.allow_update.wait()
         if self.fail_update:
             raise RuntimeError("update failed")
-        return PRComment(id=comment_id, body=body)
+        return PRComment(node_id=comment_node_id, body=body)
 
 
 class BlockingPRDataService(FakeInlineCommentService):
@@ -461,6 +462,9 @@ async def test_queue_pending_inline_comment_edits_selected_draft_without_droppin
         side="RIGHT",
     )
     second_comment_id = store.state.pending_review_comments[1].review_comment_id
+    second_comment_node_id = store.state.pending_review_comments[
+        1
+    ].review_comment_node_id
     create_call_count = len(service.create_pending_review_calls)
     updated = await store.queue_pending_inline_comment(
         "updated second",
@@ -477,7 +481,7 @@ async def test_queue_pending_inline_comment_edits_selected_draft_without_droppin
     ]
     assert updated.review_comment_id == second_comment_id
     assert service.update_review_comment_calls == [
-        (second_comment_id, "updated second")
+        (second_comment_node_id, "updated second")
     ]
     assert len(service.create_pending_review_calls) == create_call_count
 
@@ -493,6 +497,7 @@ async def test_queue_pending_inline_comment_updates_server_draft_in_place() -> N
         line=7,
         side="RIGHT",
         review_comment_id=91001,
+        review_comment_node_id="PRRC_91001",
     )
     store.state.pending_review_comments = [original]
     service = FakeInlineCommentService()
@@ -510,7 +515,7 @@ async def test_queue_pending_inline_comment_updates_server_draft_in_place() -> N
     assert updated.review_comment_id == original.review_comment_id
     assert store.state.pending_review_comments == [updated]
     assert store.state.pending_review_id == 91
-    assert service.update_review_comment_calls == [(91001, "updated")]
+    assert service.update_review_comment_calls == [("PRRC_91001", "updated")]
     assert service.delete_pending_review_calls == []
     assert service.create_pending_review_calls == []
 
@@ -526,6 +531,7 @@ async def test_queue_pending_inline_comment_rolls_back_failed_server_edit() -> N
         line=7,
         side="RIGHT",
         review_comment_id=91001,
+        review_comment_node_id="PRRC_91001",
     )
     store.state.pending_review_comments = [original]
     service = BlockingReviewCommentUpdateService()
@@ -553,7 +559,7 @@ async def test_queue_pending_inline_comment_rolls_back_failed_server_edit() -> N
 
     assert store.state.pending_review_id == 91
     assert store.state.pending_review_comments == [original]
-    assert service.update_review_comment_calls == [(91001, "updated")]
+    assert service.update_review_comment_calls == [("PRRC_91001", "updated")]
     assert service.delete_pending_review_calls == []
     assert service.create_pending_review_calls == []
 
