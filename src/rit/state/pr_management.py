@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Literal, cast
+from typing import Literal
 
 from rit.state.models import PR, PRTeam, PRUser, ReviewRequest
-
 
 __all__ = (
     "AssigneeSelectionPlan",
@@ -121,7 +120,7 @@ def _clean_values(
 
 def _sorted_tuple(values: Iterable[str]) -> tuple[str, ...]:
     if isinstance(values, set):
-        value_set = cast(set[str], values)
+        value_set = values
         if not value_set:
             return ()
         if len(value_set) == 1:
