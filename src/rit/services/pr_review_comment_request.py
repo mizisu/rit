@@ -14,6 +14,8 @@ from rit.state.models import PRComment
 __all__ = (
     "create_review_comment",
     "create_review_comment_request",
+    "delete_review_comment",
+    "delete_review_comment_request",
     "parse_created_review_comment_response",
     "parse_review_comment_response",
     "update_review_comment",
@@ -113,7 +115,7 @@ def parse_review_comment_response(result: str) -> PRComment:
     """Parse an updated GraphQL review comment response."""
     data = json.loads(result)
     if not isinstance(data, Mapping):
-        raise ValueError("GitHub GraphQL response was not an object")
+        raise TypeError("GitHub GraphQL response was not an object")
     return _parse_review_comment_data(data)
 
 
@@ -137,12 +139,45 @@ async def update_review_comment(
     return _parse_review_comment_data(data)
 
 
+def delete_review_comment_request(comment_node_id: str) -> GitHubInputRequest:
+    """Build a GraphQL request for deleting a PR review comment."""
+    return graphql_request(
+        _DELETE_REVIEW_COMMENT_MUTATION,
+        {"input": {"id": comment_node_id}},
+    )
+
+
+async def delete_review_comment(
+    comment_node_id: str,
+    *,
+    runner: GitHubInputRunner,
+) -> None:
+    """Delete a PR review comment through GraphQL."""
+    await run_graphql(
+        _DELETE_REVIEW_COMMENT_MUTATION,
+        {"input": {"id": comment_node_id}},
+        runner=runner,
+    )
+
+
 def _parse_review_comment_data(data: Mapping[str, object]) -> PRComment:
     mutation = mapping(mapping(data.get("data")).get("updatePullRequestReviewComment"))
     comment = mapping(mutation.get("pullRequestReviewComment"))
     if not comment:
         raise ValueError("updatePullRequestReviewComment did not return a comment")
     return PRComment.model_validate(comment)
+
+
+_DELETE_REVIEW_COMMENT_MUTATION = """
+mutation($input: DeletePullRequestReviewCommentInput!) {
+  deletePullRequestReviewComment(input: $input) {
+    pullRequestReviewComment {
+      nodeId: id
+      databaseId
+    }
+  }
+}
+"""
 
 
 _UPDATE_REVIEW_COMMENT_MUTATION = """

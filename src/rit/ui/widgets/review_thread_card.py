@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from rich.text import Text
 from textual.containers import Vertical
@@ -68,17 +68,35 @@ class ReviewThreadCard(Vertical):
         self._preview_max_chars = preview_max_chars
         self._markdown_base_url = markdown_base_url
         self._body_mount_delay = body_mount_delay
+        self._comment_cards = [
+            self._build_comment_box(comment, is_reply=index > 0)
+            for index, comment in enumerate(self._comments)
+        ]
 
     def on_mount(self) -> None:
         if self._show_diff_hunk and self._diff_hunk:
             self.mount(
                 Static(self._render_diff_hunk(self._diff_hunk), classes="diff-hunk")
             )
+        if self._comment_cards:
+            self.mount(*self._comment_cards)
 
-        for index, comment in enumerate(self._comments):
-            is_reply = index > 0
-            comment_box = self._build_comment_box(comment, is_reply=is_reply)
-            self.mount(comment_box)
+    @property
+    def comment_count(self) -> int:
+        """Return the number of comments rendered in this thread."""
+        return len(self._comments)
+
+    def comment_at(self, index: int) -> PRComment | None:
+        """Return a comment by its timeline-order index."""
+        if not 0 <= index < len(self._comments):
+            return None
+        return self._comments[index]
+
+    def comment_card_at(self, index: int) -> CommentCard | None:
+        """Return a rendered comment card by its timeline-order index."""
+        if not 0 <= index < len(self._comment_cards):
+            return None
+        return self._comment_cards[index]
 
     def _build_comment_box(self, comment: PRComment, *, is_reply: bool) -> CommentCard:
         box_class = self._reply_class if is_reply else self._root_class
@@ -131,7 +149,7 @@ class ReviewThreadCard(Vertical):
         if is_min_datetime(dt):
             return ""
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         dt = datetime_sort_key(dt)
 
         diff = now - dt
@@ -159,8 +177,7 @@ def _iter_diff_hunk_lines(diff_hunk: str) -> Iterator[str]:
         else:
             line = diff_hunk[start:end]
             start = end + 1
-        if line.endswith("\r"):
-            line = line[:-1]
+        line = line.removesuffix("\r")
         yield line
 
 
@@ -262,7 +279,7 @@ class ReviewThreadItem(Collapsible):
     }
 
     ReviewThreadItem.--inline.--cursor-line {
-        border-left: thick #8aadf4;
+        border: solid #8aadf4;
     }
 
     ReviewThreadItem.--inline.--cursor-line CollapsibleTitle {
@@ -270,7 +287,7 @@ class ReviewThreadItem(Collapsible):
     }
 
     ReviewThreadItem.--inline.--resolved.--cursor-line {
-        border-left: thick #a6da95;
+        border: solid #8aadf4;
     }
 
     ReviewThreadItem.--inline.--resolved.--cursor-line CollapsibleTitle {
@@ -312,16 +329,15 @@ class ReviewThreadItem(Collapsible):
         else:
             self._header_widget = None
 
-        children.append(
-            ReviewThreadCard(
-                comments=comments,
-                diff_hunk=diff_hunk,
-                compact=compact,
-                show_diff_hunk=show_diff_hunk,
-                markdown_base_url=markdown_base_url,
-                body_mount_delay=body_mount_delay,
-            )
+        self._review_thread_card = ReviewThreadCard(
+            comments=comments,
+            diff_hunk=diff_hunk,
+            compact=compact,
+            show_diff_hunk=show_diff_hunk,
+            markdown_base_url=markdown_base_url,
+            body_mount_delay=body_mount_delay,
         )
+        children.append(self._review_thread_card)
 
         self._thread_container = Vertical(*children, classes="thread-container")
         if is_resolved:
@@ -334,6 +350,19 @@ class ReviewThreadItem(Collapsible):
             classes=classes,
             id=id,
         )
+
+    @property
+    def comment_count(self) -> int:
+        """Return the number of comments rendered in this thread."""
+        return self._review_thread_card.comment_count
+
+    def comment_at(self, index: int) -> PRComment | None:
+        """Return a comment by its thread-order index."""
+        return self._review_thread_card.comment_at(index)
+
+    def comment_card_at(self, index: int) -> CommentCard | None:
+        """Return a comment card by its thread-order index."""
+        return self._review_thread_card.comment_card_at(index)
 
     def set_resolved(self, is_resolved: bool, *, title: str | None = None) -> None:
         self.is_resolved = is_resolved

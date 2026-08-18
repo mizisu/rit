@@ -88,6 +88,30 @@ async def test_review_submit_screen_shows_pending_draft_details() -> None:
 
 
 @pytest.mark.asyncio
+async def test_review_submit_screen_labels_file_level_comment_without_line() -> None:
+    pending_comment = PendingReviewComment(
+        body="whole file",
+        path="src/app.py",
+        line=0,
+        side="RIGHT",
+        subject_type="file",
+    )
+
+    class TestApp(App):
+        def on_mount(self) -> None:
+            self.push_screen(ReviewSubmitScreen(pending_comments=[pending_comment]))
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        header = app.screen.query_one(
+            "#review-submit-pending-item-0 .comment-header", Static
+        )
+        assert str(header.render()) == "src/app.py • entire file"
+
+
+@pytest.mark.asyncio
 async def test_review_submit_screen_prefills_initial_body() -> None:
     class TestApp(App):
         def on_mount(self) -> None:

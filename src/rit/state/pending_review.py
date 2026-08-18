@@ -40,6 +40,7 @@ __all__ = (
     "clear_pending_review",
     "count_pending_file_comments",
     "delete_pending_comment",
+    "delete_pending_comment_at",
     "first_unsupported_comment",
     "get_pending_file_comments",
     "get_pending_inline_comment",
@@ -56,6 +57,7 @@ __all__ = (
     "require_inline_comment_diff_line",
     "restore_pending_review_snapshot",
     "save_pending_comment",
+    "save_pending_file_comment",
     "select_pending_review",
     "should_restore_pending_review_snapshot",
     "snapshot_pending_review",
@@ -247,9 +249,7 @@ def upsert_pending_comment(
         draft = draft.model_copy(
             update={
                 "review_comment_id": comments[draft_index].review_comment_id,
-                "review_comment_node_id": comments[
-                    draft_index
-                ].review_comment_node_id,
+                "review_comment_node_id": comments[draft_index].review_comment_node_id,
             }
         )
         updated = list(comments)
@@ -338,7 +338,7 @@ def count_pending_file_comments(
     filename: str,
 ) -> int:
     if isinstance(comments, Sequence):
-        comment_sequence = cast("Sequence[PendingReviewComment]", comments)
+        comment_sequence = comments
         comment_count = len(comment_sequence)
         if comment_count == 0:
             return 0
@@ -397,6 +397,38 @@ def save_pending_comment(
     )
 
 
+def save_pending_file_comment(
+    comments: Sequence[PendingReviewComment],
+    *,
+    body: str,
+    path: str,
+    current_version: int,
+) -> PendingCommentSaveResult:
+    """Return local draft state after saving one pending file-level comment."""
+    normalized = body.strip()
+    if not normalized:
+        raise ValueError("Comment cannot be empty")
+    if not path:
+        raise ValueError("Comment file path is unavailable")
+
+    draft = PendingReviewComment(
+        body=normalized,
+        path=path,
+        line=0,
+        side="RIGHT",
+        is_diff_line=True,
+        subject_type="file",
+    )
+    updated = [*comments, draft]
+    if len(updated) > 1:
+        updated.sort(key=_sort_key)
+    return PendingCommentSaveResult(
+        comments=updated,
+        draft=draft,
+        version=current_version + 1,
+    )
+
+
 def delete_pending_comment(
     comments: Sequence[PendingReviewComment],
     *,
@@ -418,6 +450,28 @@ def delete_pending_comment(
         comments=updated,
         deleted=deleted,
         version=current_version + 1 if deleted else current_version,
+    )
+
+
+def delete_pending_comment_at(
+    comments: Sequence[PendingReviewComment],
+    *,
+    draft_index: int,
+    current_version: int,
+) -> PendingCommentDeleteResult:
+    """Return local draft state after deleting a draft by its canonical index."""
+    if not 0 <= draft_index < len(comments):
+        return PendingCommentDeleteResult(
+            comments=list(comments),
+            deleted=False,
+            version=current_version,
+        )
+    updated = list(comments)
+    del updated[draft_index]
+    return PendingCommentDeleteResult(
+        comments=updated,
+        deleted=True,
+        version=current_version + 1,
     )
 
 
@@ -515,13 +569,15 @@ def plan_review_submission(
 ) -> ReviewSubmissionPlan:
     """Return validated review submission data."""
     normalized_body = body.strip()
-    pending_comments, unsupported_comment = _submission_comments(comments)
+    pending_comments, unsupported_comment, has_review_comments = _submission_comments(
+        comments
+    )
     if unsupported_comment is not None:
         raise UnsupportedInlineCommentTarget.from_comment(unsupported_comment)
 
     if event == "REQUEST_CHANGES" and not normalized_body:
         raise ValueError("Review body cannot be empty")
-    if event == "COMMENT" and not normalized_body and not pending_comments:
+    if event == "COMMENT" and not normalized_body and not has_review_comments:
         raise ValueError("Review body cannot be empty")
 
     return ReviewSubmissionPlan(
@@ -613,9 +669,12 @@ def plan_pending_review_sync(
     head_sha: str,
 ) -> PendingReviewSyncPlan:
     """Return pending-review replacement data for the GitHub adapter."""
+    syncable = syncable_comments(comments)
+    if any(comment.is_file_level for comment in syncable) and not head_sha:
+        raise ValueError("PR head SHA is unavailable")
     return PendingReviewSyncPlan(
         delete_review_id=pending_review_id,
-        comments=syncable_comments(comments),
+        comments=syncable,
         body=pending_review_body or None,
         commit_id=head_sha or None,
     )
@@ -761,11 +820,16 @@ def _same_anchor(
     line: int,
     side: PendingCommentSide,
 ) -> bool:
-    return comment.path == path and comment.line == line and comment.side == side
+    return (
+        not comment.is_file_level
+        and comment.path == path
+        and comment.line == line
+        and comment.side == side
+    )
 
 
-def _sort_key(comment: PendingReviewComment) -> tuple[str, int, str]:
-    return (comment.path, comment.line, comment.side)
+def _sort_key(comment: PendingReviewComment) -> tuple[str, str, int, str]:
+    return (comment.path, comment.subject_type, comment.line, comment.side)
 
 
 def merge_pending_review_comments(
@@ -834,13 +898,18 @@ def merge_pending_review_drafts(
 
 def _submission_comments(
     comments: Iterable[PendingReviewComment],
-) -> tuple[list[PendingReviewComment], PendingReviewComment | None]:
+) -> tuple[list[PendingReviewComment], PendingReviewComment | None, bool]:
     pending_comments: list[PendingReviewComment] = []
+    has_review_comments = False
     for comment in comments:
+        if comment.is_file_level:
+            has_review_comments = True
+            continue
         if not comment.is_diff_line:
-            return pending_comments, comment
+            return pending_comments, comment, has_review_comments
         pending_comments.append(comment)
-    return pending_comments, None
+        has_review_comments = True
+    return pending_comments, None, has_review_comments
 
 
 def _hunk_contains_line(
@@ -893,6 +962,21 @@ def _pending_comment_from_review_thread_comment(
     comment: PRComment,
 ) -> PendingReviewComment | None:
     path = comment.path or thread.path
+    if (thread.is_file_level or comment.is_file_level) and path:
+        return PendingReviewComment(
+            body=comment.body,
+            path=path,
+            line=0,
+            side=(
+                _pending_comment_side(thread.diff_side)
+                or _pending_comment_side(comment.side)
+                or "RIGHT"
+            ),
+            subject_type="file",
+            review_comment_id=comment.id,
+            review_comment_node_id=comment.node_id,
+        )
+
     side = _pending_comment_side(thread.diff_side) or _pending_comment_side(
         comment.side
     )
@@ -929,9 +1013,13 @@ def _thread_start_side(
     comment: PRComment,
     side: PendingCommentSide,
 ) -> PendingCommentSide | None:
-    if thread.start_line is None and thread.original_start_line is None:
-        if comment.start_line is None and comment.original_start_line is None:
-            return None
+    if (
+        thread.start_line is None
+        and thread.original_start_line is None
+        and comment.start_line is None
+        and comment.original_start_line is None
+    ):
+        return None
     return (
         _pending_comment_side(thread.start_diff_side or "")
         or _pending_comment_side(comment.start_side)
@@ -996,6 +1084,16 @@ def _pending_comment_from_review_comment(
 ) -> PendingReviewComment | None:
     if not comment.path:
         return None
+    if comment.is_file_level:
+        return PendingReviewComment(
+            body=comment.body,
+            path=comment.path,
+            line=0,
+            side=_pending_comment_side(comment.side) or "RIGHT",
+            subject_type="file",
+            review_comment_id=comment.id,
+            review_comment_node_id=comment.node_id,
+        )
 
     side = _pending_comment_side(comment.side)
     anchor_line = comment.anchor_line
@@ -1070,7 +1168,10 @@ def _remember_server_comment_id(
     comments: list[PendingReviewComment],
     server_comment: PendingReviewComment,
 ) -> None:
-    if not server_comment.review_comment_id and not server_comment.review_comment_node_id:
+    if (
+        not server_comment.review_comment_id
+        and not server_comment.review_comment_node_id
+    ):
         return
     server_key = _comment_content_key(server_comment)
     for index, comment in enumerate(comments):
@@ -1137,21 +1238,37 @@ def _drop_single_line_range_shadows(
     return [
         comment
         for comment in comments
-        if comment.start_line is not None or _range_shadow_key(comment) not in range_keys
+        if comment.start_line is not None
+        or _range_shadow_key(comment) not in range_keys
     ]
 
 
 def _range_shadow_key(
     comment: PendingReviewComment,
-) -> tuple[str, int, PendingCommentSide, str]:
-    return (comment.path, comment.line, comment.side, comment.body)
+) -> tuple[str, str, int, PendingCommentSide, str]:
+    return (
+        comment.path,
+        comment.subject_type,
+        comment.line,
+        comment.side,
+        comment.body,
+    )
 
 
 def _comment_content_key(
     comment: PendingReviewComment,
-) -> tuple[str, int, PendingCommentSide, int | None, PendingCommentSide | None, str]:
+) -> tuple[
+    str,
+    str,
+    int,
+    PendingCommentSide,
+    int | None,
+    PendingCommentSide | None,
+    str,
+]:
     return (
         comment.path,
+        comment.subject_type,
         comment.line,
         comment.side,
         comment.start_line,

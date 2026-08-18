@@ -42,9 +42,19 @@ def create_file_comment_request(
 def parse_file_comment_response(result: str) -> PRComment:
     """Parse a standalone file-level review comment response."""
     comment = PRComment.model_validate(json.loads(result))
-    if comment.subject_type.lower() == "file":
-        return comment
-    return comment.model_copy(update={"subject_type": "file"})
+    return comment.model_copy(
+        update={
+            "subject_type": "file",
+            "line": None,
+            "original_line": None,
+            "start_line": None,
+            "original_start_line": None,
+            "side": "",
+            "start_side": "",
+            "position": None,
+            "original_position": None,
+        }
+    )
 
 
 async def create_file_comment(

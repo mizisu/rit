@@ -7,11 +7,10 @@ from typing import Any
 from pydantic import TypeAdapter
 
 from rit.services.gh_request import GitHubInputRunner
-from rit.services.graphql_request import connection_nodes as _connection_nodes
-from rit.services.graphql_request import graphql_request
-from rit.services.graphql_request import mapping as _mapping
-from rit.services.graphql_request import run_graphql
 from rit.services.graphql_mutations import GraphQLMutationError
+from rit.services.graphql_request import connection_nodes as _connection_nodes
+from rit.services.graphql_request import graphql_request, run_graphql
+from rit.services.graphql_request import mapping as _mapping
 from rit.state.models import (
     PendingReviewComment,
     PRComment,
@@ -86,6 +85,16 @@ mutation($input: AddPullRequestReviewInput!) {{
     }}
   }}
 }}
+"""
+
+_ADD_REVIEW_THREAD_MUTATION = """
+mutation($input: AddPullRequestReviewThreadInput!) {
+  addPullRequestReviewThread(input: $input) {
+    thread {
+      id
+    }
+  }
+}
 """
 
 _DELETE_REVIEW_MUTATION = f"""
@@ -184,14 +193,22 @@ async def create_pending_review(
         pr_number,
         runner=runner,
     )
+    line_comments = [comment for comment in comments if not comment.is_file_level]
+    file_comments = [comment for comment in comments if comment.is_file_level]
     result = await _add_pull_request_review(
         pull_request_node_id=identity.pull_request_node_id,
         event=None,
         body=body,
-        comments=comments,
+        comments=line_comments,
         commit_id=commit_id,
         runner=runner,
     )
+    for comment in file_comments:
+        await _add_file_review_thread(
+            review_node_id=result.review.node_id,
+            comment=comment,
+            runner=runner,
+        )
     if body and not result.review.body:
         return result.review.model_copy(update={"body": body})
     return result.review
@@ -338,6 +355,32 @@ async def _add_pull_request_review(
     )
 
 
+async def _add_file_review_thread(
+    *,
+    review_node_id: str,
+    comment: PendingReviewComment,
+    runner: GitHubInputRunner,
+) -> None:
+    if not review_node_id:
+        raise GraphQLMutationError("Pending review node ID not found")
+    data = await _run_graphql(
+        _ADD_REVIEW_THREAD_MUTATION,
+        {
+            "input": {
+                "pullRequestReviewId": review_node_id,
+                "body": comment.body,
+                "path": comment.path,
+                "subjectType": "FILE",
+            }
+        },
+        runner=runner,
+    )
+    graphql_data = _mapping(data.get("data"))
+    mutation_data = _mapping(graphql_data.get("addPullRequestReviewThread"))
+    if not _mapping(mutation_data.get("thread")):
+        raise GraphQLMutationError("addPullRequestReviewThread did not return a thread")
+
+
 async def _fetch_pr_review_identity(
     owner: str,
     repo: str,
@@ -392,6 +435,8 @@ def _review_node_id(
 
 
 def _thread_input(comment: PendingReviewComment) -> dict[str, object]:
+    if comment.is_file_level:
+        raise ValueError("Draft review threads cannot recreate file-level comments")
     if not comment.is_diff_line:
         raise ValueError("Draft review threads must target diff lines")
     thread: dict[str, object] = {
@@ -456,11 +501,21 @@ def _comment_with_thread_position(
     comment: PRComment,
     thread: ReviewThread,
 ) -> PRComment:
+    file_level = comment.is_file_level or thread.is_file_level
     update: dict[str, Any] = {
         "path": comment.path or thread.path,
-        "side": thread.diff_side or comment.side,
-        "subject_type": comment.subject_type or thread.subject_type,
+        "side": "" if file_level else thread.diff_side or comment.side,
+        "subject_type": "FILE" if file_level else comment.subject_type,
     }
+    if file_level:
+        update.update(
+            line=None,
+            original_line=None,
+            start_line=None,
+            original_start_line=None,
+            start_side="",
+        )
+        return comment.model_copy(update=update)
     if comment.line is None and thread.line is not None:
         update["line"] = thread.line
     if comment.original_line is None and thread.original_line is not None:

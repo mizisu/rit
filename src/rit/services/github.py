@@ -47,6 +47,15 @@ from rit.services.pr_graphql_response import (
 from rit.services.pr_issue_comment_request import (
     create_issue_comment as create_issue_comment_via_graphql,
 )
+from rit.services.pr_review_comment_request import (
+    create_review_comment as create_review_comment_via_rest,
+)
+from rit.services.pr_review_comment_request import (
+    delete_review_comment as delete_review_comment_via_graphql,
+)
+from rit.services.pr_review_comment_request import (
+    update_review_comment as update_review_comment_via_graphql,
+)
 from rit.services.pr_review_graphql import (
     create_pending_review as create_pending_review_via_graphql,
 )
@@ -61,12 +70,6 @@ from rit.services.pr_review_graphql import (
 )
 from rit.services.pr_review_graphql import (
     submit_review as submit_review_via_graphql,
-)
-from rit.services.pr_review_comment_request import (
-    create_review_comment as create_review_comment_via_rest,
-)
-from rit.services.pr_review_comment_request import (
-    update_review_comment as update_review_comment_via_graphql,
 )
 from rit.services.pr_reviewer_request import (
     add_assignees as add_assignees_via_graphql,
@@ -338,6 +341,13 @@ class GitHubService:
         return await update_review_comment_via_graphql(
             comment_node_id,
             body=body,
+            runner=self._run_gh,
+        )
+
+    async def delete_review_comment(self, comment_node_id: str) -> None:
+        """Delete an existing pull request review comment."""
+        await delete_review_comment_via_graphql(
+            comment_node_id,
             runner=self._run_gh,
         )
 

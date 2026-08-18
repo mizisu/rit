@@ -149,12 +149,12 @@ def test_upsert_pending_comment_appends_latest_without_full_sort(monkeypatch) ->
         line=2,
         side="RIGHT",
     )
-    sort_key_calls: list[tuple[str, int, str]] = []
+    sort_key_calls: list[tuple[str, str, int, str]] = []
     original_sort_key = pending_review._sort_key
 
     def recording_sort_key(
         comment: PendingReviewComment,
-    ) -> tuple[str, int, str]:
+    ) -> tuple[str, str, int, str]:
         key = original_sort_key(comment)
         sort_key_calls.append(key)
         return key
@@ -172,8 +172,8 @@ def test_upsert_pending_comment_appends_latest_without_full_sort(monkeypatch) ->
 
     assert comments == [first, second, draft]
     assert sort_key_calls == [
-        ("b.py", 2, "RIGHT"),
-        ("c.py", 1, "RIGHT"),
+        ("b.py", "line", 2, "RIGHT"),
+        ("c.py", "line", 1, "RIGHT"),
     ]
 
 
@@ -310,6 +310,26 @@ def test_delete_pending_comment_preserves_version_when_missing() -> None:
     assert result.version == 4
 
 
+def test_delete_pending_comment_at_removes_file_level_draft() -> None:
+    keep = PendingReviewComment(body="keep", path="a.py", line=1)
+    file_draft = PendingReviewComment(
+        body="whole file",
+        path="a.py",
+        line=0,
+        subject_type="file",
+    )
+
+    result = pending_review.delete_pending_comment_at(
+        [keep, file_draft],
+        draft_index=1,
+        current_version=4,
+    )
+
+    assert result.deleted is True
+    assert result.comments == [keep]
+    assert result.version == 5
+
+
 def test_syncable_and_unsupported_comment_helpers_partition_drafts() -> None:
     diff_comment = PendingReviewComment(
         body="diff",
@@ -371,6 +391,25 @@ def test_save_pending_comment_rejects_empty_body() -> None:
         assert "empty" in str(error)
     else:
         raise AssertionError("empty pending comment should be rejected")
+
+
+def test_save_pending_file_comment_builds_file_level_draft() -> None:
+    result = pending_review.save_pending_file_comment(
+        [],
+        body="  whole file  ",
+        path="a.py",
+        current_version=4,
+    )
+
+    assert result.draft == PendingReviewComment(
+        body="whole file",
+        path="a.py",
+        line=0,
+        side="RIGHT",
+        subject_type="file",
+    )
+    assert result.comments == [result.draft]
+    assert result.version == 5
 
 
 def test_pending_review_snapshot_captures_tuple_copy() -> None:
@@ -572,6 +611,27 @@ def test_review_submission_plan_uses_existing_pending_review_id() -> None:
     assert plan.uses_pending_review is True
 
 
+def test_review_submission_plan_submits_existing_file_comment_without_line() -> None:
+    file_comment = PendingReviewComment(
+        body="whole file",
+        path="a.py",
+        line=0,
+        side="RIGHT",
+        subject_type="file",
+    )
+
+    plan = plan_review_submission(
+        "COMMENT",
+        "",
+        [file_comment],
+        pending_review_id=91,
+    )
+
+    assert plan.pending_review_id == 91
+    assert plan.comments == []
+    assert plan.uses_pending_review is True
+
+
 def test_review_submission_plan_rejects_unsupported_draft_targets() -> None:
     unsupported = PendingReviewComment(
         body="full file",
@@ -672,6 +732,26 @@ def test_pending_review_sync_plan_skips_create_without_syncable_comments() -> No
     assert plan.should_create is False
 
 
+def test_pending_review_sync_includes_file_level_comments() -> None:
+    file_comment = PendingReviewComment(
+        body="whole file",
+        path="a.py",
+        line=0,
+        side="RIGHT",
+        subject_type="file",
+    )
+
+    plan = pending_review.plan_pending_review_sync(
+        [file_comment],
+        pending_review_id=91,
+        pending_review_body="",
+        head_sha="deadbeef",
+    )
+
+    assert plan.comments == [file_comment]
+    assert plan.should_create is True
+
+
 def test_select_pending_review_returns_latest_pending_review() -> None:
     first = PRReview(id=1, state=ReviewState.PENDING)
     approved = PRReview(id=2, state=ReviewState.APPROVED)
@@ -741,9 +821,7 @@ async def test_load_pending_review_projection_fetches_comments_for_latest_pendin
 
 
 @pytest.mark.asyncio
-async def test_load_pending_review_projection_uses_loaded_review_threads() -> (
-    None
-):
+async def test_load_pending_review_projection_uses_loaded_review_threads() -> None:
     pending = PRReview(id=91, state=ReviewState.PENDING, body="pending body")
     thread = ReviewThread.model_validate(
         {
@@ -799,6 +877,48 @@ async def test_load_pending_review_projection_uses_loaded_review_threads() -> (
             path="src/app.py",
             line=13,
             side="RIGHT",
+            review_comment_id=5,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_load_pending_review_projection_preserves_file_level_subject() -> None:
+    pending = PRReview(id=91, state=ReviewState.PENDING)
+    thread = ReviewThread.model_validate(
+        {
+            "path": "src/app.py",
+            "line": 1,
+            "originalLine": 1,
+            "diffSide": "RIGHT",
+            "subjectType": "FILE",
+            "comments": {
+                "nodes": [
+                    {
+                        "databaseId": 5,
+                        "body": "whole file",
+                        "path": "src/app.py",
+                        "pullRequestReview": {"databaseId": 91},
+                        "subjectType": "FILE",
+                    }
+                ]
+            },
+        }
+    )
+
+    projection = await pending_review.load_pending_review_projection(
+        [pending],
+        pr_number=123,
+        review_threads=[thread],
+    )
+
+    assert projection.comments == [
+        PendingReviewComment(
+            body="whole file",
+            path="src/app.py",
+            line=0,
+            side="RIGHT",
+            subject_type="file",
             review_comment_id=5,
         )
     ]
@@ -1042,7 +1162,9 @@ def test_merge_pending_review_drafts_uses_local_range_when_server_omits_range() 
     assert merged == [local.model_copy(update={"review_comment_id": 99})]
 
 
-def test_merge_pending_review_drafts_skips_removed_range_when_server_omits_range() -> None:
+def test_merge_pending_review_drafts_skips_removed_range_when_server_omits_range() -> (
+    None
+):
     removed = PendingReviewComment(
         body="range draft",
         path="a.py",

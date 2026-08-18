@@ -118,6 +118,44 @@ async def test_inline_comment_editor_hint_uses_terminal_safe_shortcuts() -> None
 
 
 @pytest.mark.asyncio
+async def test_file_comment_editor_offers_pending_and_post_now_modes() -> None:
+    app = _make_app(kind="file")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        textarea = app.query_one("#comment-editor-body", TextArea)
+        textarea.text = "whole file"
+        hint = cast(Static, app.query("InlineCommentEditor Static").last()).content
+
+        await pilot.press("ctrl+s")
+        await pilot.pause()
+
+        assert "Ctrl+S pending" in str(hint)
+        assert "Ctrl+Shift+S post now" in str(hint)
+        assert app.result == ("file", "whole file", "queue")
+
+
+@pytest.mark.asyncio
+async def test_existing_comment_editor_shows_update_hint() -> None:
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield InlineCommentEditor(
+                kind="inline",
+                title="Edit inline comment",
+                placeholder="Edit comment...",
+                update_existing=True,
+            )
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        hint = cast(Static, app.query("InlineCommentEditor Static").last()).content
+
+        assert str(hint) == "Ctrl+S update • Esc cancel"
+
+
+@pytest.mark.asyncio
 async def test_inline_comment_editor_shows_emoji_shortcode_picker() -> None:
     app = _make_app(kind="inline")
     async with app.run_test() as pilot:

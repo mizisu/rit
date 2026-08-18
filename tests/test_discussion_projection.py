@@ -1,8 +1,9 @@
 import pytest
 
-import rit.state.discussion_projection as discussion_projection
+from rit.state import discussion_projection
 from rit.state.discussion_projection import (
     RecentDiscussion,
+    forget_review_comment,
     merge_recent_submitted_discussion,
     project_discussion_state,
     thread_from_submitted_comment,
@@ -119,6 +120,31 @@ def test_project_discussion_state_keeps_recent_submitted_discussion_visible() ->
     assert projection.review_threads[0].root_comment == comment
     assert projection.review_threads[0].line == 7
     assert projection.comments_by_file["src/app.py"] == [comment]
+
+
+def test_forget_review_comment_removes_recent_comment_without_review() -> None:
+    deleted = PRComment(
+        id=501,
+        node_id="PRRC_501",
+        pull_request_review_id=91,
+    )
+    retained = PRComment(
+        id=502,
+        node_id="PRRC_502",
+        pull_request_review_id=91,
+    )
+    review = PRReview(id=91, state=ReviewState.COMMENTED)
+
+    recent = forget_review_comment(
+        RecentDiscussion(
+            reviews={91: review},
+            review_comments={91: [deleted, retained]},
+        ),
+        deleted,
+    )
+
+    assert recent.reviews == {91: review}
+    assert recent.review_comments == {91: [retained]}
 
 
 def test_project_discussion_state_deduplicates_recent_submitted_discussion() -> None:
@@ -521,6 +547,62 @@ def test_remember_submitted_comment_only_copies_target_review_comments() -> None
 
     assert updated.review_comments[90] is recent.review_comments[90]
     assert updated.review_comments[91] == [existing, added]
+
+
+def test_remember_updated_comment_replaces_only_matching_recent_comment() -> None:
+    original = PRComment(
+        id=501,
+        node_id="PRRC_501",
+        body="before",
+        pull_request_review_id=91,
+    )
+    sibling = PRComment(id=502, body="sibling", pull_request_review_id=91)
+    unrelated = PRComment(id=401, body="unrelated", pull_request_review_id=90)
+    recent = RecentDiscussion(review_comments={90: [unrelated], 91: [original, sibling]})
+    replacement = original.model_copy(update={"body": "after"})
+
+    updated = discussion_projection.remember_updated_comment(
+        recent,
+        original,
+        replacement,
+    )
+
+    assert updated.review_comments[90] is recent.review_comments[90]
+    assert updated.review_comments[91] == [replacement, sibling]
+
+
+def test_replace_review_comment_preserves_thread_and_siblings() -> None:
+    original = PRComment(
+        id=501,
+        node_id="PRRC_501",
+        body="before",
+        path="src/app.py",
+        line=7,
+        side="RIGHT",
+    )
+    reply = PRComment(id=502, body="reply", in_reply_to_id=501)
+    thread = ReviewThread.model_validate(
+        {
+            "id": "thread-501",
+            "isResolved": True,
+            "path": "src/app.py",
+            "line": 7,
+            "comments": {"nodes": [original, reply]},
+        }
+    )
+    pr = PR(number=123, review_threads_connection=NodeList(nodes=[thread]))
+    replacement = original.model_copy(update={"body": "after"})
+
+    updated = discussion_projection.replace_review_comment(
+        pr,
+        original,
+        replacement,
+    )
+
+    assert updated is not None
+    assert updated.review_threads[0].is_resolved is True
+    assert updated.review_threads[0].comments == [replacement, reply]
+    assert pr.review_threads[0].comments == [original, reply]
 
 
 def test_thread_from_submitted_comment_preserves_old_side_anchor() -> None:

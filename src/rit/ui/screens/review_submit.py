@@ -211,6 +211,8 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
         self.action_focus_next()
 
     def _pending_comment_meta(self, comment: PendingReviewComment) -> str:
+        if comment.is_file_level:
+            return f"{comment.path} • entire file"
         return f"{comment.path}:{comment.line} • {comment.anchor_side} side"
 
     def action_submit(self) -> None:

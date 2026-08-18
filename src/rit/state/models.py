@@ -4,18 +4,18 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Generic, Literal, TypeVar, cast
+from typing import Generic, Literal, TypeVar
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
 from rit.core.datetime_utils import datetime_min_utc, datetime_sort_key
 
 __all__ = (
+    "PR",
     "CommentThread",
     "FileViewedState",
     "LoadingState",
     "NodeList",
-    "PR",
     "PRComment",
     "PRFile",
     "PRIssueComment",
@@ -49,7 +49,7 @@ _FILE_STATUS_ICONS: dict[str, str] = {
 def _dict_value(value: object, key: str) -> object | None:
     if not isinstance(value, Mapping):
         return None
-    return getattr(value, "get")(key)
+    return value.get(key)
 
 
 class NodeList(BaseModel, Generic[T]):
@@ -58,7 +58,7 @@ class NodeList(BaseModel, Generic[T]):
     nodes: list[T] = Field(default_factory=list)
 
     @classmethod
-    def from_nodes(cls, nodes: Iterable[T]) -> "NodeList[T]":
+    def from_nodes(cls, nodes: Iterable[T]) -> NodeList[T]:
         """Return a connection wrapper from any iterable of nodes."""
         if isinstance(nodes, _LIST_TYPE):
             node_count = len(nodes)
@@ -218,7 +218,13 @@ class PRComment(BaseModel):
     )
 
     @property
+    def is_file_level(self) -> bool:
+        return self.subject_type.upper() == "FILE"
+
+    @property
     def anchor_side(self) -> Literal["old", "new", "auto"]:
+        if self.is_file_level:
+            return "auto"
         if self.side == "LEFT":
             return "old"
         if self.side == "RIGHT":
@@ -231,6 +237,8 @@ class PRComment(BaseModel):
 
     @property
     def anchor_line(self) -> int | None:
+        if self.is_file_level:
+            return None
         if self.side == "LEFT":
             return self.original_line if self.original_line is not None else self.line
         if self.side == "RIGHT":
@@ -271,8 +279,13 @@ class PendingReviewComment(BaseModel):
     start_line: int | None = None
     start_side: Literal["LEFT", "RIGHT"] | None = None
     is_diff_line: bool = True
+    subject_type: Literal["line", "file"] = "line"
     review_comment_id: int = 0
     review_comment_node_id: str = ""
+
+    @property
+    def is_file_level(self) -> bool:
+        return self.subject_type == "file"
 
     @property
     def anchor_side(self) -> Literal["old", "new"]:
@@ -368,7 +381,13 @@ class ReviewThread(BaseModel):
         return self.comments[0].id if self.comments else 0
 
     @property
+    def is_file_level(self) -> bool:
+        return self.subject_type.upper() == "FILE"
+
+    @property
     def anchor_side(self) -> Literal["old", "new", "auto"]:
+        if self.is_file_level:
+            return "auto"
         if self.diff_side == "LEFT":
             return "old"
         if self.diff_side == "RIGHT":
@@ -384,6 +403,8 @@ class ReviewThread(BaseModel):
 
     @property
     def anchor_line(self) -> int | None:
+        if self.is_file_level:
+            return None
         if self.diff_side == "LEFT":
             return self.original_line if self.original_line is not None else self.line
         if self.diff_side == "RIGHT":
@@ -674,7 +695,7 @@ class CommentThread(BaseModel):
 
 def group_comments_into_threads(comments: Iterable[PRComment]) -> list[CommentThread]:
     if isinstance(comments, Sequence):
-        comment_sequence = cast("Sequence[PRComment]", comments)
+        comment_sequence = comments
         comment_count = len(comment_sequence)
         if comment_count == 0:
             return []

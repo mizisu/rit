@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Iterable, Literal
+from typing import Literal
 
 from textual.message import Message
 
@@ -12,9 +13,12 @@ from rit.services import GitHubError, GitHubService
 from rit.state.discussion_projection import (
     PRDiscussion,
     RecentDiscussion,
+    forget_review_comment,
     project_discussion_state,
     remember_submitted_comment,
     remember_submitted_review,
+    remember_updated_comment,
+    replace_review_comment,
     update_thread_resolution,
 )
 from rit.state.discussion_signature import discussion_render_signature
@@ -63,6 +67,7 @@ from rit.state.pending_review import (
     apply_pending_review_sync_result,
     clear_pending_review,
     delete_pending_comment,
+    delete_pending_comment_at,
     load_pending_review_projection,
     merge_pending_review_drafts,
     plan_inline_comment_submission,
@@ -81,9 +86,13 @@ from rit.state.pending_review import (
     restore_pending_review_snapshot as build_pending_review_restoration,
 )
 from rit.state.pending_review import (
+    save_pending_file_comment as build_pending_file_comment,
+)
+from rit.state.pending_review import (
     snapshot_pending_review as build_pending_review_snapshot,
 )
 from rit.state.pending_review_visibility import (
+    pending_draft_matches_review_comment,
     pending_review_hidden_ids,
     review_thread_is_pending_draft,
     visible_timeline_comments,
@@ -621,6 +630,23 @@ class PRStore:
         self._remember_submitted_comment(comment)
         return comment
 
+    def save_pending_file_comment(
+        self,
+        body: str,
+        *,
+        path: str,
+    ) -> PendingReviewComment:
+        result = build_pending_file_comment(
+            self._state.pending_review_comments,
+            body=body,
+            path=path,
+            current_version=self._pending_review_local_version,
+        )
+        self._state.pending_review_comments = result.comments
+        self._state.pending_review_drafts_are_canonical = True
+        self._pending_review_local_version = result.version
+        return result.draft
+
     def save_pending_inline_comment(
         self,
         body: str,
@@ -936,6 +962,24 @@ class PRStore:
             self._pending_review_local_version = result.version
         return result.deleted
 
+    async def queue_pending_file_comment(
+        self,
+        body: str,
+        *,
+        path: str,
+        after_local_save: Callable[[], Awaitable[None]] | None = None,
+    ) -> PendingReviewComment:
+        snapshot = self.snapshot_pending_review()
+        draft = self.save_pending_file_comment(body, path=path)
+        if after_local_save is not None:
+            await after_local_save()
+
+        await self.sync_pending_review(
+            rollback_to=snapshot,
+            rollback_if_version=self._pending_review_local_version,
+        )
+        return draft
+
     async def queue_pending_inline_comment(
         self,
         body: str,
@@ -1118,6 +1162,63 @@ class PRStore:
         )
         return True
 
+    def pending_review_comment_index_for(
+        self,
+        comment: PRComment,
+    ) -> int | None:
+        """Return the canonical pending draft index represented by a comment."""
+        drafts = self._state.pending_review_comments
+        for index, draft in enumerate(drafts):
+            if draft.review_comment_id and draft.review_comment_id == comment.id:
+                return index
+
+        hidden_review_ids = pending_review_hidden_ids(
+            pending_review_id=self._state.pending_review_id,
+            reviews=self._state.reviews,
+            obsolete_pending_review_ids=self._state.obsolete_pending_review_ids,
+        )
+        if comment.pull_request_review_id not in hidden_review_ids:
+            return None
+        return next(
+            (
+                index
+                for index, draft in enumerate(drafts)
+                if pending_draft_matches_review_comment(draft, comment)
+            ),
+            None,
+        )
+
+    async def remove_pending_review_comment_at(
+        self,
+        draft_index: int,
+        *,
+        after_local_delete: Callable[[], Awaitable[None]] | None = None,
+    ) -> bool:
+        """Delete one canonical pending draft selected outside the diff."""
+        comments = self._state.pending_review_comments
+        if not 0 <= draft_index < len(comments):
+            return False
+
+        snapshot = self.snapshot_pending_review()
+        removed_comment = comments[draft_index]
+        result = delete_pending_comment_at(
+            comments,
+            draft_index=draft_index,
+            current_version=self._pending_review_local_version,
+        )
+        self._state.pending_review_comments = result.comments
+        self._state.pending_review_drafts_are_canonical = True
+        self._pending_review_local_version = result.version
+        if after_local_delete is not None:
+            await after_local_delete()
+
+        await self.sync_pending_review(
+            rollback_to=snapshot,
+            rollback_if_version=self._pending_review_local_version,
+            removed_comment=removed_comment,
+        )
+        return True
+
     def _pending_review_comment_index(
         self,
         path: str,
@@ -1208,6 +1309,52 @@ class PRStore:
         )
         if self._state.pr is not None:
             self._apply_discussion_state(self._state.pr)
+
+    async def update_review_comment(
+        self,
+        comment: PRComment,
+        body: str,
+    ) -> PRComment:
+        """Update a submitted review comment and project its new body locally."""
+        if not comment.node_id:
+            raise ValueError("Review comment node ID is unavailable")
+        pr = self._state.pr
+        if pr is None:
+            raise ValueError("PR not loaded")
+
+        normalized = normalize_issue_comment_body(body)
+        replacement = comment.model_copy(update={"body": normalized})
+        updated_pr = replace_review_comment(pr, comment, replacement)
+        if updated_pr is None:
+            raise ValueError("Selected review comment no longer exists")
+
+        response = await self._service.update_review_comment(
+            comment.node_id,
+            normalized,
+        )
+        if response.body:
+            replacement = comment.model_copy(update={"body": response.body})
+            updated_pr = replace_review_comment(pr, comment, replacement)
+            assert updated_pr is not None
+
+        self._recent_discussion = remember_updated_comment(
+            self._recent_discussion,
+            comment,
+            replacement,
+        )
+        self._apply_discussion_state(updated_pr)
+        self._post_discussion_detail_messages()
+        return replacement
+
+    async def delete_review_comment(self, comment: PRComment) -> None:
+        """Delete a submitted pull request review comment."""
+        if not comment.node_id:
+            raise ValueError("Review comment node ID is unavailable")
+        await self._service.delete_review_comment(comment.node_id)
+        self._recent_discussion = forget_review_comment(
+            self._recent_discussion,
+            comment,
+        )
 
     async def refresh_review_data(self) -> None:
         """Refresh comments, reviews, and review threads without reloading file diffs."""

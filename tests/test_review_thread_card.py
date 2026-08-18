@@ -1,6 +1,6 @@
 """Tests for reusable ReviewThreadCard widget."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from inspect import signature
 from pathlib import Path
 
@@ -78,10 +78,10 @@ def test_swaps_two_out_of_order_comments_without_sorting(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     first = make_comment("First", comment_id=1).model_copy(
-        update={"created_at": datetime(2026, 2, 26, 10, tzinfo=timezone.utc)}
+        update={"created_at": datetime(2026, 2, 26, 10, tzinfo=UTC)}
     )
     second = make_comment("Second", comment_id=2).model_copy(
-        update={"created_at": datetime(2026, 2, 26, 11, tzinfo=timezone.utc)}
+        update={"created_at": datetime(2026, 2, 26, 11, tzinfo=UTC)}
     )
 
     monkeypatch.setattr(
@@ -106,6 +106,11 @@ def test_single_comment_thread_skips_timeline_order_key(
 ) -> None:
     comment = make_comment("Only comment")
     monkeypatch.setattr(
+        ReviewThreadCard,
+        "_format_relative_time",
+        staticmethod(lambda _created_at: ""),
+    )
+    monkeypatch.setattr(
         review_thread_card_module,
         "datetime_sort_key",
         lambda _created_at: (_ for _ in ()).throw(
@@ -125,14 +130,21 @@ def test_inline_thread_css_keeps_collapsed_card_frame() -> None:
     """Collapsed inline threads should still read as framed comment cards."""
     css = ReviewThreadItem.DEFAULT_CSS
     inline_block = css.split("ReviewThreadItem.--inline {", 1)[1].split("}", 1)[0]
-    cursor_block = css.split("ReviewThreadItem.--inline.--cursor-line {", 1)[
-        1
-    ].split("}", 1)[0]
+    cursor_block = css.split("ReviewThreadItem.--inline.--cursor-line {", 1)[1].split(
+        "}", 1
+    )[0]
+    resolved_cursor_block = css.split(
+        "ReviewThreadItem.--inline.--resolved.--cursor-line {", 1
+    )[1].split("}", 1)[0]
 
     assert "border: solid #363a4f;" in inline_block
     assert "border-top: none;" not in inline_block
     assert "border-left: blank;" not in inline_block
+    assert "border: solid #8aadf4;" in cursor_block
+    assert "border-left:" not in cursor_block
     assert "background:" not in cursor_block
+    assert "border: solid #8aadf4;" in resolved_cursor_block
+    assert "border-left:" not in resolved_cursor_block
 
 
 def test_thread_comment_cards_keep_breathing_room_between_meta_and_body() -> None:
@@ -140,32 +152,40 @@ def test_thread_comment_cards_keep_breathing_room_between_meta_and_body() -> Non
     css = CommentCard.DEFAULT_CSS
     thread_block = css.split("CommentCard.thread-comment {", 1)[1].split("}", 1)[0]
     reply_block = css.split("CommentCard.thread-reply {", 1)[1].split("}", 1)[0]
-    header_block = css.split("CommentCard.thread-comment .comment-header,", 1)[
-        1
-    ].split("}", 1)[0]
+    header_block = css.split("CommentCard.thread-comment .comment-header,", 1)[1].split(
+        "}", 1
+    )[0]
+    cursor_block = css.split("CommentCard.thread-comment.--cursor-line,", 1)[1].split(
+        "}", 1
+    )[0]
 
     assert "padding: 1 1 1 1;" in thread_block
     assert "padding: 1 1 1 3;" in reply_block
     assert "margin: 0 0 1 0;" in header_block
     assert "margin: 0;" not in header_block
+    assert "background: #363a4f;" in cursor_block
+    assert "border:" not in cursor_block
 
 
 def test_pending_drafts_keep_the_shared_comment_card_surface() -> None:
     """Pending drafts should not look like a separate card system."""
     css = CommentCard.DEFAULT_CSS
     pending_block = css.split("CommentCard.pending-draft {", 1)[1].split("}", 1)[0]
-    cursor_block = css.split("CommentCard.pending-draft.--cursor-line {", 1)[
-        1
-    ].split("}", 1)[0]
+    cursor_block = css.split("CommentCard.pending-draft.--cursor-line {", 1)[1].split(
+        "}", 1
+    )[0]
 
     assert "border:" not in pending_block
     assert "background:" not in pending_block
-    assert "border-left: thick #8aadf4;" in cursor_block
+    assert "background: #363a4f;" in cursor_block
+    assert "border:" not in cursor_block
     assert "tint:" not in cursor_block
     assert "CommentCard.pending-draft .comment-header" not in css
 
 
-def test_timeline_thread_contents_keep_padding_without_affecting_inline_threads() -> None:
+def test_timeline_thread_contents_keep_padding_without_affecting_inline_threads() -> (
+    None
+):
     """PR Info thread bodies need inset while DiffView inline threads stay compact."""
     css = ReviewThreadItem.DEFAULT_CSS
     thread_contents_block = css.split("ReviewThreadItem.--thread > Contents {", 1)[
@@ -185,9 +205,9 @@ def test_pr_info_review_threads_are_inset_without_affecting_inline_threads() -> 
     pr_info_thread_block = pr_info_css.split("PRInfo ReviewThreadItem.--thread {", 1)[
         1
     ].split("}", 1)[0]
-    inline_block = ReviewThreadItem.DEFAULT_CSS.split(
-        "ReviewThreadItem.--inline {", 1
-    )[1].split("}", 1)[0]
+    inline_block = ReviewThreadItem.DEFAULT_CSS.split("ReviewThreadItem.--inline {", 1)[
+        1
+    ].split("}", 1)[0]
 
     assert "margin: 1 0 1 4;" in pr_info_thread_block
     assert "margin: 0;" in inline_block
@@ -223,9 +243,9 @@ def test_review_thread_diff_hunk_preview_streams_last_lines() -> None:
 def test_comment_card_markdown_headings_create_section_breaks() -> None:
     """Markdown headings should separate sections without loosening every line."""
     css = CommentCard.DEFAULT_CSS
-    body_text_block = css.split(
-        "CommentCard .comment-content MarkdownParagraph,", 1
-    )[1].split("}", 1)[0]
+    body_text_block = css.split("CommentCard .comment-content MarkdownParagraph,", 1)[
+        1
+    ].split("}", 1)[0]
     heading_block = css.split("CommentCard .comment-content MarkdownH1,", 1)[1].split(
         "}", 1
     )[0]
@@ -269,6 +289,23 @@ def test_pr_info_does_not_redefine_shared_comment_card_surface() -> None:
     assert "PRInfo .thread-resolved .thread-header" not in pr_info_css
     assert "PRInfo CommentCard.description-container.--selected" in pr_info_css
     assert "PRInfo CommentCard.comment-box.--selected" in pr_info_css
+
+
+def test_timeline_inline_selection_frames_the_whole_thread() -> None:
+    pr_info_css = (ROOT / "src/rit/ui/components/pr_info.tcss").read_text()
+    shared_css = CommentCard.DEFAULT_CSS
+
+    whole_thread_border = """PRInfo ReviewThreadItem.--thread.--selected {
+    border: solid #8aadf4;
+}"""
+    assert whole_thread_border in pr_info_css
+    selected_comment_block = pr_info_css.split(
+        "PRInfo CommentCard.thread-comment.--selected,", 1
+    )[1].split("}", 1)[0]
+    assert "background: #363a4f;" in selected_comment_block
+    assert "border:" not in selected_comment_block
+    assert "CommentCard.thread-comment.--selected" not in shared_css
+    assert "CommentCard.thread-reply.--selected" not in shared_css
 
 
 def test_pr_info_does_not_keep_legacy_comment_style_hooks() -> None:

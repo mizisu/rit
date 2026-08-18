@@ -64,7 +64,12 @@ class CommentCard(Vertical):
     }
 
     CommentCard.pending-draft.--cursor-line {
-        border-left: thick #8aadf4;
+        background: #363a4f;
+    }
+
+    CommentCard.thread-comment.--cursor-line,
+    CommentCard.thread-reply.--cursor-line {
+        background: #363a4f;
     }
 
     CommentCard.review-submit-pending-item {
@@ -74,6 +79,10 @@ class CommentCard(Vertical):
     CommentCard .comment-header {
         height: 1;
         margin: 0 0 1 0;
+    }
+
+    CommentCard.--empty-header .comment-header {
+        display: none;
     }
 
     CommentCard.--empty-body .comment-header {
@@ -207,6 +216,8 @@ class CommentCard(Vertical):
             classes="inline-comment-preview",
             markup=False,
         )
+        if not header.strip():
+            self.add_class("--empty-header")
         if not _has_body(body):
             self.add_class("--empty-body")
 
@@ -235,6 +246,7 @@ class CommentCard(Vertical):
         self._body = body
         self._markdown_base_url = markdown_base_url
         self._header_widget.update(header)
+        self.set_class(not header.strip(), "--empty-header")
         if _has_body(body):
             self.remove_class("--empty-body")
         else:
@@ -329,8 +341,7 @@ class CommentCard(Vertical):
             else:
                 line = body[start:end]
                 start = end + 1
-            if line.endswith("\r"):
-                line = line[:-1]
+            line = line.removesuffix("\r")
             yield line
 
     @staticmethod

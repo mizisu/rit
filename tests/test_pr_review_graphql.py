@@ -100,6 +100,77 @@ async def test_create_pending_review_uses_graphql_threads_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_pending_review_adds_file_level_thread_to_pending_review() -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        assert args == ["api", "graphql", "--input", "-"]
+        assert input_text is not None
+        payload = json.loads(input_text)
+        calls.append(payload)
+        if len(calls) == 1:
+            return json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "id": "PR_node",
+                                "reviews": {"nodes": []},
+                            }
+                        }
+                    }
+                }
+            )
+        if len(calls) == 2:
+            return json.dumps(
+                {
+                    "data": {
+                        "addPullRequestReview": {
+                            "pullRequestReview": {
+                                "nodeId": "review_node",
+                                "databaseId": 80,
+                                "state": "PENDING",
+                                "body": "",
+                                "comments": {"nodes": []},
+                            }
+                        }
+                    }
+                }
+            )
+        return json.dumps(
+            {"data": {"addPullRequestReviewThread": {"thread": {"id": "thread_node"}}}}
+        )
+
+    review = await create_pending_review(
+        "owner",
+        "repo",
+        123,
+        comments=[
+            PendingReviewComment(
+                body="whole file",
+                path="src/app.py",
+                line=0,
+                subject_type="file",
+            )
+        ],
+        commit_id="deadbeef",
+        runner=runner,
+    )
+
+    assert review.id == 80
+    assert calls[1]["variables"]["input"] == {
+        "pullRequestId": "PR_node",
+        "commitOID": "deadbeef",
+    }
+    assert calls[2]["variables"]["input"] == {
+        "pullRequestReviewId": "review_node",
+        "body": "whole file",
+        "path": "src/app.py",
+        "subjectType": "FILE",
+    }
+
+
+@pytest.mark.asyncio
 async def test_list_review_comments_prefers_comment_range_over_thread_range() -> None:
     async def runner(args: list[str], *, input_text: str | None = None) -> str:
         assert args == ["api", "graphql", "--input", "-"]
@@ -167,6 +238,60 @@ async def test_list_review_comments_prefers_comment_range_over_thread_range() ->
     assert comments[0].start_side == "RIGHT"
     assert comments[0].commit_id == "old-head"
     assert comments[0].original_commit_id == "old-head"
+
+
+@pytest.mark.asyncio
+async def test_list_review_comments_ignores_file_thread_line_placeholder() -> None:
+    async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        return json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [
+                                    {
+                                        "id": "thread_node",
+                                        "path": "src/app.py",
+                                        "line": 1,
+                                        "originalLine": 1,
+                                        "diffSide": "RIGHT",
+                                        "subjectType": "FILE",
+                                        "comments": {
+                                            "nodes": [
+                                                {
+                                                    "databaseId": 300,
+                                                    "body": "whole file",
+                                                    "path": "src/app.py",
+                                                    "subjectType": "FILE",
+                                                    "pullRequestReview": {
+                                                        "databaseId": 80
+                                                    },
+                                                }
+                                            ]
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        )
+
+    comments = await list_review_comments(
+        "owner",
+        "repo",
+        123,
+        review_id=80,
+        runner=runner,
+    )
+
+    assert len(comments) == 1
+    assert comments[0].subject_type == "FILE"
+    assert comments[0].line is None
+    assert comments[0].original_line is None
+    assert comments[0].anchor_line is None
 
 
 @pytest.mark.asyncio

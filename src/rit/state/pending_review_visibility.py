@@ -35,9 +35,12 @@ def pending_review_hidden_ids(
         if review_id > 0 and review_id not in ids:
             ids.append(review_id)
 
-    if isinstance(pending_review_id, int) and pending_review_id > 0:
-        if pending_review_id not in ids:
-            ids.append(pending_review_id)
+    if (
+        isinstance(pending_review_id, int)
+        and pending_review_id > 0
+        and pending_review_id not in ids
+    ):
+        ids.append(pending_review_id)
 
     for review in reviews:
         if not _is_pending_review(review):
@@ -158,6 +161,14 @@ def pending_draft_matches_review_comment(
     if draft.path != comment_path or draft.body != comment.body:
         return False
 
+    comment_is_file_level = comment.is_file_level or (
+        thread is not None and thread.is_file_level
+    )
+    if draft.is_file_level != comment_is_file_level:
+        return False
+    if draft.is_file_level:
+        return True
+
     target_side = _comment_target_side(comment, thread=thread)
     if draft.anchor_side != target_side:
         return False
@@ -231,10 +242,20 @@ def _timeline_comment_from_draft(
         "body": draft.body,
         "path": draft.path,
         "side": draft.side,
+        "subject_type": draft.subject_type,
         "pull_request_review_id": pending_review_id,
         "start_side": draft.start_side or "",
     }
-    if draft.side == "LEFT":
+    if draft.is_file_level:
+        data.update(
+            line=None,
+            original_line=None,
+            start_line=None,
+            original_start_line=None,
+            side="",
+            start_side="",
+        )
+    elif draft.side == "LEFT":
         data["line"] = None
         data["original_line"] = draft.line
     else:

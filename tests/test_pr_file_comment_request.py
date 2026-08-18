@@ -39,6 +39,11 @@ def test_parse_file_comment_response_preserves_subject_type() -> None:
                 "id": 90,
                 "body": "check this file",
                 "path": "src/app.py",
+                "line": 1,
+                "original_line": 1,
+                "side": "RIGHT",
+                "position": 1,
+                "original_position": 1,
             }
         )
     )
@@ -46,6 +51,10 @@ def test_parse_file_comment_response_preserves_subject_type() -> None:
     assert comment.id == 90
     assert comment.path == "src/app.py"
     assert comment.line is None
+    assert comment.original_line is None
+    assert comment.side == ""
+    assert comment.position is None
+    assert comment.original_position is None
     assert comment.subject_type == "file"
 
 

@@ -35,14 +35,14 @@ class FakePendingReviewAdapter:
             ]
         )
         self.server_comments = [
-            PRComment.model_validate(
-                {
-                    "id": 200 + index,
-                    "body": comment.body,
-                    "path": comment.path,
-                    "line": comment.line,
-                    "side": comment.side,
-                }
+            PRComment(
+                id=200 + index,
+                body=comment.body,
+                path=comment.path,
+                line=None if comment.is_file_level else comment.line,
+                side="" if comment.is_file_level else comment.side,
+                subject_type=comment.subject_type,
+                pull_request_review_id=100,
             )
             for index, comment in enumerate(comments)
         ]
@@ -107,3 +107,42 @@ async def test_replace_pending_review_refuses_unverified_empty_server_comments()
 
     assert adapter.deleted == []
     assert adapter.created == []
+
+
+@pytest.mark.asyncio
+async def test_replace_pending_review_recreates_file_level_comments_in_review() -> None:
+    adapter = FakePendingReviewAdapter(
+        [
+            PRComment(
+                id=9,
+                body="whole file",
+                path="a.py",
+                line=1,
+                side="RIGHT",
+                subject_type="file",
+            )
+        ]
+    )
+    local = PendingReviewComment(body="local draft", path="a.py", line=8)
+
+    result = await replace_pending_review(
+        adapter=adapter,
+        pr_number=123,
+        comments=[local],
+        pending_review_id=91,
+        pending_review_body="",
+        head_sha="deadbeef",
+    )
+
+    assert adapter.deleted == [(123, 91)]
+    assert adapter.created == [
+        [
+            ("a.py", 0, "RIGHT", "whole file"),
+            ("a.py", 8, "RIGHT", "local draft"),
+        ]
+    ]
+    assert result.review is not None
+    assert [(comment.body, comment.subject_type) for comment in result.comments] == [
+        ("whole file", "file"),
+        ("local draft", "line"),
+    ]

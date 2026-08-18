@@ -55,6 +55,7 @@ class DiffLine:
     preview_change: Literal["added", "modified"] | None = None
     preview_deleted_before: bool = False
     syntax_highlighting_disabled: bool = False
+    is_folded_file_placeholder: bool = False
 
     @property
     def has_old_side(self) -> bool:

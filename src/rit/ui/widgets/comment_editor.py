@@ -96,6 +96,7 @@ class InlineCommentEditor(Vertical):
         placeholder: str,
         initial_text: str = "",
         context: str = "",
+        update_existing: bool = False,
         id: str | None = None,
     ) -> None:
         super().__init__(id=id, classes="-hidden")
@@ -104,6 +105,7 @@ class InlineCommentEditor(Vertical):
         self._placeholder = placeholder
         self._initial_text = initial_text
         self._selection_context = context
+        self._update_existing = update_existing
         self._pending_focus = False
         self._reported_layout_height = 0
 
@@ -123,7 +125,9 @@ class InlineCommentEditor(Vertical):
             placeholder=self._placeholder,
         )
         yield EmojiPicker(id="comment-editor-emoji-options")
-        if self._kind == "inline":
+        if self._update_existing:
+            hint = "Ctrl+S update • Esc cancel"
+        elif self._kind in {"inline", "file"}:
             hint = "Ctrl+S pending • Ctrl+Shift+S post now • Esc cancel"
         else:
             hint = "Ctrl+S submit • Esc cancel"

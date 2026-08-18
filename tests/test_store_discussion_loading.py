@@ -1,12 +1,12 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
 from rit.services.github import PRDiscussion
 from rit.state.models import (
-    NodeList,
     PR,
+    NodeList,
     PRComment,
     PRIssueComment,
     PRReview,
@@ -29,7 +29,7 @@ class FastThenSlowDiscussionService:
                     id=10,
                     body="fast review",
                     user=PRUser(login="alice"),
-                    submitted_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+                    submitted_at=datetime(2026, 6, 1, tzinfo=UTC),
                 )
             ],
             issue_comments=[
@@ -37,8 +37,8 @@ class FastThenSlowDiscussionService:
                     id=20,
                     body="fast issue comment",
                     user=PRUser(login="bob"),
-                    created_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
-                    updated_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+                    created_at=datetime(2026, 6, 1, tzinfo=UTC),
+                    updated_at=datetime(2026, 6, 1, tzinfo=UTC),
                 )
             ],
             review_threads=[],
@@ -85,8 +85,8 @@ class MetadataOnlyFullDiscussionService:
             original_line=original_line,
             side=side,
             pull_request_review_id=10,
-            created_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+            created_at=datetime(2026, 6, 1, tzinfo=UTC),
+            updated_at=datetime(2026, 6, 1, tzinfo=UTC),
         )
 
     async def get_pr_discussion_fast(self, pr_number: int) -> PRDiscussion:
@@ -188,7 +188,7 @@ async def test_load_pr_discussion_posts_metadata_only_when_full_content_matches(
     assert message_names.count("PRDiscussionMetadataLoaded") == 1
 
 
-def test_file_level_line_notes_keep_file_level_anchor() -> None:
+def test_file_level_threads_do_not_use_github_line_one_placeholder() -> None:
     store = PRStore(pr_number=123)
     body = "Line comment on `src/app.py:6` (RIGHT):\n\nhello outside hunk"
     comment = PRComment(
@@ -197,7 +197,7 @@ def test_file_level_line_notes_keep_file_level_anchor() -> None:
         path="src/app.py",
         line=1,
         side="RIGHT",
-        subjectType="file",
+        subject_type="file",
     )
     thread = ReviewThread.model_validate(
         {
@@ -221,15 +221,15 @@ def test_file_level_line_notes_keep_file_level_anchor() -> None:
     normalized_comment = normalized_thread.root_comment
     assert normalized_thread.line == 1
     assert normalized_thread.original_line is None
-    assert normalized_thread.anchor_line == 1
+    assert normalized_thread.anchor_line is None
     assert normalized_thread.diff_side == "RIGHT"
     assert normalized_comment is not None
     assert normalized_comment.body == body
     assert normalized_comment.line == 1
     assert normalized_comment.original_line is None
-    assert normalized_comment.side == "RIGHT"
+    assert normalized_comment.anchor_line is None
     assert store.state.comments_by_file["src/app.py"] == [normalized_comment]
-    assert store.state.thread_info_cache[501].line == 1
+    assert store.state.thread_info_cache[501].line is None
 
 
 def test_line_thread_with_line_note_shaped_body_keeps_original_anchor() -> None:

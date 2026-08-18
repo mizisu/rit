@@ -3,6 +3,8 @@ import json
 from rit.services.pr_review_comment_request import (
     create_review_comment,
     create_review_comment_request,
+    delete_review_comment,
+    delete_review_comment_request,
     parse_created_review_comment_response,
     parse_review_comment_response,
     update_review_comment,
@@ -162,6 +164,36 @@ async def test_update_review_comment_runs_graphql_mutation() -> None:
     assert comment.id == 90
     assert calls[0][0] == ["api", "graphql", "--input", "-"]
     assert calls[0][1] is not None
-    assert json.loads(calls[0][1])["variables"]["input"][
-        "pullRequestReviewCommentId"
-    ] == "PRRC_node_90"
+    assert (
+        json.loads(calls[0][1])["variables"]["input"]["pullRequestReviewCommentId"]
+        == "PRRC_node_90"
+    )
+
+
+def test_delete_review_comment_request_uses_graphql_node_id() -> None:
+    request = delete_review_comment_request("PRRC_node_90")
+
+    assert request.args == ("api", "graphql", "--input", "-")
+    payload = json.loads(request.input_text)
+    assert payload["variables"] == {"input": {"id": "PRRC_node_90"}}
+    assert "deletePullRequestReviewComment" in payload["query"]
+
+
+async def test_delete_review_comment_runs_graphql_mutation() -> None:
+    calls: list[tuple[list[str], str | None]] = []
+
+    async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        calls.append((args, input_text))
+        return json.dumps(
+            {
+                "data": {
+                    "deletePullRequestReviewComment": {"pullRequestReviewComment": None}
+                }
+            }
+        )
+
+    await delete_review_comment("PRRC_node_90", runner=runner)
+
+    assert calls[0][0] == ["api", "graphql", "--input", "-"]
+    assert calls[0][1] is not None
+    assert json.loads(calls[0][1])["variables"] == {"input": {"id": "PRRC_node_90"}}

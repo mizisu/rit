@@ -13,12 +13,19 @@ from textual.widgets import Footer, Input, TabbedContent, TabPane, TextArea, Tre
 from textual.worker import Worker, WorkerState
 
 from rit.app import RitApp
-from rit.state.models import FileViewedState, PRTeam, PRUser
+from rit.state.models import (
+    FileViewedState,
+    PendingReviewComment,
+    PRComment,
+    PRTeam,
+    PRUser,
+)
 from rit.state.store import GitHubError, PRStore, UnsupportedInlineCommentTarget
 from rit.ui.components.file_changes import FileChanges
 from rit.ui.components.pr_info import PRInfo
 from rit.ui.messages import Flash
 from rit.ui.screens.branch_picker import BranchPickerScreen
+from rit.ui.screens.comment_delete import CommentDeleteScreen
 from rit.ui.screens.file_picker import FilePickerScreen
 from rit.ui.screens.multi_select_picker import (
     MultiSelectItem,
@@ -40,6 +47,8 @@ _TAB_GROUP = Binding.Group("Move Tab", compact=True)
 
 _TAB_IDS = ("pr-info", "files")
 _TAB_INDEX_BY_ID = {tab_id: index for index, tab_id in enumerate(_TAB_IDS)}
+
+
 _COMMON_BINDINGS = [
     Binding("ctrl+d", "scroll_half_page_down", "Half Page Down", show=False),
     Binding("ctrl+u", "scroll_half_page_up", "Half Page Up", show=False),
@@ -105,6 +114,7 @@ _PR_INFO_BINDINGS = [
     ),
     Binding("K", "prev_comment", "", group=_COMMENT_GROUP, show=False),
     Binding("c", "comment", "Comment", group=_COMMENT_GROUP),
+    Binding("d", "delete_comment", "Delete Comment", group=_COMMENT_GROUP),
     Binding(
         "O",
         "open_thread_in_diff",
@@ -133,8 +143,8 @@ _FILES_BINDINGS = [
         group=_NAVIGATION_GROUP,
     ),
     Binding("H", "focus_left", "", group=_NAVIGATION_GROUP, show=False),
-    Binding("c", "comment", "Comment", group=_COMMENT_GROUP),
-    Binding("d", "delete_pending_comment", "Delete Draft", group=_COMMENT_GROUP),
+    Binding("c", "comment", "Comment / Edit", group=_COMMENT_GROUP),
+    Binding("d", "delete_comment", "Delete Comment", group=_COMMENT_GROUP),
     Binding("ctrl+s", "review", "Review", group=_REVIEW_GROUP),
     Binding("ctrl+l", "focus_right", "", group=_NAVIGATION_GROUP, show=False),
     Binding("L", "focus_right", "", group=_NAVIGATION_GROUP, show=False),
@@ -212,8 +222,6 @@ class MainScreen(Screen[None]):
 
     async def _load_data(self) -> None:
         await self.store.load_all()
-        await self.store.load_file_view_states()
-        self._apply_viewed_states()
 
     def _post_store_message(self, message) -> None:
         if isinstance(message, PRStore.FileSelected):
@@ -674,13 +682,70 @@ class MainScreen(Screen[None]):
             name="_set_assignees",
         )
 
+    def action_delete_comment(self) -> None:
+        target = self._selected_comment_delete_target()
+        if target is None:
+            self.post_message(
+                Flash(
+                    "Select an individual comment to delete",
+                    style="warning",
+                    duration=2.0,
+                )
+            )
+            return
+
+        self.app.push_screen(
+            CommentDeleteScreen(target),
+            lambda confirmed: self._handle_comment_delete_confirmation(
+                target,
+                confirmed,
+            ),
+        )
+
+    def _selected_comment_delete_target(
+        self,
+    ) -> PRComment | PendingReviewComment | None:
+        if self.current_tab == 1:
+            diff_view = self.file_changes.diff_view
+            draft_index = diff_view.active_pending_draft_index()
+            if draft_index is not None:
+                return self._pending_comment_delete_target(draft_index)
+            comment = diff_view.active_review_comment()
+        elif self.current_tab == 0:
+            comment = self.pr_info.current_review_comment()
+        else:
+            return None
+
+        if comment is None:
+            return None
+        draft_index = self.store.pending_review_comment_index_for(comment)
+        if draft_index is not None:
+            return self._pending_comment_delete_target(draft_index)
+        return comment
+
+    def _pending_comment_delete_target(
+        self,
+        draft_index: int,
+    ) -> PendingReviewComment | None:
+        comments = self.store.state.pending_review_comments
+        if not 0 <= draft_index < len(comments):
+            return None
+        return comments[draft_index]
+
     def action_delete_pending_comment(self) -> None:
-        if self.current_tab != 1:
+        self.action_delete_comment()
+
+    def _handle_comment_delete_confirmation(
+        self,
+        target: PRComment | PendingReviewComment,
+        confirmed: bool | None,
+    ) -> None:
+        if not confirmed:
             return
         self.run_worker(
-            self._delete_pending_inline_comment(),
+            self._delete_comment(target),
             exclusive=False,
-            name="_delete_pending_inline_comment",
+            name="_delete_comment",
         )
 
     def _handle_review_submit(
@@ -720,10 +785,26 @@ class MainScreen(Screen[None]):
                     Flash("No file header selected", style="warning", duration=2.0)
                 )
                 return
+            if event.mode == "post":
+                self.run_worker(
+                    self._post_file_comment(event.body, path=target),
+                    exclusive=False,
+                    name="_post_file_comment",
+                )
+                return
             self.run_worker(
-                self._post_file_comment(event.body, path=target),
+                self._save_file_comment_draft(event.body, path=target),
                 exclusive=False,
-                name="_post_file_comment",
+                name="_save_file_comment_draft",
+            )
+            return
+
+        edit_target = diff_view.inline_comment_edit_target()
+        if edit_target is not None:
+            self.run_worker(
+                self._update_review_comment(event.body, edit_target),
+                exclusive=False,
+                name="_update_review_comment",
             )
             return
 
@@ -826,6 +907,7 @@ class MainScreen(Screen[None]):
             return
 
         diff_view = self.file_changes.diff_view
+        selected_header_path = diff_view.selected_file_header_path()
         diff = self.store.get_file_diff(current_file)
         if diff is None and diff_view.current_file == current_file:
             diff = diff_view.current_diff
@@ -853,6 +935,10 @@ class MainScreen(Screen[None]):
                 pane=current_pane,
                 update_active_pane=True,
             )
+        if selected_header_path is not None:
+            header_hunk = diff_view._file_header_hunk_index(selected_header_path)
+            if header_hunk is not None:
+                diff_view._set_file_header_selection(header_hunk)
         if focus_diff:
             diff_view.focus()
 
@@ -868,11 +954,54 @@ class MainScreen(Screen[None]):
         return True
 
     async def _post_file_comment(self, body: str, *, path: str) -> bool:
+        diff_view = self.file_changes.diff_view
+        current_file = diff_view.current_file
+        current_line = diff_view.cursor_line
+        current_pane = diff_view.active_pane
+
         await self.store.submit_file_comment(body, path=path)
-        await self.file_changes.diff_view.close_file_comment_editor()
+        await diff_view.close_file_comment_editor()
         await self.store.refresh_review_data()
         self.pr_info.refresh_comments()
         self.file_changes.file_tree.refresh_files()
+
+        if current_file is not None:
+            await self._refresh_diff_preserving_cursor(
+                current_file,
+                current_line,
+                current_pane,
+                focus_diff=True,
+            )
+        return True
+
+    async def _save_file_comment_draft(self, body: str, *, path: str) -> bool:
+        diff_view = self.file_changes.diff_view
+        current_file = diff_view.current_file
+        current_line = diff_view.cursor_line
+        current_pane = diff_view.active_pane
+
+        async def refresh_file_drafts() -> None:
+            self.file_changes.file_tree.refresh_files()
+            if current_file is not None:
+                await self._refresh_diff_preserving_cursor(
+                    current_file,
+                    current_line,
+                    current_pane,
+                    focus_diff=True,
+                )
+
+        await diff_view.close_file_comment_editor()
+        try:
+            await self.store.queue_pending_file_comment(
+                body,
+                path=path,
+                after_local_save=refresh_file_drafts,
+            )
+        except Exception:
+            await refresh_file_drafts()
+            raise
+
+        self.pr_info.refresh_comments()
         return True
 
     async def _submit_review(
@@ -913,6 +1042,30 @@ class MainScreen(Screen[None]):
         changed = await self.store.set_assignees(logins)
         self.pr_info.refresh_summary()
         return changed
+
+    async def _update_review_comment(
+        self,
+        body: str,
+        comment: PRComment,
+    ) -> bool:
+        diff_view = self.file_changes.diff_view
+        current_file = diff_view.current_file
+        current_line = diff_view.cursor_line
+        current_pane = diff_view.active_pane
+
+        await self.store.update_review_comment(comment, body)
+        await diff_view.close_inline_comment_editor()
+        self.pr_info.refresh_comments()
+        self.file_changes.file_tree.refresh_files()
+
+        if current_file is not None:
+            await self._refresh_diff_preserving_cursor(
+                current_file,
+                current_line,
+                current_pane,
+                focus_diff=True,
+            )
+        return True
 
     async def _post_inline_comment(
         self,
@@ -998,41 +1151,43 @@ class MainScreen(Screen[None]):
 
         return True
 
-    async def _delete_pending_inline_comment(self) -> bool:
+    async def _delete_comment(
+        self,
+        target: PRComment | PendingReviewComment,
+    ) -> Literal["draft", "comment"] | None:
         diff_view = self.file_changes.diff_view
         current_file = diff_view.current_file
         current_line = diff_view.cursor_line
         current_pane = diff_view.active_pane
-        target = diff_view._inline_comment_target_for_current_line()
-        if current_file is None or target is None:
-            return False
 
-        async def refresh_current_diff() -> None:
+        async def refresh_comments() -> None:
+            self.pr_info.refresh_comments()
             self.file_changes.file_tree.refresh_files()
             await self._refresh_diff_preserving_cursor(
                 current_file,
                 current_line,
                 current_pane,
-                focus_diff=True,
+                focus_diff=self.current_tab == 1,
             )
 
-        path, line, side = target
-        draft_index = diff_view.active_pending_draft_index()
-        if draft_index is None:
-            return False
+        if isinstance(target, PendingReviewComment):
+            draft_index = self.store.review_annotations().index_for_comment(target)
+            if draft_index is None:
+                return None
+            try:
+                deleted = await self.store.remove_pending_review_comment_at(
+                    draft_index,
+                    after_local_delete=refresh_comments,
+                )
+            except Exception:
+                await refresh_comments()
+                raise
+            return "draft" if deleted else None
 
-        try:
-            deleted = await self.store.remove_pending_inline_comment(
-                path=path,
-                line=line,
-                side=side,
-                draft_index=draft_index,
-                after_local_delete=refresh_current_diff,
-            )
-        except Exception:
-            await refresh_current_diff()
-            raise
-        return deleted
+        await self.store.delete_review_comment(target)
+        await self.store.refresh_review_data()
+        await refresh_comments()
+        return "comment"
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
         if (
@@ -1122,6 +1277,17 @@ class MainScreen(Screen[None]):
                 )
             return
 
+        if event.worker.name == "_save_file_comment_draft":
+            if event.state == WorkerState.SUCCESS:
+                self.post_message(Flash("Draft saved", style="success", duration=2.0))
+            elif event.state == WorkerState.ERROR:
+                self.notify(
+                    self._worker_error_message(event.worker, "Failed to save draft"),
+                    severity="error",
+                    markup=False,
+                )
+            return
+
         if event.worker.name == "_submit_review":
             if event.state == WorkerState.SUCCESS:
                 self.post_message(
@@ -1132,6 +1298,21 @@ class MainScreen(Screen[None]):
                     self._worker_error_message(
                         event.worker,
                         "Failed to submit review",
+                    ),
+                    severity="error",
+                    markup=False,
+                )
+            return
+
+        if event.worker.name == "_update_review_comment":
+            if event.state == WorkerState.SUCCESS:
+                self.post_message(
+                    Flash("Comment updated", style="success", duration=2.0)
+                )
+            elif event.state == WorkerState.ERROR:
+                self.notify(
+                    self._worker_error_message(
+                        event.worker, "Failed to update comment"
                     ),
                     severity="error",
                     markup=False,
@@ -1160,18 +1341,32 @@ class MainScreen(Screen[None]):
                 )
             return
 
-        if event.worker.name == "_delete_pending_inline_comment":
+        if event.worker.name == "_delete_comment":
             if event.state == WorkerState.SUCCESS:
-                if event.worker.result:
-                    self.post_message(
-                        Flash("Draft deleted", style="success", duration=2.0)
-                    )
+                result = event.worker.result
+                if result == "draft":
+                    message = "Draft deleted"
+                elif result == "comment":
+                    message = "Comment deleted"
                 else:
                     self.post_message(
-                        Flash("Select a draft to delete", style="warning", duration=2.0)
+                        Flash(
+                            "Selected comment no longer exists",
+                            style="warning",
+                            duration=2.0,
+                        )
                     )
+                    return
+                self.post_message(Flash(message, style="success", duration=2.0))
             elif event.state == WorkerState.ERROR:
-                self.notify("Failed to delete draft", severity="error")
+                self.notify(
+                    self._worker_error_message(
+                        event.worker,
+                        "Failed to delete comment",
+                    ),
+                    severity="error",
+                    markup=False,
+                )
             return
 
         if event.worker.name == "_open_inline_comment_editor":
@@ -1341,11 +1536,7 @@ class MainScreen(Screen[None]):
         self._navigate_to_file_with_comments(event.direction)
 
     def _navigate_to_file_with_comments(self, direction: int) -> None:
-        """Find and switch to the next file with review threads.
-
-        File navigation stays inside the combined diff when multiple files are
-        loaded, so comment jumps do not fall back to per-file rendering.
-        """
+        """Find and switch to the next file with review threads."""
         store = self.store
         files = store.state.files
         if not files:
@@ -1384,12 +1575,6 @@ class MainScreen(Screen[None]):
         self.app.post_message(
             Flash("No more files with comments", style="warning", duration=2.0)
         )
-
-    def _apply_viewed_states(self) -> None:
-        """Refresh tree and diff after background viewed-state load."""
-        self.file_changes.file_tree.refresh_files()
-        self.file_changes.diff_view.refresh_header()
-        self.file_changes.diff_view.refresh_viewed_folds()
 
     def _resolve_file_view_target(self) -> str | None:
         diff_view = self.file_changes.diff_view

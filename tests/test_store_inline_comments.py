@@ -27,10 +27,13 @@ def _created_review_comment(
         "node_id": f"PRRC_{review_id}_{index}",
         "body": comment.body,
         "path": comment.path,
-        "line": comment.line,
-        "side": comment.side,
         "pullRequestReview": review_id,
     }
+    if comment.is_file_level:
+        data["subject_type"] = "file"
+    else:
+        data["line"] = comment.line
+        data["side"] = comment.side
     if comment.start_line is not None:
         data["start_line"] = comment.start_line
         data["start_side"] = comment.start_side or comment.side
@@ -43,6 +46,7 @@ class FakeInlineCommentService:
         self.file_comment_calls: list[tuple[int, str, str, str]] = []
         self.issue_comment_calls: list[tuple[int, str]] = []
         self.update_review_comment_calls: list[tuple[str, str]] = []
+        self.delete_review_comment_calls: list[str] = []
         self.create_pending_review_calls: list[list[tuple[str, int, str, str]]] = []
         self.delete_pending_review_calls: list[tuple[int, int]] = []
         self.list_review_comments_result: list[PRComment] = []
@@ -99,6 +103,9 @@ class FakeInlineCommentService:
     ) -> PRComment:
         self.update_review_comment_calls.append((comment_node_id, body))
         return PRComment(node_id=comment_node_id, body=body)
+
+    async def delete_review_comment(self, comment_node_id: str) -> None:
+        self.delete_review_comment_calls.append(comment_node_id)
 
     async def create_issue_comment(self, pr_number: int, body: str) -> PRIssueComment:
         self.issue_comment_calls.append((pr_number, body))
@@ -208,6 +215,114 @@ class BlockingPRDataService(FakeInlineCommentService):
 
 
 @pytest.mark.asyncio
+async def test_delete_submitted_review_comment_forgets_recent_projection() -> None:
+    store = PRStore(pr_number=123)
+    service = FakeInlineCommentService()
+    store._service = service  # type: ignore[assignment]
+    comment = PRComment(
+        id=501,
+        node_id="PRRC_501",
+        path="src/app.py",
+        line=7,
+        pull_request_review_id=91,
+    )
+    store._remember_submitted_comment(comment)
+
+    await store.delete_review_comment(comment)
+
+    assert service.delete_review_comment_calls == ["PRRC_501"]
+    assert store._recent_discussion.review_comments == {}
+
+
+@pytest.mark.asyncio
+async def test_update_submitted_review_comment_updates_local_projection() -> None:
+    store = PRStore(pr_number=123)
+    service = FakeInlineCommentService()
+    store._service = service  # type: ignore[assignment]
+    comment = PRComment(
+        id=501,
+        node_id="PRRC_501",
+        body="before",
+        path="src/app.py",
+        line=7,
+        side="RIGHT",
+        pull_request_review_id=91,
+    )
+    reply = PRComment(
+        id=502,
+        node_id="PRRC_502",
+        body="reply",
+        path="src/app.py",
+        line=7,
+        side="RIGHT",
+        in_reply_to_id=501,
+        pull_request_review_id=91,
+    )
+    thread = ReviewThread.model_validate(
+        {
+            "id": "thread-501",
+            "path": "src/app.py",
+            "line": 7,
+            "comments": {"nodes": [comment, reply]},
+        }
+    )
+    store._apply_discussion_state(
+        PR(number=123, review_threads_connection=NodeList(nodes=[thread]))
+    )
+
+    updated = await store.update_review_comment(comment, "  after  ")
+
+    assert service.update_review_comment_calls == [("PRRC_501", "after")]
+    assert updated.body == "after"
+    assert updated.path == "src/app.py"
+    assert updated.side == "RIGHT"
+    assert store.state.comments == [updated, reply]
+    assert store.state.review_threads[0].comments == [updated, reply]
+    assert store.state.pr is not None
+    assert store.state.pr.review_threads[0].comments == [updated, reply]
+
+
+def test_pending_review_comment_index_matches_timeline_projection() -> None:
+    store = PRStore(pr_number=123)
+    draft = PendingReviewComment(
+        body="whole file",
+        path="src/app.py",
+        line=0,
+        subject_type="file",
+        review_comment_id=501,
+    )
+    store.state.pending_review_id = 91
+    store.state.pending_review_comments = [draft]
+    projected = PRComment(
+        id=501,
+        body="whole file",
+        path="src/app.py",
+        subject_type="file",
+        pull_request_review_id=91,
+    )
+
+    assert store.pending_review_comment_index_for(projected) == 0
+
+
+@pytest.mark.asyncio
+async def test_remove_pending_review_comment_at_supports_file_draft() -> None:
+    store = PRStore(pr_number=123)
+    store.state.pending_review_comments = [
+        PendingReviewComment(
+            body="whole file",
+            path="src/app.py",
+            line=0,
+            subject_type="file",
+        )
+    ]
+
+    deleted = await store.remove_pending_review_comment_at(0)
+
+    assert deleted is True
+    assert store.state.pending_review_comments == []
+
+
+@pytest.mark.asyncio
 async def test_submit_inline_comment_uses_head_sha_and_target() -> None:
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
@@ -246,6 +361,40 @@ async def test_submit_file_comment_uses_head_sha_without_line_target() -> None:
     assert comment.path == "src/app.py"
     assert comment.line is None
     assert comment.subject_type == "file"
+
+
+@pytest.mark.asyncio
+async def test_queue_pending_file_comment_creates_file_level_review_draft() -> None:
+    store = PRStore(pr_number=123)
+    store.state.pr = PR(number=123, head_sha="deadbeef")
+    service = FakeInlineCommentService()
+    store._service = service  # type: ignore[assignment]
+
+    draft = await store.queue_pending_file_comment(
+        "  check the whole file  ",
+        path="src/app.py",
+    )
+
+    assert draft == PendingReviewComment(
+        body="check the whole file",
+        path="src/app.py",
+        line=0,
+        side="RIGHT",
+        subject_type="file",
+    )
+    assert store.state.pending_review_comments == [
+        draft.model_copy(
+            update={
+                "review_comment_id": 100001,
+                "review_comment_node_id": "PRRC_100_1",
+            }
+        )
+    ]
+    assert service.create_pending_review_calls == [
+        [("src/app.py", 0, "RIGHT", "check the whole file")]
+    ]
+    assert service.file_comment_calls == []
+    assert store.state.pending_review_id == 100
 
 
 @pytest.mark.asyncio
@@ -709,6 +858,28 @@ def test_visible_timeline_comments_render_pending_draft_once_after_replacement()
     assert [(comment.body, comment.pull_request_review_id) for comment in visible] == [
         ("keep", 100)
     ]
+
+
+def test_visible_timeline_file_comment_has_no_line_anchor() -> None:
+    store = PRStore(pr_number=123)
+    store.state.pending_review_id = 100
+    store.state.reviews = [PRReview(id=100, state=ReviewState.PENDING)]
+    store.state.pending_review_comments = [
+        PendingReviewComment(
+            body="whole file",
+            path="src/app.py",
+            line=0,
+            side="RIGHT",
+            subject_type="file",
+            review_comment_id=100001,
+        )
+    ]
+
+    visible = store.visible_timeline_comments()
+
+    assert len(visible) == 1
+    assert visible[0].subject_type == "file"
+    assert visible[0].anchor_line is None
 
 
 @pytest.mark.asyncio

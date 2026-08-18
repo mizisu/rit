@@ -1,7 +1,7 @@
 """Tests for data models."""
 
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Literal, get_args, get_origin, get_type_hints
 
 import rit.state.models as models_module
@@ -38,8 +38,8 @@ def make_comment(
         line=line,
         original_line=None,
         side="RIGHT",
-        created_at=created_at or datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
-        updated_at=datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc),
+        created_at=created_at or datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC),
+        updated_at=datetime(2024, 1, 1, 12, 0, 0, tzinfo=UTC),
         in_reply_to_id=in_reply_to_id,
         diff_hunk="@@ -10,3 +10,3 @@\n-old\n+new",
     )
@@ -143,8 +143,8 @@ class TestPRComment:
             line=20,
             original_line=15,
             side="LEFT",
-            created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
-            updated_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2024, 1, 1, tzinfo=UTC),
         )
 
         assert comment.anchor_side == "old"
@@ -159,8 +159,8 @@ class TestPRComment:
             line=20,
             original_line=15,
             side="RIGHT",
-            created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
-            updated_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2024, 1, 1, tzinfo=UTC),
         )
 
         assert comment.anchor_side == "new"
@@ -174,8 +174,8 @@ class TestPRComment:
             path="test.py",
             line=None,
             original_line=15,
-            created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
-            updated_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2024, 1, 1, tzinfo=UTC),
         )
 
         assert comment.anchor_side == "old"
@@ -189,8 +189,8 @@ class TestPRComment:
             path="test.py",
             line=20,
             original_line=15,
-            created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
-            updated_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2024, 1, 1, tzinfo=UTC),
         )
 
         assert comment.anchor_side == "new"
@@ -212,17 +212,23 @@ class TestPRComment:
 
         assert comment.anchor_line == 15
 
-    def test_rest_subject_type_is_preserved(self) -> None:
+    def test_file_level_comment_ignores_github_line_placeholder(self) -> None:
         comment = PRComment.model_validate(
             {
                 "id": 1,
                 "body": "file note",
                 "path": "test.py",
+                "line": 1,
+                "original_line": 1,
+                "side": "RIGHT",
                 "subject_type": "file",
             }
         )
 
         assert comment.subject_type == "file"
+        assert comment.is_file_level is True
+        assert comment.anchor_side == "auto"
+        assert comment.anchor_line is None
 
     def test_reply_to_parser_uses_direct_dict_lookup(self) -> None:
         class NoItemsDict(dict):
@@ -261,9 +267,7 @@ class TestPRReview:
             }
         )
 
-        assert review.created_at == datetime(
-            2026, 6, 18, 6, 25, 36, tzinfo=timezone.utc
-        )
+        assert review.created_at == datetime(2026, 6, 18, 6, 25, 36, tzinfo=UTC)
 
 
 class TestPR:
@@ -347,6 +351,22 @@ class TestReviewThread:
 
         assert thread.anchor_line == 10
 
+    def test_file_level_thread_ignores_github_line_placeholder(self) -> None:
+        thread = ReviewThread.model_validate(
+            {
+                "path": "test.py",
+                "line": 1,
+                "originalLine": 1,
+                "diffSide": "RIGHT",
+                "subjectType": "FILE",
+                "comments": {"nodes": []},
+            }
+        )
+
+        assert thread.is_file_level is True
+        assert thread.anchor_side == "auto"
+        assert thread.anchor_line is None
+
     def test_nullable_graphql_start_diff_side_is_allowed(self) -> None:
         thread = ReviewThread.model_validate(
             {
@@ -373,13 +393,13 @@ class TestCommentThread:
             2,
             "Reply 1",
             in_reply_to_id=1,
-            created_at=datetime(2024, 1, 1, 13, 0, 0, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, 13, 0, 0, tzinfo=UTC),
         )
         reply2 = make_comment(
             3,
             "Reply 2",
             in_reply_to_id=1,
-            created_at=datetime(2024, 1, 1, 14, 0, 0, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, 14, 0, 0, tzinfo=UTC),
         )
 
         thread = CommentThread(root_comment=root, replies=[reply2, reply1])
@@ -404,7 +424,7 @@ class TestCommentThread:
             3,
             "Aware date",
             in_reply_to_id=1,
-            created_at=datetime(2024, 1, 1, 13, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, 13, tzinfo=UTC),
         )
 
         thread = CommentThread(
@@ -420,7 +440,7 @@ class TestCommentThread:
             2,
             "Reply",
             in_reply_to_id=1,
-            created_at=datetime(2024, 1, 1, 13, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, 13, tzinfo=UTC),
         )
 
         monkeypatch.setattr(
@@ -452,13 +472,13 @@ class TestCommentThread:
             2,
             "Reply 1",
             in_reply_to_id=1,
-            created_at=datetime(2024, 1, 1, 13, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, 13, tzinfo=UTC),
         )
         reply2 = make_comment(
             3,
             "Reply 2",
             in_reply_to_id=1,
-            created_at=datetime(2024, 1, 1, 14, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, 14, tzinfo=UTC),
         )
         replies = Replies([reply1, reply2])
 
@@ -484,13 +504,13 @@ class TestCommentThread:
             2,
             "Reply 1",
             in_reply_to_id=1,
-            created_at=datetime(2024, 1, 1, 13, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, 13, tzinfo=UTC),
         )
         reply2 = make_comment(
             3,
             "Reply 2",
             in_reply_to_id=1,
-            created_at=datetime(2024, 1, 1, 14, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, 14, tzinfo=UTC),
         )
         thread = CommentThread(root_comment=root, replies=[reply2, reply1])
 
@@ -518,8 +538,8 @@ class TestCommentThread:
             line=20,
             original_line=15,
             side="RIGHT",
-            created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
-            updated_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2024, 1, 1, tzinfo=UTC),
         )
         thread = CommentThread(root_comment=root)
 
@@ -535,8 +555,8 @@ class TestCommentThread:
             line=None,
             original_line=15,
             side="LEFT",
-            created_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
-            updated_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+            updated_at=datetime(2024, 1, 1, tzinfo=UTC),
         )
         thread = CommentThread(root_comment=root)
 
@@ -613,13 +633,13 @@ class TestGroupCommentsIntoThreads:
     def test_multiple_root_comments(self) -> None:
         """Test with multiple independent root comments."""
         c1 = make_comment(
-            1, "Comment 1", created_at=datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc)
+            1, "Comment 1", created_at=datetime(2024, 1, 1, 10, 0, tzinfo=UTC)
         )
         c2 = make_comment(
-            2, "Comment 2", created_at=datetime(2024, 1, 1, 11, 0, tzinfo=timezone.utc)
+            2, "Comment 2", created_at=datetime(2024, 1, 1, 11, 0, tzinfo=UTC)
         )
         c3 = make_comment(
-            3, "Comment 3", created_at=datetime(2024, 1, 1, 9, 0, tzinfo=timezone.utc)
+            3, "Comment 3", created_at=datetime(2024, 1, 1, 9, 0, tzinfo=UTC)
         )
 
         threads = group_comments_into_threads([c1, c2, c3])
@@ -641,7 +661,7 @@ class TestGroupCommentsIntoThreads:
         aware_date = make_comment(
             2,
             "Aware date",
-            created_at=datetime(2024, 1, 1, 10, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, 10, tzinfo=UTC),
         )
 
         threads = group_comments_into_threads([aware_date, missing_date])
@@ -651,19 +671,19 @@ class TestGroupCommentsIntoThreads:
     def test_thread_with_replies(self) -> None:
         """Test grouping replies with their root comment."""
         root = make_comment(
-            1, "Root", created_at=datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc)
+            1, "Root", created_at=datetime(2024, 1, 1, 10, 0, tzinfo=UTC)
         )
         reply1 = make_comment(
             2,
             "Reply 1",
             in_reply_to_id=1,
-            created_at=datetime(2024, 1, 1, 11, 0, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, 11, 0, tzinfo=UTC),
         )
         reply2 = make_comment(
             3,
             "Reply 2",
             in_reply_to_id=1,
-            created_at=datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, 12, 0, tzinfo=UTC),
         )
 
         threads = group_comments_into_threads([reply2, root, reply1])
@@ -676,19 +696,19 @@ class TestGroupCommentsIntoThreads:
     def test_nested_replies(self) -> None:
         """Test that nested replies are grouped to the root."""
         root = make_comment(
-            1, "Root", created_at=datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc)
+            1, "Root", created_at=datetime(2024, 1, 1, 10, 0, tzinfo=UTC)
         )
         reply1 = make_comment(
             2,
             "Reply to root",
             in_reply_to_id=1,
-            created_at=datetime(2024, 1, 1, 11, 0, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, 11, 0, tzinfo=UTC),
         )
         reply2 = make_comment(
             3,
             "Reply to reply",
             in_reply_to_id=2,  # Reply to reply1, not root
-            created_at=datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, 12, 0, tzinfo=UTC),
         )
 
         threads = group_comments_into_threads([root, reply1, reply2])
@@ -705,20 +725,20 @@ class TestGroupCommentsIntoThreads:
             1,
             "Thread 1 root",
             path="file1.py",
-            created_at=datetime(2024, 1, 1, 10, 0, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, 10, 0, tzinfo=UTC),
         )
         reply1 = make_comment(
             2,
             "Thread 1 reply",
             path="file1.py",
             in_reply_to_id=1,
-            created_at=datetime(2024, 1, 1, 11, 0, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, 11, 0, tzinfo=UTC),
         )
         root2 = make_comment(
             3,
             "Thread 2 root",
             path="file2.py",
-            created_at=datetime(2024, 1, 1, 9, 0, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 1, 9, 0, tzinfo=UTC),
         )
 
         threads = group_comments_into_threads([root1, reply1, root2])

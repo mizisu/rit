@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import cast
 
 from rit.state.models import (
     PR,
@@ -20,10 +19,13 @@ __all__ = (
     "PRDiscussionReadModel",
     "RecentDiscussion",
     "ThreadResolutionProjection",
+    "forget_review_comment",
     "merge_recent_submitted_discussion",
     "project_discussion_state",
     "remember_submitted_comment",
     "remember_submitted_review",
+    "remember_updated_comment",
+    "replace_review_comment",
     "thread_from_submitted_comment",
     "update_thread_resolution",
 )
@@ -215,6 +217,94 @@ def remember_submitted_comment(
     )
 
 
+def remember_updated_comment(
+    recent: RecentDiscussion,
+    original: PRComment,
+    replacement: PRComment,
+) -> RecentDiscussion:
+    """Replace a matching recently submitted comment when it is edited."""
+    review_comments = dict(recent.review_comments)
+    changed = False
+    for review_id, comments in tuple(review_comments.items()):
+        updated = [
+            _comment_with_review_id(replacement, review_id)
+            if _same_review_comment(existing, original)
+            else existing
+            for existing in comments
+        ]
+        if any(_same_review_comment(existing, original) for existing in comments):
+            review_comments[review_id] = updated
+            changed = True
+    if not changed:
+        return recent
+    return RecentDiscussion(
+        reviews=dict(recent.reviews),
+        review_comments=review_comments,
+    )
+
+
+def replace_review_comment(
+    pr: PR,
+    original: PRComment,
+    replacement: PRComment,
+) -> PR | None:
+    """Return a PR with one review comment replaced, if it still exists."""
+    updated_threads: list[ReviewThread] = []
+    found = False
+    for thread in pr.review_threads:
+        comments: list[PRComment] = []
+        thread_changed = False
+        for existing in thread.comments:
+            if _same_review_comment(existing, original):
+                comments.append(replacement)
+                found = True
+                thread_changed = True
+            else:
+                comments.append(existing)
+        if thread_changed:
+            updated_threads.append(
+                thread.model_copy(
+                    update={"comments_connection": NodeList.from_nodes(comments)}
+                )
+            )
+        else:
+            updated_threads.append(thread)
+
+    if not found:
+        return None
+    return pr.model_copy(
+        update={"review_threads_connection": NodeList.from_nodes(updated_threads)}
+    )
+
+
+def forget_review_comment(
+    recent: RecentDiscussion,
+    comment: PRComment,
+) -> RecentDiscussion:
+    """Return recent discussion state without a deleted review comment."""
+    review_comments = dict(recent.review_comments)
+    changed = False
+    for review_id, comments in tuple(review_comments.items()):
+        retained = [
+            existing
+            for existing in comments
+            if not _same_review_comment(existing, comment)
+        ]
+        if len(retained) == len(comments):
+            continue
+        changed = True
+        if retained:
+            review_comments[review_id] = retained
+        else:
+            del review_comments[review_id]
+    if not changed:
+        return recent
+    return RecentDiscussion(
+        reviews=dict(recent.reviews),
+        review_comments=review_comments,
+    )
+
+
 def thread_from_submitted_comment(comment: PRComment) -> ReviewThread:
     anchor_side = comment.anchor_side
     anchor_line = comment.anchor_line
@@ -305,19 +395,15 @@ def _thread_resolution_projection(
 ) -> ThreadResolutionProjection:
     return ThreadResolutionProjection(
         review_threads=(
-            cast(list[ReviewThread], review_threads)
-            if isinstance(review_threads, list)
-            else list(review_threads)
+            review_threads if isinstance(review_threads, list) else list(review_threads)
         ),
         thread_info_cache=(
-            cast(dict[int, ReviewThreadInfo], thread_info_cache)
+            thread_info_cache
             if isinstance(thread_info_cache, dict)
             else dict(thread_info_cache)
         ),
         thread_cache=(
-            cast(dict[int, ReviewThread], thread_cache)
-            if isinstance(thread_cache, dict)
-            else dict(thread_cache)
+            thread_cache if isinstance(thread_cache, dict) else dict(thread_cache)
         ),
     )
 
@@ -351,6 +437,12 @@ def _thread_cache(review_threads: Sequence[ReviewThread]) -> dict[int, ReviewThr
         for thread in review_threads
         if thread.root_comment_id
     }
+
+
+def _same_review_comment(first: PRComment, second: PRComment) -> bool:
+    if first.node_id and second.node_id:
+        return first.node_id == second.node_id
+    return bool(first.id and first.id == second.id)
 
 
 def _comment_with_review_id(comment: PRComment, review_id: int) -> PRComment:
