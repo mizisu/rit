@@ -7,13 +7,9 @@ from collections.abc import Callable
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 
 __all__ = (
-    "FOLDED_VIEWED_FILE_MESSAGE",
     "build_viewed_file_fold_diff",
     "is_folded_placeholder_line",
 )
-
-
-FOLDED_VIEWED_FILE_MESSAGE = "Viewed file collapsed — press Enter to expand"
 
 
 def build_viewed_file_fold_diff(
@@ -73,10 +69,7 @@ def build_viewed_file_fold_diff(
 
 def is_folded_placeholder_line(line: DiffLine) -> bool:
     """Return whether a line is the synthetic folded-file placeholder."""
-    return line.syntax_highlighting_disabled and (
-        line.new_content == FOLDED_VIEWED_FILE_MESSAGE
-        or line.old_content == FOLDED_VIEWED_FILE_MESSAGE
-    )
+    return line.is_folded_file_placeholder
 
 
 def _collapsed_file_hunk(
@@ -107,17 +100,15 @@ def _collapsed_placeholder_line(source: DiffHunk, filename: str) -> DiffLine:
         return DiffLine(
             old_line_no=None,
             new_line_no=max(1, source.new_start),
-            old_content="",
-            new_content=FOLDED_VIEWED_FILE_MESSAGE,
             file_path=filename,
             syntax_highlighting_disabled=True,
+            is_folded_file_placeholder=True,
         )
 
     return DiffLine(
         old_line_no=max(1, source.old_start),
         new_line_no=None,
-        old_content=FOLDED_VIEWED_FILE_MESSAGE,
-        new_content="",
         file_path=filename,
         syntax_highlighting_disabled=True,
+        is_folded_file_placeholder=True,
     )

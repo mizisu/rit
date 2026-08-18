@@ -9,6 +9,7 @@ from typing import Literal
 from rich.cells import cell_len
 
 from rit.core.types import DiffLine, FileDiff
+from rit.ui.widgets.diff_layout import MIN_LINE_NUMBER_WIDTH
 from rit.ui.widgets.diff_types import RenderedRow
 
 __all__ = (
@@ -151,9 +152,7 @@ def _append_rendered_rows_for_line(
     split: bool | None,
 ) -> None:
     shared_kind = (
-        _row_kind_for_line(line)
-        if not line.is_modified or split is not False
-        else None
+        _row_kind_for_line(line) if not line.is_modified or split is not False else None
     )
     if split is not True and line.is_modified:
         old_row = RenderedRow(
@@ -327,8 +326,7 @@ def build_diff_plan(
         all_lines=all_lines,
         file_paths=frozenset(file_paths),
         file_change_stats={
-            path: (counts[0], counts[1])
-            for path, counts in file_change_counts.items()
+            path: (counts[0], counts[1]) for path, counts in file_change_counts.items()
         },
         line_index_by_new_number=line_index_by_new_number,
         line_index_by_old_number=line_index_by_old_number,
@@ -365,4 +363,6 @@ def _line_code_width(text: str) -> int:
 
 
 def _line_number_width(max_line_no: int | None) -> int:
-    return max(1, len(str(max_line_no))) if max_line_no is not None else 1
+    if max_line_no is None:
+        return MIN_LINE_NUMBER_WIDTH
+    return max(MIN_LINE_NUMBER_WIDTH, len(str(max_line_no)))

@@ -3,6 +3,7 @@
 import threading
 from pathlib import Path
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 from textual.app import App, ComposeResult
@@ -43,7 +44,7 @@ def test_cycle_diff_mode_uses_shared_mode_label_mapping(
     view.action_cycle_diff_mode()
 
     assert view.mode == "split"
-    assert getattr(messages[0], "content") == "Diff mode: Split from map"
+    assert messages[0].content == "Diff mode: Split from map"
 
 
 def test_change_background_styles_remain_subtle() -> None:
@@ -274,7 +275,6 @@ async def test_virtualized_diff_uses_windowed_highlight_path(
 
     def counted_full(*args, **kwargs):
         full_calls["count"] += 1
-        return None
 
     monkeypatch.setattr(
         diff_view_module, "highlight_lines_for_diff_range", counted_range
@@ -328,7 +328,6 @@ async def test_medium_block_diff_uses_windowed_highlight_path(
 
     def counted_full(*args, **kwargs):
         full_calls["count"] += 1
-        return None
 
     monkeypatch.setattr(
         diff_view_module, "highlight_lines_for_diff_range", counted_range
@@ -384,6 +383,36 @@ async def test_hunk_jump_places_target_near_top_of_viewport() -> None:
 
 
 @pytest.mark.asyncio
+async def test_app_static_style_keeps_only_cursor_line_number_bright() -> None:
+    class TestApp(App):
+        CSS_PATH: ClassVar[Path] = Path(__file__).parents[1] / "src/rit/rit.tcss"
+
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff = parse_patch("@@ -1,2 +1,2 @@\n line1\n line2", "test.py")
+
+        await diff_view.show_diff("test.py", diff)
+        await pilot.pause()
+        diff_view.focus()
+        await pilot.pause()
+
+        first_prefix = diff_view.query_one("#line-0 .line-prefix", Static)
+        second_prefix = diff_view.query_one("#line-1 .line-prefix", Static)
+        dim_color = second_prefix.styles.color
+        assert first_prefix.styles.color != dim_color
+
+        await pilot.press("j")
+        await pilot.pause()
+
+        assert first_prefix.styles.color == dim_color
+        assert second_prefix.styles.color != dim_color
+
+
+@pytest.mark.asyncio
 async def test_unified_modified_line_navigation_uses_rendered_rows() -> None:
     """Unified mode should stop on old/new rows of a modified line separately."""
 
@@ -407,14 +436,22 @@ async def test_unified_modified_line_navigation_uses_rendered_rows() -> None:
         diff_view.focus()
         await pilot.pause()
 
+        first_prefix = diff_view.query_one("#line-0 .line-prefix", Static)
+        assert first_prefix.has_class("-cursor")
+
         await pilot.press("j")
         await pilot.pause()
 
+        old_prefix = diff_view.query_one("#line-1-old .line-prefix", Static)
+        new_prefix = diff_view.query_one("#line-1-new .line-prefix", Static)
         old_code = diff_view.query_one("#line-1-old .code-content", Static)
         new_code = diff_view.query_one("#line-1-new .code-content", Static)
         assert diff_view.cursor_line == 1
         assert diff_view.cursor_pane == "old"
         assert diff_view.active_pane == "new"
+        assert not first_prefix.has_class("-cursor")
+        assert old_prefix.has_class("-cursor")
+        assert not new_prefix.has_class("-cursor")
         assert old_code.has_class("-cursor")
         assert not new_code.has_class("-cursor")
 
@@ -424,13 +461,89 @@ async def test_unified_modified_line_navigation_uses_rendered_rows() -> None:
         assert diff_view.cursor_line == 1
         assert diff_view.cursor_pane == "new"
         assert diff_view.active_pane == "new"
+        assert not old_prefix.has_class("-cursor")
+        assert new_prefix.has_class("-cursor")
         assert not old_code.has_class("-cursor")
         assert new_code.has_class("-cursor")
 
         await pilot.press("j")
         await pilot.pause()
 
+        last_prefix = diff_view.query_one("#line-2 .line-prefix", Static)
         assert diff_view.cursor_line == 2
+        assert not new_prefix.has_class("-cursor")
+        assert last_prefix.has_class("-cursor")
+
+
+@pytest.mark.asyncio
+async def test_grouped_unified_line_numbers_follow_the_cursor_row() -> None:
+    patch = """@@ -1,3 +1,3 @@
+ line1
+-old content here
++new content here
+ line3"""
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff_view.BLOCK_RENDER_LINE_THRESHOLD = 1
+        await diff_view.show_diff("test.py", parse_patch(patch, "test.py"))
+        await pilot.pause()
+        diff_view.focus()
+
+        block = diff_view._unified_blocks_by_line[0]
+        assert block._annotations._active_rows == {0}
+
+        await pilot.press("j")
+        await pilot.pause()
+
+        modified_start, modified_end = block._row_ranges_by_line[1]
+        assert block._annotations._active_rows == {modified_start}
+
+        await pilot.press("j")
+        await pilot.pause()
+
+        assert block._annotations._active_rows == {modified_end - 1}
+
+
+@pytest.mark.asyncio
+async def test_grouped_split_line_numbers_follow_the_active_pane() -> None:
+    patch = """@@ -1,3 +1,3 @@
+ line1
+ line2
+ line3"""
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="split", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff_view.BLOCK_RENDER_LINE_THRESHOLD = 1
+        await diff_view.show_diff("test.py", parse_patch(patch, "test.py"))
+        await pilot.pause()
+        diff_view.focus()
+
+        block = diff_view._split_blocks_by_line[0]
+        assert block._left_annotations._active_rows == set()
+        assert block._right_annotations._active_rows == {0}
+
+        diff_view.action_cycle_active_pane()
+        await pilot.pause()
+
+        assert block._left_annotations._active_rows == {0}
+        assert block._right_annotations._active_rows == set()
+
+        await pilot.press("j")
+        await pilot.pause()
+
+        assert block._left_annotations._active_rows == {1}
+        assert block._right_annotations._active_rows == set()
 
 
 @pytest.mark.asyncio

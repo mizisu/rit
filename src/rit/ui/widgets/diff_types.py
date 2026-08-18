@@ -5,7 +5,7 @@ from __future__ import annotations
 import builtins
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from textual.widgets import Static
@@ -25,8 +25,8 @@ from rit.ui.widgets.diff_visual import (
 _TUPLE_TYPE = builtins.tuple
 
 __all__ = (
-    "CursorUIState",
     "DEFAULT_DIFF_LAYOUT",
+    "CursorUIState",
     "DiffLayout",
     "DiffSearchMatch",
     "HighlightState",
@@ -79,7 +79,7 @@ DEFAULT_DIFF_LAYOUT = DiffLayout()
 
 def _line_indices_tuple(line_indices: Iterable[int]) -> tuple[int, ...]:
     if isinstance(line_indices, _TUPLE_TYPE):
-        return cast(_TUPLE_TYPE[int, ...], line_indices)
+        return line_indices
     return _TUPLE_TYPE(line_indices)
 
 
@@ -136,6 +136,10 @@ class UnifiedDiffBlock(Horizontal):
                 )
             )
         return self._code.update_rows(code_updates)
+
+    def set_active_annotation_rows(self, rows: Iterable[int]) -> None:
+        """Highlight active line-number rows."""
+        self._annotations.set_active_rows(rows)
 
 
 class SplitDiffBlock(Horizontal):
@@ -216,9 +220,12 @@ class SplitDiffBlock(Horizontal):
         """Update source rows whose split block structure is unchanged."""
         left_updates: list[tuple[int, Content | None, str]] = []
         right_updates: list[tuple[int, Content | None, str]] = []
-        for line_index, (left_code, left_style, right_code, right_style) in (
-            updates.items()
-        ):
+        for line_index, (
+            left_code,
+            left_style,
+            right_code,
+            right_style,
+        ) in updates.items():
             row = self._rows_by_line.get(line_index)
             if row is None:
                 return False
@@ -227,6 +234,16 @@ class SplitDiffBlock(Horizontal):
         if not self._left_code.update_rows(left_updates):
             return False
         return self._right_code.update_rows(right_updates)
+
+    def set_active_annotation_rows(
+        self,
+        *,
+        left: Iterable[int],
+        right: Iterable[int],
+    ) -> None:
+        """Highlight active line-number rows for both panes."""
+        self._left_annotations.set_active_rows(left)
+        self._right_annotations.set_active_rows(right)
 
 
 @dataclass(frozen=True)

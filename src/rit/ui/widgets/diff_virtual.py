@@ -8,9 +8,11 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING, overload
 
 from textual.containers import VerticalScroll
+from textual.widget import Widget
 from textual.widgets import Static
 
 from rit.ui.widgets import diff_blocks as _blocks
+from rit.ui.widgets import diff_folding as _folding
 from rit.ui.widgets import diff_geometry as _geometry
 
 if TYPE_CHECKING:
@@ -26,7 +28,7 @@ _RENDER_REQUEST_CONTEXT: ContextVar[int | None] = ContextVar(
 
 
 class _VirtualLineWindow(Sequence["DiffLine"]):
-    def __init__(self, lines: Sequence["DiffLine"], start: int, stop: int) -> None:
+    def __init__(self, lines: Sequence[DiffLine], start: int, stop: int) -> None:
         self._lines = lines
         self._start = start
         self._stop = stop
@@ -34,17 +36,17 @@ class _VirtualLineWindow(Sequence["DiffLine"]):
     def __len__(self) -> int:
         return max(0, self._stop - self._start)
 
-    def __iter__(self) -> Iterator["DiffLine"]:
+    def __iter__(self) -> Iterator[DiffLine]:
         for index in range(self._start, self._stop):
             yield self._lines[index]
 
     @overload
-    def __getitem__(self, index: int) -> "DiffLine": ...
+    def __getitem__(self, index: int) -> DiffLine: ...
 
     @overload
-    def __getitem__(self, index: slice) -> list["DiffLine"]: ...
+    def __getitem__(self, index: slice) -> list[DiffLine]: ...
 
-    def __getitem__(self, index: int | slice) -> "DiffLine" | list["DiffLine"]:
+    def __getitem__(self, index: int | slice) -> DiffLine | list[DiffLine]:
         if isinstance(index, slice):
             return [self[line_index] for line_index in range(*index.indices(len(self)))]
         if index < 0:
@@ -94,6 +96,7 @@ def _rebuild_virtual_layout(view) -> None:
         split=view.split,
         line_count=len(view._all_lines),
         extra_heights_by_line=_extra_heights_by_line(view),
+        extra_heights_by_hunk=_extra_heights_by_hunk(view),
         inline_editor_line_index=getattr(
             view, "_inline_comment_editor_line_index", None
         ),
@@ -142,6 +145,41 @@ def _extra_heights_by_line(view) -> dict[int, int]:
         )
         extra_heights[line_index] = extra_heights.get(line_index, 0) + height
 
+    return extra_heights
+
+
+def _extra_heights_by_hunk(view) -> dict[int, int]:
+    from rit.ui.widgets.diff_comments import (
+        COLLAPSED_PENDING_DRAFT_HEIGHT,
+        estimate_pending_draft_height,
+        estimate_thread_height,
+        pending_draft_is_collapsed,
+    )
+
+    if view._diff is None:
+        return {}
+
+    draft_map = getattr(view, "_pending_file_comment_drafts_by_path", {})
+    thread_map = getattr(view, "_file_comment_threads_by_path", {})
+    extra_heights: dict[int, int] = {}
+    for hunk_index, hunk in enumerate(view._diff.hunks):
+        if not hunk.starts_file:
+            continue
+        path = view._file_path_for_hunk(hunk_index)
+        if path is None:
+            continue
+
+        height = 0
+        for draft in draft_map.get(path, ()):
+            height += (
+                COLLAPSED_PENDING_DRAFT_HEIGHT
+                if pending_draft_is_collapsed(view, draft)
+                else estimate_pending_draft_height(draft)
+            )
+        for thread in thread_map.get(path, ()):
+            height += estimate_thread_height(thread)
+        if height:
+            extra_heights[hunk_index] = height
     return extra_heights
 
 
@@ -387,10 +425,54 @@ async def _remove_virtualized_lines(
     return _geometry.merge_line_ranges(repair_ranges, already_sorted=True)
 
 
+async def _remove_mounted_file_comment_editor(view, hunk_index: int) -> None:
+    if view._file_comment_editor_mounted_hunk_index != hunk_index:
+        return
+    editor = view._file_comment_editor_widget
+    if editor is not None:
+        await editor.remove()
+    view._file_comment_editor_widget = None
+    view._file_comment_editor_mounted_hunk_index = None
+
+
+async def _remove_mounted_file_comment_annotations(view, hunk_index: int) -> None:
+    widgets = view._file_comment_annotation_widgets_by_hunk.pop(hunk_index, ())
+    view._pending_file_comment_widgets_by_hunk.pop(hunk_index, None)
+    view._file_comment_widgets_by_hunk.pop(hunk_index, None)
+    for widget in widgets:
+        await widget.remove()
+
+
+async def _clear_virtual_file_headers(view) -> None:
+    while view._file_header_widgets:
+        hunk_index, header_widget = view._file_header_widgets.popitem()
+        await header_widget.remove()
+        await _remove_mounted_file_comment_annotations(view, hunk_index)
+        await _remove_mounted_file_comment_editor(view, hunk_index)
+
+
 async def _clear_virtual_hunk_headers(view) -> None:
     while view._hunk_header_widgets:
         _, header_widget = view._hunk_header_widgets.popitem()
         await header_widget.remove()
+
+
+async def _remove_stale_virtual_file_headers(
+    view,
+    window_start: int,
+    window_end: int,
+) -> None:
+    stale_headers = []
+    for hunk_index, header_widget in view._file_header_widgets.items():
+        if view._should_render_hunk_header(hunk_index, window_start, window_end):
+            continue
+        stale_headers.append((hunk_index, header_widget))
+
+    for hunk_index, header_widget in stale_headers:
+        await header_widget.remove()
+        view._file_header_widgets.pop(hunk_index, None)
+        await _remove_mounted_file_comment_annotations(view, hunk_index)
+        await _remove_mounted_file_comment_editor(view, hunk_index)
 
 
 async def _remove_stale_virtual_hunk_headers(
@@ -407,6 +489,105 @@ async def _remove_stale_virtual_hunk_headers(
     for hunk_index, header_widget in stale_headers:
         await header_widget.remove()
         view._hunk_header_widgets.pop(hunk_index, None)
+
+
+def _virtual_hunk_anchor(
+    view,
+    hunk_index: int,
+    window_start: int,
+    window_end: int,
+) -> Widget | None:
+    _, target_start, _ = view._hunk_line_ranges[hunk_index]
+    visible_hunks = _visible_hunk_index_range(
+        view,
+        max(window_start, target_start),
+        window_end,
+    )
+    for candidate_index in visible_hunks:
+        if candidate_index < hunk_index:
+            continue
+        if candidate_index != hunk_index:
+            file_header = view._get_file_header_widget(candidate_index)
+            if file_header is not None:
+                return file_header
+        hunk_header = view._get_hunk_header_widget(candidate_index)
+        if hunk_header is not None:
+            return hunk_header
+
+        _, candidate_start, candidate_end = view._hunk_line_ranges[candidate_index]
+        line_start = max(window_start, candidate_start)
+        line_end = min(window_end, candidate_end)
+        for line_index in range(line_start, line_end + 1):
+            anchor = view._line_widgets_by_index.get(line_index)
+            if anchor is not None:
+                return anchor
+
+    bottom_buffer = view._virt.bottom_buffer
+    if bottom_buffer is not None:
+        return bottom_buffer
+    return None
+
+
+def _mount_before_or_at_end(
+    container: VerticalScroll,
+    widget: Widget,
+    *,
+    anchor: Widget | None,
+) -> None:
+    if anchor is None:
+        container.mount(widget)
+    else:
+        container.mount(widget, before=anchor)
+
+
+async def _sync_visible_virtual_file_headers(
+    view,
+    container: VerticalScroll,
+    window_start: int,
+    window_end: int,
+) -> None:
+    from rit.ui.widgets import diff_comments as _comments
+
+    if view._diff is None:
+        return
+
+    for hunk_index in _visible_hunk_index_range(view, window_start, window_end):
+        if not (0 <= hunk_index < len(view._diff.hunks)):
+            continue
+        hunk = view._diff.hunks[hunk_index]
+        if not hunk.starts_file:
+            continue
+        if not view._should_render_hunk_header(hunk_index, window_start, window_end):
+            continue
+        if view._get_file_header_widget(hunk_index) is not None:
+            continue
+
+        anchor = _virtual_hunk_anchor(
+            view,
+            hunk_index,
+            window_start,
+            window_end,
+        )
+        render_split = view.split and not view._should_force_unified_for_hunk(hunk)
+        header_widget = view._create_file_header_widget(
+            hunk_index=hunk_index,
+            hunk=hunk,
+            split=render_split,
+        )
+        _mount_before_or_at_end(container, header_widget, anchor=anchor)
+        view._register_file_header_widget(hunk_index, header_widget)
+        _comments.mount_file_comments_for_hunk(
+            view,
+            container,
+            hunk_index,
+            split=render_split,
+            before=anchor,
+        )
+        view._mount_file_comment_editor(
+            container,
+            hunk_index,
+            before=anchor,
+        )
 
 
 async def _sync_visible_virtual_hunk_headers(
@@ -429,6 +610,8 @@ async def _sync_visible_virtual_hunk_headers(
             continue
 
         hunk = view._diff.hunks[hunk_index]
+        if len(hunk.lines) == 1 and _folding.is_folded_placeholder_line(hunk.lines[0]):
+            continue
         hunk_header = (
             f"@@ -{hunk.old_start},{hunk.old_count} "
             f"+{hunk.new_start},{hunk.new_count} @@"
@@ -440,14 +623,13 @@ async def _sync_visible_virtual_hunk_headers(
             hunk_index=hunk_index,
             hunk_header=hunk_header,
         )
-        _, hunk_start, _ = view._hunk_line_ranges[hunk_index]
-        anchor = view._get_line_container(hunk_start)
-        if anchor is not None:
-            container.mount(header_widget, before=anchor)
-        elif view._virt.bottom_buffer is not None:
-            container.mount(header_widget, before=view._virt.bottom_buffer)
-        else:
-            container.mount(header_widget)
+        anchor = _virtual_hunk_anchor(
+            view,
+            hunk_index,
+            window_start,
+            window_end,
+        )
+        _mount_before_or_at_end(container, header_widget, anchor=anchor)
         view._register_hunk_header_widget(hunk_index, header_widget)
 
 
@@ -503,7 +685,7 @@ def _iter_virtualized_line_groups(
     view,
     start: int,
     end: int,
-) -> Iterator[Sequence["DiffLine"]]:
+) -> Iterator[Sequence[DiffLine]]:
     if view._diff is None or start > end or not view._all_lines:
         return
 
@@ -617,11 +799,10 @@ async def _try_shift_virtual_window_incremental(view) -> bool:
 
     content = view.query_one("#diff-content", VerticalScroll)
 
-    if grouped_blocks_active:
-        # For large jumps, clearing and rendering the new window is cheaper than
-        # individually removing every old block/header.
-        if new_start > old_end + 1 or new_end < old_start - 1:
-            return False
+    # For large jumps, clearing and rendering the new window is cheaper than
+    # individually removing every old block/header.
+    if grouped_blocks_active and (new_start > old_end + 1 or new_end < old_start - 1):
+        return False
 
     # Downward shift (append bottom, drop top)
     if new_start >= old_start and new_end >= old_end:
@@ -641,6 +822,7 @@ async def _try_shift_virtual_window_incremental(view) -> bool:
             preserve_end=preserve_end if grouped_blocks_active else None,
         )
 
+        await _remove_stale_virtual_file_headers(view, new_start, new_end)
         await _remove_stale_virtual_hunk_headers(view, new_start, new_end)
 
         if grouped_blocks_active and repair_ranges:
@@ -649,6 +831,7 @@ async def _try_shift_virtual_window_incremental(view) -> bool:
         added_start = max(old_end + 1, new_start)
         added_end = new_end
         _mount_virtualized_lines_at_bottom(view, content, added_start, added_end)
+        await _sync_visible_virtual_file_headers(view, content, new_start, new_end)
         await _sync_visible_virtual_hunk_headers(view, content, new_start, new_end)
 
         await _sync_virtual_buffers(view, content, new_start, new_end)
@@ -676,6 +859,7 @@ async def _try_shift_virtual_window_incremental(view) -> bool:
             preserve_end=preserve_end if grouped_blocks_active else None,
         )
 
+        await _remove_stale_virtual_file_headers(view, new_start, new_end)
         await _remove_stale_virtual_hunk_headers(view, new_start, new_end)
 
         added_start = new_start
@@ -683,6 +867,7 @@ async def _try_shift_virtual_window_incremental(view) -> bool:
         _mount_virtualized_lines_at_top(view, content, added_start, added_end)
         if grouped_blocks_active and repair_ranges:
             _mount_virtualized_ranges_at_bottom(view, content, repair_ranges)
+        await _sync_visible_virtual_file_headers(view, content, new_start, new_end)
         await _sync_visible_virtual_hunk_headers(view, content, new_start, new_end)
 
         await _sync_virtual_buffers(view, content, new_start, new_end)

@@ -13,6 +13,7 @@ from textual.message import Message
 from textual.reactive import var
 from textual.widgets import Rule, Static
 
+from rit.state.models import PRComment
 from rit.state.reviewer_status import ReviewerDisplayState, derive_reviewer_states
 from rit.state.store import PRStore
 from rit.ui.components.pr_timeline import PRTimeline
@@ -378,6 +379,10 @@ class PRInfo(Container):
 
     def get_current_thread_info(self) -> tuple[str, int, bool] | None:
         return self._timeline_widget().get_current_thread_info()
+
+    def current_review_comment(self) -> PRComment | None:
+        """Return the individually selected review comment."""
+        return self._timeline_widget().current_review_comment()
 
     def get_current_thread_location(
         self,

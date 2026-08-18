@@ -28,6 +28,7 @@ from rit.state.pending_review_visibility import (
 )
 from rit.ui.icons import get_file_icon
 from rit.ui.messages import Flash
+from rit.ui.widgets import diff_layout as _layout
 from rit.ui.widgets.comment_card import CommentCard
 from rit.ui.widgets.review_thread_card import ReviewThreadItem
 
@@ -41,7 +42,11 @@ __all__ = (
     "COMMENT_HEIGHT_ESTIMATE",
     "PENDING_DRAFT_HEIGHT_ESTIMATE",
     "active_comment_widget",
+    "active_file_comment_widget",
+    "active_file_pending_draft",
+    "active_file_review_comment",
     "active_pending_draft",
+    "active_review_comment",
     "active_thread",
     "build_comment_map",
     "clear_state",
@@ -49,15 +54,18 @@ __all__ = (
     "estimate_pending_draft_height",
     "estimate_thread_height",
     "mount_comments_for_line",
+    "mount_file_comments_for_hunk",
     "mount_pending_drafts_for_line",
     "mount_side_aware_widget",
     "next_comment",
     "pending_draft_is_collapsed",
     "prev_comment",
     "toggle_resolve",
+    "total_comments_at_file_header",
     "total_comments_at_line",
     "try_toggle_current",
     "update_cursor_highlight",
+    "update_file_comment_cursor_highlight",
 )
 
 
@@ -65,10 +73,10 @@ __all__ = (
 # Height estimation for virtual layout
 # ---------------------------------------------------------------------------
 
-COLLAPSED_PENDING_DRAFT_HEIGHT = 5
+COLLAPSED_PENDING_DRAFT_HEIGHT = 1
 COLLAPSED_THREAD_HEIGHT = 1
 COMMENT_HEIGHT_ESTIMATE = 3  # header + ~2 body lines
-PENDING_DRAFT_HEIGHT_ESTIMATE = 4
+PENDING_DRAFT_HEIGHT_ESTIMATE = 5
 INLINE_COMMENT_MAX_WIDTH = 96
 
 
@@ -95,6 +103,8 @@ def clear_state(view: DiffView) -> None:
     view._pending_comment_drafts_by_line.clear()
     view._pending_comment_widgets_by_line.clear()
     view._pending_comment_layout_widgets_by_line.clear()
+    view._pending_file_comment_drafts_by_path = {}
+    view._file_comment_threads_by_path = {}
 
 
 def build_comment_map(view: DiffView) -> None:
@@ -109,6 +119,11 @@ def build_comment_map(view: DiffView) -> None:
         return
 
     for draft in _pending_comments_for_current_diff(view, file_paths):
+        if draft.is_file_level:
+            view._pending_file_comment_drafts_by_path.setdefault(draft.path, []).append(
+                draft
+            )
+            continue
         line_index = _resolve_pending_line_index(view, draft)
         if line_index is not None:
             view._pending_comment_drafts_by_line.setdefault(line_index, []).append(
@@ -168,7 +183,10 @@ def refresh_thread_metadata(view: DiffView) -> None:
 
 def _add_thread_to_comment_map(view: DiffView, thread: ReviewThread) -> None:
     root = thread.root_comment
-    if root is None or thread.subject_type.upper() == "FILE":
+    if root is None:
+        return
+    if _thread_is_file_level(thread):
+        view._file_comment_threads_by_path.setdefault(thread.path, []).append(thread)
         return
 
     line_index = _resolve_line_index(view, root, thread=thread)
@@ -178,9 +196,7 @@ def _add_thread_to_comment_map(view: DiffView, thread: ReviewThread) -> None:
     view._comment_threads_by_line.setdefault(line_index, []).append(thread)
     existing_side = view._comment_side_by_line.get(line_index)
     root_side = _comment_target_side(root, thread=thread)
-    if existing_side is None:
-        view._comment_side_by_line[line_index] = root_side
-    elif existing_side == "auto":
+    if existing_side is None or existing_side == "auto":
         view._comment_side_by_line[line_index] = root_side
     elif root_side != "auto" and existing_side != root_side:
         view._comment_side_by_line[line_index] = "auto"
@@ -617,6 +633,78 @@ def mount_side_aware_widget(
     return layout_widget
 
 
+def mount_file_comments_for_hunk(
+    view: DiffView,
+    container: VerticalScroll,
+    hunk_index: int,
+    *,
+    split: bool | None = None,
+    before: Widget | None = None,
+) -> None:
+    if hunk_index in view._file_comment_annotation_widgets_by_hunk:
+        return
+
+    path = view._file_path_for_hunk(hunk_index)
+    if path is None:
+        return
+
+    line_index = None
+    if view._diff is not None and 0 <= hunk_index < len(view._diff.hunks):
+        lines = view._diff.hunks[hunk_index].lines
+        if lines:
+            line_index = lines[0].line_index
+
+    pending_widgets: list[Widget] = []
+    comment_widgets: list[Widget] = []
+    layout_widgets: list[Widget] = []
+    previous_split = view._comment_layout_split_override
+    if split is not None:
+        view._comment_layout_split_override = split
+    try:
+        for index, draft in enumerate(
+            view._pending_file_comment_drafts_by_path.get(path, ())
+        ):
+            widget, item = _build_pending_draft_item(
+                draft,
+                line_index=line_index or 0,
+                index=index,
+                view=view,
+                widget_id=f"pending-file-draft-{hunk_index}-{index}",
+            )
+            layout_widget = mount_side_aware_widget(
+                view,
+                container,
+                item,
+                side="new",
+                line_index=line_index,
+                before=before,
+            )
+            pending_widgets.append(widget)
+            layout_widgets.append(layout_widget)
+
+        for thread in view._file_comment_threads_by_path.get(path, ()):
+            item = _build_inline_thread_widget(thread)
+            layout_widget = mount_side_aware_widget(
+                view,
+                container,
+                item,
+                side="new",
+                line_index=line_index,
+                before=before,
+            )
+            comment_widgets.append(item)
+            layout_widgets.append(layout_widget)
+    finally:
+        view._comment_layout_split_override = previous_split
+
+    if pending_widgets:
+        view._pending_file_comment_widgets_by_hunk[hunk_index] = pending_widgets
+    if comment_widgets:
+        view._file_comment_widgets_by_hunk[hunk_index] = comment_widgets
+    if layout_widgets:
+        view._file_comment_annotation_widgets_by_hunk[hunk_index] = layout_widgets
+
+
 def mount_pending_drafts_for_line(
     view: DiffView,
     container: VerticalScroll,
@@ -640,7 +728,7 @@ def mount_pending_drafts_for_line(
     mounted: list[Widget] = []
     layout_widgets: list[Widget] = []
     for index, draft in enumerate(drafts):
-        widget = _build_pending_draft_widget(
+        widget, item = _build_pending_draft_item(
             draft,
             line_index=line_index,
             index=index,
@@ -649,7 +737,7 @@ def mount_pending_drafts_for_line(
         layout_widget = mount_side_aware_widget(
             view,
             container,
-            widget,
+            item,
             side=draft.anchor_side,
             line_index=line_index,
             before=mount_before,
@@ -775,14 +863,15 @@ def _split_prefix_width_for_layout(
     view: DiffView,
     side: Literal["old", "new"],
 ) -> int:
-    if not view.show_line_numbers:
-        return 2
     line_width = (
         view._old_line_number_width()
         if side == "old"
         else view._new_line_number_width()
     )
-    return line_width + 2
+    return _layout.split_prefix_width_for_layout(
+        show_line_numbers=view.show_line_numbers,
+        line_number_width=line_width,
+    )
 
 
 def _spacer(width: int, classes: str) -> Static:
@@ -818,16 +907,35 @@ def _iter_comment_widgets_in_order(view: DiffView, line_index: int) -> Iterator[
         yield from pending_widgets
 
     comment_widgets = view._comment_widgets_by_line.get(line_index)
-    if comment_widgets is not None:
-        yield from comment_widgets
+    if comment_widgets is None:
+        return
+    for widget in comment_widgets:
+        yield widget
+        if not isinstance(widget, ReviewThreadItem):
+            continue
+        for index in range(widget.comment_count):
+            card = widget.comment_card_at(index)
+            if card is not None:
+                yield card
+
+
+def _thread_entry_count(widget: Widget) -> int:
+    if not isinstance(widget, ReviewThreadItem):
+        return 1
+    if widget.collapsed or widget.comment_count == 0:
+        return 1
+    return widget.comment_count
 
 
 def total_comments_at_line(view: DiffView, line_index: int) -> int:
     pending_widgets = view._pending_comment_widgets_by_line.get(line_index)
     comment_widgets = view._comment_widgets_by_line.get(line_index)
     pending_count = len(pending_widgets) if pending_widgets is not None else 0
-    comment_count = len(comment_widgets) if comment_widgets is not None else 0
-    return pending_count + comment_count
+    if comment_widgets is None:
+        return pending_count
+    return pending_count + sum(
+        _thread_entry_count(widget) for widget in comment_widgets
+    )
 
 
 def active_comment_widget(view: DiffView, line_index: int) -> Widget | None:
@@ -842,13 +950,25 @@ def active_comment_widget(view: DiffView, line_index: int) -> Widget | None:
         return pending_widgets[index - 1]
 
     thread_widgets = view._comment_widgets_by_line.get(line_index)
-    thread_index = index - pending_count - 1
-    if thread_widgets is not None and 0 <= thread_index < len(thread_widgets):
-        return thread_widgets[thread_index]
+    if thread_widgets is None:
+        return None
+    submitted_index = index - pending_count - 1
+    for thread_index in range(len(thread_widgets)):
+        widget = thread_widgets[thread_index]
+        entry_count = _thread_entry_count(widget)
+        if submitted_index >= entry_count:
+            submitted_index -= entry_count
+            continue
+        if not isinstance(widget, ReviewThreadItem) or widget.collapsed:
+            return widget
+        return widget.comment_card_at(submitted_index) or widget
     return None
 
 
-def active_thread(view: DiffView, line_index: int) -> ReviewThread | None:
+def _active_thread_position(
+    view: DiffView,
+    line_index: int,
+) -> tuple[int, int | None, int] | None:
     index = view._comment_cursor_index
     if index <= 0:
         return None
@@ -857,10 +977,64 @@ def active_thread(view: DiffView, line_index: int) -> ReviewThread | None:
     if threads is None:
         return None
     draft_count = len(drafts) if drafts is not None else 0
-    thread_index = index - 1 - draft_count
-    if 0 <= thread_index < len(threads):
-        return threads[thread_index]
+    submitted_index = index - draft_count - 1
+    if submitted_index < 0:
+        return None
+
+    thread_widgets = view._comment_widgets_by_line.get(line_index)
+    entry_start = 0
+    for thread_index, _thread in enumerate(threads):
+        widget = (
+            thread_widgets[thread_index]
+            if thread_widgets is not None and thread_index < len(thread_widgets)
+            else None
+        )
+        entry_count = _thread_entry_count(widget) if widget is not None else 1
+        if submitted_index < entry_count:
+            comment_index = (
+                submitted_index
+                if isinstance(widget, ReviewThreadItem) and not widget.collapsed
+                else None
+            )
+            return thread_index, comment_index, entry_start
+        submitted_index -= entry_count
+        entry_start += entry_count
     return None
+
+
+def active_thread(view: DiffView, line_index: int) -> ReviewThread | None:
+    position = _active_thread_position(view, line_index)
+    if position is None:
+        return None
+    thread_index, _, _ = position
+    threads = view._comment_threads_by_line.get(line_index)
+    if threads is None or thread_index >= len(threads):
+        return None
+    return threads[thread_index]
+
+
+def active_review_comment(view: DiffView, line_index: int) -> PRComment | None:
+    """Return the individually selected submitted review comment."""
+    position = _active_thread_position(view, line_index)
+    if position is None:
+        return None
+    thread_index, comment_index, _ = position
+    if comment_index is None:
+        return None
+
+    thread_widgets = view._comment_widgets_by_line.get(line_index)
+    if thread_widgets is not None and thread_index < len(thread_widgets):
+        widget = thread_widgets[thread_index]
+        if isinstance(widget, ReviewThreadItem):
+            return widget.comment_at(comment_index)
+
+    threads = view._comment_threads_by_line.get(line_index)
+    if threads is None or thread_index >= len(threads):
+        return None
+    comments = threads[thread_index].comments
+    if not 0 <= comment_index < len(comments):
+        return None
+    return comments[comment_index]
 
 
 def active_pending_draft(
@@ -877,9 +1051,170 @@ def active_pending_draft(
     return None
 
 
+def _file_comment_path(view: DiffView, hunk_index: int) -> str | None:
+    return view._file_path_for_hunk(hunk_index)
+
+
+def total_comments_at_file_header(view: DiffView, hunk_index: int) -> int:
+    pending_widgets = view._pending_file_comment_widgets_by_hunk.get(hunk_index)
+    comment_widgets = view._file_comment_widgets_by_hunk.get(hunk_index)
+    pending_count = len(pending_widgets) if pending_widgets is not None else 0
+    if comment_widgets is None:
+        return pending_count
+    return pending_count + sum(
+        _thread_entry_count(widget) for widget in comment_widgets
+    )
+
+
+def active_file_comment_widget(view: DiffView, hunk_index: int) -> Widget | None:
+    index = view._comment_cursor_index
+    if index <= 0:
+        return None
+
+    pending_widgets = view._pending_file_comment_widgets_by_hunk.get(hunk_index)
+    pending_count = len(pending_widgets) if pending_widgets is not None else 0
+    if pending_widgets is not None and index <= pending_count:
+        return pending_widgets[index - 1]
+
+    thread_widgets = view._file_comment_widgets_by_hunk.get(hunk_index)
+    if thread_widgets is None:
+        return None
+    submitted_index = index - pending_count - 1
+    for widget in thread_widgets:
+        entry_count = _thread_entry_count(widget)
+        if submitted_index >= entry_count:
+            submitted_index -= entry_count
+            continue
+        if not isinstance(widget, ReviewThreadItem) or widget.collapsed:
+            return widget
+        return widget.comment_card_at(submitted_index) or widget
+    return None
+
+
+def active_file_pending_draft(
+    view: DiffView,
+    hunk_index: int,
+) -> PendingReviewComment | None:
+    index = view._comment_cursor_index
+    path = _file_comment_path(view, hunk_index)
+    if index <= 0 or path is None:
+        return None
+    drafts = view._pending_file_comment_drafts_by_path.get(path)
+    if drafts is None or index > len(drafts):
+        return None
+    return drafts[index - 1]
+
+
+def _active_file_thread_position(
+    view: DiffView,
+    hunk_index: int,
+) -> tuple[int, int | None, int] | None:
+    index = view._comment_cursor_index
+    path = _file_comment_path(view, hunk_index)
+    if index <= 0 or path is None:
+        return None
+
+    drafts = view._pending_file_comment_drafts_by_path.get(path)
+    threads = view._file_comment_threads_by_path.get(path)
+    if threads is None:
+        return None
+    draft_count = len(drafts) if drafts is not None else 0
+    submitted_index = index - draft_count - 1
+    if submitted_index < 0:
+        return None
+
+    thread_widgets = view._file_comment_widgets_by_hunk.get(hunk_index)
+    entry_start = 0
+    for thread_index, _thread in enumerate(threads):
+        widget = (
+            thread_widgets[thread_index]
+            if thread_widgets is not None and thread_index < len(thread_widgets)
+            else None
+        )
+        entry_count = _thread_entry_count(widget) if widget is not None else 1
+        if submitted_index < entry_count:
+            comment_index = (
+                submitted_index
+                if isinstance(widget, ReviewThreadItem) and not widget.collapsed
+                else None
+            )
+            return thread_index, comment_index, entry_start
+        submitted_index -= entry_count
+        entry_start += entry_count
+    return None
+
+
+def active_file_review_comment(
+    view: DiffView,
+    hunk_index: int,
+) -> PRComment | None:
+    position = _active_file_thread_position(view, hunk_index)
+    if position is None:
+        return None
+    thread_index, comment_index, _ = position
+    if comment_index is None:
+        return None
+
+    thread_widgets = view._file_comment_widgets_by_hunk.get(hunk_index)
+    if thread_widgets is not None and thread_index < len(thread_widgets):
+        widget = thread_widgets[thread_index]
+        if isinstance(widget, ReviewThreadItem):
+            return widget.comment_at(comment_index)
+
+    path = _file_comment_path(view, hunk_index)
+    if path is None:
+        return None
+    threads = view._file_comment_threads_by_path.get(path)
+    if threads is None or thread_index >= len(threads):
+        return None
+    comments = threads[thread_index].comments
+    if not 0 <= comment_index < len(comments):
+        return None
+    return comments[comment_index]
+
+
+def _thread_item_for_widget(widget: Widget) -> ReviewThreadItem | None:
+    if isinstance(widget, ReviewThreadItem):
+        return widget
+    return next(
+        (
+            ancestor
+            for ancestor in widget.ancestors
+            if isinstance(ancestor, ReviewThreadItem)
+        ),
+        None,
+    )
+
+
 def _clear_cursor_line_class(view: DiffView, line_index: int) -> None:
-    for w in _iter_comment_widgets_in_order(view, line_index):
-        w.remove_class("--cursor-line")
+    for widget in _iter_comment_widgets_in_order(view, line_index):
+        widget.remove_class("--cursor-line")
+        thread_item = _thread_item_for_widget(widget)
+        if thread_item is not None:
+            thread_item.remove_class("--cursor-line")
+
+
+def _add_active_cursor_line_class(view: DiffView, line_index: int) -> None:
+    active = active_comment_widget(view, line_index)
+    if active is None:
+        return
+    active.add_class("--cursor-line")
+
+    thread_item = _thread_item_for_widget(active)
+    if thread_item is not None:
+        thread_item.add_class("--cursor-line")
+        return
+
+    position = _active_thread_position(view, line_index)
+    if position is None:
+        return
+    thread_index, _, _ = position
+    thread_widgets = view._comment_widgets_by_line.get(line_index)
+    if thread_widgets is None or thread_index >= len(thread_widgets):
+        return
+    thread_widget = thread_widgets[thread_index]
+    if isinstance(thread_widget, ReviewThreadItem):
+        thread_widget.add_class("--cursor-line")
 
 
 def update_cursor_highlight(view: DiffView, old_line: int, new_line: int) -> None:
@@ -892,27 +1227,160 @@ def update_cursor_highlight(view: DiffView, old_line: int, new_line: int) -> Non
         _clear_cursor_line_class(view, old_line)
     _clear_cursor_line_class(view, new_line)
 
-    active = active_comment_widget(view, new_line)
-    if active is not None:
-        active.add_class("--cursor-line")
+    _add_active_cursor_line_class(view, new_line)
 
 
-def try_toggle_current(view: DiffView) -> bool:
-    """Toggle the currently selected comment (only when one is selected)."""
-    target = active_comment_widget(view, view.cursor_line)
+def _iter_file_comment_widgets_in_order(
+    view: DiffView,
+    hunk_index: int,
+) -> Iterator[Widget]:
+    pending_widgets = view._pending_file_comment_widgets_by_hunk.get(hunk_index)
+    if pending_widgets is not None:
+        yield from pending_widgets
+
+    comment_widgets = view._file_comment_widgets_by_hunk.get(hunk_index)
+    if comment_widgets is None:
+        return
+    for widget in comment_widgets:
+        yield widget
+        if not isinstance(widget, ReviewThreadItem):
+            continue
+        for index in range(widget.comment_count):
+            card = widget.comment_card_at(index)
+            if card is not None:
+                yield card
+
+
+def _clear_file_comment_cursor_highlight(view: DiffView, hunk_index: int) -> None:
+    for widget in _iter_file_comment_widgets_in_order(view, hunk_index):
+        widget.remove_class("--cursor-line")
+        thread_item = _thread_item_for_widget(widget)
+        if thread_item is not None:
+            thread_item.remove_class("--cursor-line")
+
+
+def _add_active_file_comment_cursor_highlight(
+    view: DiffView,
+    hunk_index: int,
+) -> None:
+    active = active_file_comment_widget(view, hunk_index)
+    if active is None:
+        return
+    active.add_class("--cursor-line")
+    thread_item = _thread_item_for_widget(active)
+    if thread_item is not None:
+        thread_item.add_class("--cursor-line")
+
+
+def update_file_comment_cursor_highlight(view: DiffView, hunk_index: int) -> None:
+    """Refresh the selected file-level comment under a file header."""
+    _clear_file_comment_cursor_highlight(view, hunk_index)
+    _add_active_file_comment_cursor_highlight(view, hunk_index)
+
+
+def _try_toggle_file_current(view: DiffView, hunk_index: int) -> bool:
+    target = active_file_comment_widget(view, hunk_index)
     if target is None:
         return False
+
+    draft = active_file_pending_draft(view, hunk_index)
+    if isinstance(target, CommentCard) and draft is not None:
+        thread_item = _thread_item_for_widget(target)
+        if thread_item is None:
+            target.toggle_collapsed()
+            collapsed = target.collapsed
+        else:
+            collapsed = not thread_item.collapsed
+            thread_item.collapsed = collapsed
+            target.set_class(collapsed, "-collapsed")
+        _set_pending_draft_collapsed(view, draft, collapsed=collapsed)
+        from rit.ui.widgets import diff_virtual as _virtual
+
+        _virtual._rebuild_virtual_layout(view)
+        return True
+
+    position = _active_file_thread_position(view, hunk_index)
+    if position is not None:
+        thread_index, comment_index, entry_start = position
+        widgets = view._file_comment_widgets_by_hunk.get(hunk_index)
+        if widgets is not None and thread_index < len(widgets):
+            thread_widget = widgets[thread_index]
+            if isinstance(thread_widget, ReviewThreadItem):
+                thread_widget.collapsed = comment_index is not None
+                if comment_index is not None:
+                    path = _file_comment_path(view, hunk_index)
+                    drafts = (
+                        view._pending_file_comment_drafts_by_path.get(path)
+                        if path is not None
+                        else None
+                    )
+                    draft_count = len(drafts) if drafts is not None else 0
+                    view._comment_cursor_index = draft_count + entry_start + 1
+                update_file_comment_cursor_highlight(view, hunk_index)
+                from rit.ui.widgets import diff_virtual as _virtual
+
+                _virtual._rebuild_virtual_layout(view)
+                return True
+
     if isinstance(target, Collapsible):
         target.collapsed = not target.collapsed
         return True
     if isinstance(target, CommentCard):
-        draft = active_pending_draft(view, view.cursor_line)
         target.toggle_collapsed()
-        if draft is not None:
-            _set_pending_draft_collapsed(view, draft, collapsed=target.collapsed)
-            from rit.ui.widgets import diff_virtual as _virtual
+        return True
+    return False
 
-            _virtual._rebuild_virtual_layout(view)
+
+def try_toggle_current(view: DiffView) -> bool:
+    """Toggle the currently selected comment (only when one is selected)."""
+    hunk_index = view._selected_file_header_hunk
+    if hunk_index is not None:
+        return _try_toggle_file_current(view, hunk_index)
+
+    target = active_comment_widget(view, view.cursor_line)
+    if target is None:
+        return False
+
+    draft = active_pending_draft(view, view.cursor_line)
+    if isinstance(target, CommentCard) and draft is not None:
+        thread_item = _thread_item_for_widget(target)
+        if thread_item is None:
+            target.toggle_collapsed()
+            collapsed = target.collapsed
+        else:
+            collapsed = not thread_item.collapsed
+            thread_item.collapsed = collapsed
+            target.set_class(collapsed, "-collapsed")
+        _set_pending_draft_collapsed(view, draft, collapsed=collapsed)
+        from rit.ui.widgets import diff_virtual as _virtual
+
+        _virtual._rebuild_virtual_layout(view)
+        return True
+
+    position = _active_thread_position(view, view.cursor_line)
+    if position is not None:
+        thread_index, comment_index, entry_start = position
+        widgets = view._comment_widgets_by_line.get(view.cursor_line)
+        if widgets is not None and thread_index < len(widgets):
+            thread_widget = widgets[thread_index]
+            if isinstance(thread_widget, ReviewThreadItem):
+                thread_widget.collapsed = comment_index is not None
+                if comment_index is not None:
+                    drafts = view._pending_comment_drafts_by_line.get(view.cursor_line)
+                    draft_count = len(drafts) if drafts is not None else 0
+                    view._comment_cursor_index = draft_count + entry_start + 1
+                _clear_cursor_line_class(view, view.cursor_line)
+                _add_active_cursor_line_class(view, view.cursor_line)
+                from rit.ui.widgets import diff_virtual as _virtual
+
+                _virtual._rebuild_virtual_layout(view)
+                return True
+
+    if isinstance(target, Collapsible):
+        target.collapsed = not target.collapsed
+        return True
+    if isinstance(target, CommentCard):
+        target.toggle_collapsed()
         return True
     return False
 
@@ -1055,7 +1523,7 @@ def _update_thread_widget_resolved(
 
 def estimate_pending_draft_height(draft: PendingReviewComment) -> int:
     body_lines = max(1, _count_body_lines(draft.body))
-    return max(PENDING_DRAFT_HEIGHT_ESTIMATE, body_lines + 2)
+    return max(PENDING_DRAFT_HEIGHT_ESTIMATE, body_lines + 3)
 
 
 def _count_body_lines(body: str) -> int:
@@ -1083,6 +1551,65 @@ def _count_body_lines(body: str) -> int:
     return count
 
 
+def _pending_draft_title(draft: PendingReviewComment) -> str:
+    file_icon = get_file_icon(draft.path)
+    location = (
+        f"{draft.path} • entire file"
+        if draft.is_file_level
+        else f"{draft.path}:{_pending_draft_line_label(draft)}"
+    )
+    return f"{file_icon} {location} [#eed49f](pending)[/]"
+
+
+def _build_pending_draft_item(
+    draft: PendingReviewComment,
+    *,
+    line_index: int,
+    index: int,
+    view: DiffView | None = None,
+    widget_id: str | None = None,
+) -> tuple[CommentCard, ReviewThreadItem]:
+    if widget_id is None:
+        side = "left" if draft.side == "LEFT" else "right"
+        widget_id = f"pending-draft-{line_index}-{side}-{index}"
+    collapsed = view is not None and pending_draft_is_collapsed(view, draft)
+    comment = PRComment(
+        body=draft.body,
+        path=draft.path,
+        line=(
+            draft.line if not draft.is_file_level and draft.side == "RIGHT" else None
+        ),
+        original_line=(
+            draft.line if not draft.is_file_level and draft.side == "LEFT" else None
+        ),
+        start_line=draft.start_line if draft.side == "RIGHT" else None,
+        original_start_line=draft.start_line if draft.side == "LEFT" else None,
+        side="" if draft.is_file_level else draft.side,
+        start_side="" if draft.is_file_level else draft.start_side or "",
+        subject_type=draft.subject_type,
+    )
+    item = ReviewThreadItem(
+        title=_pending_draft_title(draft),
+        path=draft.path,
+        line=None if draft.is_file_level else draft.line,
+        comments=[comment],
+        compact=False,
+        show_diff_hunk=False,
+        show_path_header=False,
+        collapsed=collapsed,
+        classes="--thread --inline pending-draft-thread",
+        id=f"{widget_id}-thread",
+    )
+    widget = item.comment_card_at(0)
+    if widget is None:
+        raise RuntimeError("Pending review item did not create a comment card")
+    widget.id = widget_id
+    widget.add_class("pending-draft", "--pending-draft")
+    widget.set_content("", draft.body)
+    widget.set_class(collapsed, "-collapsed")
+    return widget, item
+
+
 def _build_pending_draft_widget(
     draft: PendingReviewComment,
     *,
@@ -1090,15 +1617,12 @@ def _build_pending_draft_widget(
     index: int,
     view: DiffView | None = None,
 ) -> CommentCard:
-    side = "left" if draft.side == "LEFT" else "right"
-    widget = CommentCard(
-        f"{draft.path}:{_pending_draft_line_label(draft)} (pending)",
-        draft.body,
-        id=f"pending-draft-{line_index}-{side}-{index}",
-        classes="pending-draft --pending-draft",
+    widget, _ = _build_pending_draft_item(
+        draft,
+        line_index=line_index,
+        index=index,
+        view=view,
     )
-    if view is not None:
-        widget.set_class(pending_draft_is_collapsed(view, draft), "-collapsed")
     return widget
 
 
@@ -1135,9 +1659,7 @@ def _prune_collapsed_pending_drafts(view: DiffView) -> None:
         collapsed_drafts.clear()
         return
 
-    pending_comments = list(
-        getattr(view.store.state, "pending_review_comments", ())
-    )
+    pending_comments = list(getattr(view.store.state, "pending_review_comments", ()))
     available = {id(draft): draft for draft in pending_comments}
     retained: dict[int, PendingReviewComment] = {}
     unmatched: list[PendingReviewComment] = []
@@ -1195,12 +1717,23 @@ def _pending_draft_line_label(draft: PendingReviewComment) -> str:
     return f"{draft.start_line}-{draft.line}"
 
 
+def _thread_is_file_level(thread: ReviewThread) -> bool:
+    root = thread.root_comment
+    return thread.is_file_level or (root is not None and root.is_file_level)
+
+
 def _inline_thread_title(thread: ReviewThread) -> str:
-    line_info = f":{thread.anchor_line}" if thread.anchor_line else ""
+    location = (
+        f"{thread.path} • entire file"
+        if _thread_is_file_level(thread)
+        else f"{thread.path}:{thread.anchor_line}"
+        if thread.anchor_line
+        else thread.path
+    )
     file_icon = get_file_icon(thread.path)
     if thread.is_resolved:
-        return f"✓ Resolved: {file_icon} {thread.path}{line_info}"
-    return f"{file_icon} {thread.path}{line_info}"
+        return f"✓ Resolved: {file_icon} {location}"
+    return f"{file_icon} {location}"
 
 
 def _build_inline_thread_widget(thread: ReviewThread) -> ReviewThreadItem:
@@ -1211,7 +1744,7 @@ def _build_inline_thread_widget(thread: ReviewThread) -> ReviewThreadItem:
         classes = "--thread --inline"
         collapsed = False
 
-    line_no = thread.anchor_line
+    line_no = None if _thread_is_file_level(thread) else thread.anchor_line
 
     return ReviewThreadItem(
         title=_inline_thread_title(thread),

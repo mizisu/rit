@@ -18,6 +18,9 @@ __all__ = (
 )
 
 
+_CODE_GAP = "  "
+
+
 def build_unified_prefix_content(
     line: DiffLine,
     *,
@@ -29,24 +32,24 @@ def build_unified_prefix_content(
     """Build the prefix for a normal unified diff line."""
     prefix = _unified_change_prefix(line)
     if not show_line_numbers:
-        return Content(prefix + " ")
+        return Content(prefix + _CODE_GAP)
 
     old_no = str(line.old_line_no) if line.old_line_no else ""
     new_no = str(line.new_line_no) if line.new_line_no else ""
     if line_number_columns == "old":
         return Content.assemble(
-            (f"{old_no:>{old_line_number_width}} ", "$text-disabled"),
-            prefix + " ",
+            f"{old_no:>{old_line_number_width}} ",
+            (prefix + _CODE_GAP, "$text-disabled"),
         )
     if line_number_columns == "new":
         return Content.assemble(
-            (f"{new_no:>{new_line_number_width}} ", "$text-disabled"),
-            prefix + " ",
+            f"{new_no:>{new_line_number_width}} ",
+            (prefix + _CODE_GAP, "$text-disabled"),
         )
     return Content.assemble(
-        (f"{old_no:>{old_line_number_width}} ", "$text-disabled"),
-        (f"{new_no:>{new_line_number_width}} ", "$text-disabled"),
-        prefix + " ",
+        f"{old_no:>{old_line_number_width}} ",
+        f"{new_no:>{new_line_number_width}} ",
+        (prefix + _CODE_GAP, "$text-disabled"),
     )
 
 
@@ -61,15 +64,15 @@ def build_preview_prefix_content(
         return Content.assemble(
             _preview_deleted_marker_part(line),
             _preview_change_marker_part(line),
-            " ",
+            _CODE_GAP,
         )
 
     line_no = str(line.new_line_no) if line.new_line_no else ""
     return Content.assemble(
-        (f"{line_no:>{new_line_number_width}} ", "$text-disabled"),
+        f"{line_no:>{new_line_number_width}} ",
         _preview_deleted_marker_part(line),
         _preview_change_marker_part(line),
-        " ",
+        _CODE_GAP,
     )
 
 
@@ -82,12 +85,12 @@ def build_split_prefix(
 ) -> Content:
     """Build the prefix for one split diff side."""
     if not show_line_numbers:
-        return Content(prefix + " ")
+        return Content(prefix + _CODE_GAP)
 
     line_text = str(line_no) if line_no is not None else ""
     return Content.assemble(
-        (f"{line_text:>{line_number_width}} ", "$text-disabled"),
-        prefix + " ",
+        f"{line_text:>{line_number_width}} ",
+        (prefix + _CODE_GAP, "$text-disabled"),
     )
 
 
@@ -116,21 +119,21 @@ def build_unified_modified_prefix_content(
     new_line_number_width: int,
 ) -> Content:
     """Build the prefix for one side of a modified unified diff line."""
-    prefix = "- " if side == "old" else "+ "
+    prefix = "-  " if side == "old" else "+  "
     if not show_line_numbers:
         return Content(prefix)
 
     if side == "old":
         return Content.assemble(
-            (f"{line.old_line_no:>{old_line_number_width}} ", "$text-disabled"),
-            (" " * (new_line_number_width + 1), "$text-disabled"),
-            prefix,
+            f"{line.old_line_no:>{old_line_number_width}} ",
+            " " * (new_line_number_width + 1),
+            (prefix, "$text-disabled"),
         )
 
     return Content.assemble(
-        (" " * (old_line_number_width + 1), "$text-disabled"),
-        (f"{line.new_line_no:>{new_line_number_width}} ", "$text-disabled"),
-        prefix,
+        " " * (old_line_number_width + 1),
+        f"{line.new_line_no:>{new_line_number_width}} ",
+        (prefix, "$text-disabled"),
     )
 
 

@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from rit.state.models import PRComment, PRReview, PRUser, ReviewThreadInfo
 from rit.ui.components.pr_timeline_formatting import (
@@ -35,10 +35,26 @@ def test_thread_title_includes_author_icon_path_line_and_resolved_prefix() -> No
     )
 
 
+def test_file_thread_title_ignores_github_line_one_placeholder() -> None:
+    comment = PRComment(
+        body="whole file",
+        user=PRUser(login="alice"),
+        path="src/app.py",
+        line=1,
+        side="RIGHT",
+        subject_type="file",
+    )
+
+    assert (
+        thread_title(comment, is_resolved=False)
+        == f"@alice on {get_file_icon('src/app.py')} src/app.py"
+    )
+
+
 def test_pending_review_summary_header_includes_count_and_optional_time() -> None:
     review = PRReview(
         user=PRUser(login="alice[bot]"),
-        created_at=datetime(2026, 6, 18, 6, 25, tzinfo=timezone.utc),
+        created_at=datetime(2026, 6, 18, 6, 25, tzinfo=UTC),
     )
 
     assert (
@@ -67,11 +83,14 @@ def test_resolved_thread_title_prefers_authoritative_thread_metadata() -> None:
         root_comment_id=100,
     )
 
-    assert resolved_thread_title(
-        root_comment=root,
-        thread_info=thread_info,
-        is_resolved=True,
-    ) == f"{chr(0x2713)} Resolved: @alice on {get_file_icon('new.py')} new.py:42"
+    assert (
+        resolved_thread_title(
+            root_comment=root,
+            thread_info=thread_info,
+            is_resolved=True,
+        )
+        == f"{chr(0x2713)} Resolved: @alice on {get_file_icon('new.py')} new.py:42"
+    )
 
 
 def test_resolved_thread_title_falls_back_to_root_comment() -> None:
@@ -83,11 +102,14 @@ def test_resolved_thread_title_falls_back_to_root_comment() -> None:
         line=9,
     )
 
-    assert resolved_thread_title(
-        root_comment=root,
-        thread_info=None,
-        is_resolved=False,
-    ) == f"@bob on {get_file_icon('src/app.py')} src/app.py:9"
+    assert (
+        resolved_thread_title(
+            root_comment=root,
+            thread_info=None,
+            is_resolved=False,
+        )
+        == f"@bob on {get_file_icon('src/app.py')} src/app.py:9"
+    )
     assert (
         resolved_thread_title(
             root_comment=None,

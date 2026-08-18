@@ -2,9 +2,9 @@
 
 import pytest
 
+import rit.ui.widgets.diff_plan as diff_plan_module
 from rit.core.diff import parse_patch
 from rit.core.types import DiffHunk, DiffLine, FileDiff
-import rit.ui.widgets.diff_plan as diff_plan_module
 from rit.ui.widgets.diff_plan import build_diff_plan
 
 
@@ -145,5 +145,5 @@ def test_build_diff_plan_tracks_line_number_widths() -> None:
 
     plan = build_diff_plan(diff)
 
-    assert plan.old_line_number_width == 3
+    assert plan.old_line_number_width == 4
     assert plan.new_line_number_width == 4

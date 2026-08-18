@@ -89,6 +89,21 @@ def test_build_diff_geometry_accounts_for_large_file_headers() -> None:
     assert geometry.virtual_content_height == 3
 
 
+def test_build_diff_geometry_accounts_for_file_comment_annotations() -> None:
+    diff = _planned_diff("@@ -1,2 +1,2 @@\n line1\n line2")
+    diff.hunks[0].starts_file = True
+    diff.show_hunk_headers = False
+
+    geometry = build_diff_geometry(
+        diff,
+        split=True,
+        extra_heights_by_hunk={0: 7},
+    )
+
+    assert geometry.line_top_offsets == [8, 9]
+    assert geometry.virtual_content_height == 10
+
+
 def test_build_diff_geometry_uses_known_line_count_without_discovery_scan() -> None:
     patch = """@@ -1,3 +1,3 @@
  line1

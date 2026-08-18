@@ -33,7 +33,6 @@ __all__ = (
 )
 
 
-COMBINED_FILES_THRESHOLD = 2
 COMBINED_DIFF_LOAD_CONCURRENCY = 8
 
 
@@ -112,9 +111,7 @@ class FileChanges(Horizontal):
         self._is_dragging = False
         self._queued_file_render: tuple[str, FileDiff | None, bool, bool] | None = None
         self._file_render_worker_active = False
-        self._render_session = FilesRenderSession(
-            combined_threshold=COMBINED_FILES_THRESHOLD,
-        )
+        self._render_session = FilesRenderSession()
         self._combined_render_worker_active = False
 
     def compose(self) -> ComposeResult:
@@ -169,12 +166,15 @@ class FileChanges(Horizontal):
         self.file_tree.refresh_files()
 
         state = self.store.state
-        if state.files and not self._files_are_still_loading():
-            if self._queue_combined_files_render():
-                selected_file = state.selected_file or state.files[0].filename
-                self.store.state.selected_file = selected_file
-                self.file_tree.select_file(selected_file, emit_message=False)
-                return
+        if (
+            state.files
+            and not self._files_are_still_loading()
+            and self._queue_combined_files_render()
+        ):
+            selected_file = state.selected_file or state.files[0].filename
+            self.store.state.selected_file = selected_file
+            self.file_tree.select_file(selected_file, emit_message=False)
+            return
 
         if state.files and not state.selected_file:
             filename = state.files[0].filename
@@ -351,7 +351,7 @@ class FileChanges(Horizontal):
         signature: tuple[str, ...],
     ) -> CombinedDiffDocument | None:
         state = self.store.state
-        if len(signature) < COMBINED_FILES_THRESHOLD:
+        if not signature:
             return None
 
         files = []

@@ -38,11 +38,6 @@ DiffView .file-diff-header.-selected {
     outline-left: thick $primary;
 }
 
-DiffView .folded-file-placeholder {
-    color: $text-muted;
-    text-style: italic;
-}
-
 DiffView .split-file-diff-header-scroll {
     width: 1fr;
     height: 1;
@@ -90,6 +85,10 @@ DiffView .line-prefix {
     color: $text-disabled;
     padding: 0;
     margin: 0;
+}
+
+DiffView .line-prefix.-cursor {
+    color: $text;
 }
 
 DiffView .code-content {

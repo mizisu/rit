@@ -34,12 +34,44 @@ def _make_review_thread(
     )
 
 
+def _make_review_thread_with_reply(*, line: int) -> ReviewThread:
+    root = PRComment(
+        id=41,
+        node_id="PRRC_41",
+        body="root",
+        path="test.py",
+        line=line,
+        original_line=line,
+        side="RIGHT",
+    )
+    reply = PRComment(
+        id=42,
+        node_id="PRRC_42",
+        body="reply",
+        path="test.py",
+        line=line,
+        original_line=line,
+        side="RIGHT",
+        in_reply_to_id=41,
+    )
+    return ReviewThread.model_validate(
+        {
+            "path": "test.py",
+            "line": line,
+            "originalLine": line,
+            "comments": {"nodes": [root, reply]},
+        }
+    )
+
+
 def _block_row_content_bounds(diff_view: DiffView, line_index: int) -> tuple[int, int]:
     block = diff_view._unified_blocks_by_line[line_index]
     row_offset = list(block.line_indices).index(line_index)
-    top = int(diff_view.scroll_y) + (
-        block.region.y - diff_view.scrollable_content_region.y
-    ) + row_offset
+    top = (
+        int(diff_view.scroll_y)
+        + (block.region.y - diff_view.scrollable_content_region.y)
+        + row_offset
+    )
     return top, top + 1
 
 
@@ -77,6 +109,51 @@ async def test_landing_on_diff_line_does_not_select_comment() -> None:
         assert diff_view._comment_cursor_index == 0
         draft = app.query_one("#pending-draft-1-right-0")
         assert "--cursor-line" not in draft.classes
+
+
+@pytest.mark.asyncio
+async def test_diff_cursor_selects_root_and_reply_individually() -> None:
+    patch = "@@ -1,2 +1,2 @@\n line1\n line2"
+    store = PRStore()
+    store.state.review_threads = [_make_review_thread_with_reply(line=1)]
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(store=store, mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        await diff_view.show_diff("test.py", parse_patch(patch, "test.py"))
+        await pilot.pause()
+        diff_view.focus()
+
+        thread_item = app.query_one("#inline-thread-41", ReviewThreadItem)
+        root_card = thread_item.comment_card_at(0)
+        reply_card = thread_item.comment_card_at(1)
+        assert root_card is not None
+        assert reply_card is not None
+
+        await pilot.press("j")
+        root = diff_view.active_review_comment()
+        assert root is not None
+        assert root.id == 41
+        assert "--cursor-line" in thread_item.classes
+        assert "--cursor-line" in root_card.classes
+        assert "--cursor-line" not in reply_card.classes
+
+        await pilot.press("j")
+        reply = diff_view.active_review_comment()
+        assert reply is not None
+        assert reply.id == 42
+        assert "--cursor-line" in thread_item.classes
+        assert "--cursor-line" not in root_card.classes
+        assert "--cursor-line" in reply_card.classes
+
+        await pilot.press("j")
+        assert diff_view.cursor_line == 1
+        assert diff_view._comment_cursor_index == 0
+        assert "--cursor-line" not in thread_item.classes
 
 
 @pytest.mark.asyncio
@@ -118,30 +195,46 @@ async def test_j_after_diff_line_selects_first_comment_then_advances() -> None:
         assert diff_view.cursor_line == 0
         assert diff_view._comment_cursor_index == 1
         draft = app.query_one("#pending-draft-0-right-0")
+        pending_item = next(
+            ancestor
+            for ancestor in draft.ancestors
+            if isinstance(ancestor, ReviewThreadItem)
+        )
         assert "--cursor-line" in draft.classes
-        thread1 = app.query_one("#inline-thread-1")
+        assert "--cursor-line" in pending_item.classes
+        thread1 = app.query_one("#inline-thread-1", ReviewThreadItem)
         assert "--cursor-line" not in thread1.classes
+        thread1_comment = thread1.comment_card_at(0)
+        assert thread1_comment is not None
+        assert "--cursor-line" not in thread1_comment.classes
 
         await pilot.press("j")
         await pilot.pause()
         assert diff_view.cursor_line == 0
         assert diff_view._comment_cursor_index == 2
         assert "--cursor-line" not in draft.classes
+        assert "--cursor-line" not in pending_item.classes
         assert "--cursor-line" in thread1.classes
+        assert "--cursor-line" in thread1_comment.classes
 
         await pilot.press("j")
         await pilot.pause()
         assert diff_view.cursor_line == 0
         assert diff_view._comment_cursor_index == 3
-        thread2 = app.query_one("#inline-thread-2")
+        thread2 = app.query_one("#inline-thread-2", ReviewThreadItem)
+        thread2_comment = thread2.comment_card_at(0)
+        assert thread2_comment is not None
         assert "--cursor-line" not in thread1.classes
+        assert "--cursor-line" not in thread1_comment.classes
         assert "--cursor-line" in thread2.classes
+        assert "--cursor-line" in thread2_comment.classes
 
         await pilot.press("j")
         await pilot.pause()
         assert diff_view.cursor_line == 1
         assert diff_view._comment_cursor_index == 0
         assert "--cursor-line" not in thread2.classes
+        assert "--cursor-line" not in thread2_comment.classes
 
 
 @pytest.mark.asyncio
@@ -179,8 +272,10 @@ async def test_k_steps_back_through_comments_then_to_previous_line() -> None:
         await pilot.pause()
         assert diff_view.cursor_line == 0
         assert diff_view._comment_cursor_index == 2
-        thread = app.query_one("#inline-thread-10")
-        assert "--cursor-line" in thread.classes
+        thread = app.query_one("#inline-thread-10", ReviewThreadItem)
+        thread_comment = thread.comment_card_at(0)
+        assert thread_comment is not None
+        assert "--cursor-line" in thread_comment.classes
 
         await pilot.press("k")
         await pilot.pause()
@@ -302,22 +397,28 @@ async def test_diff_line_cursor_block_swaps_with_comment_highlight() -> None:
         diff_view.cursor_line = 1
         await pilot.pause()
 
+        line_prefix = app.query_one("#line-1 .line-prefix")
         code_widgets = diff_view._get_code_widgets(1)
+        assert line_prefix.has_class("-cursor")
         assert all("-cursor" in w.classes for w in code_widgets)
-        thread = app.query_one("#inline-thread-999")
-        assert "--cursor-line" not in thread.classes
+        thread = app.query_one("#inline-thread-999", ReviewThreadItem)
+        thread_comment = thread.comment_card_at(0)
+        assert thread_comment is not None
+        assert "--cursor-line" not in thread_comment.classes
 
         await pilot.press("j")
         await pilot.pause()
         code_widgets = diff_view._get_code_widgets(1)
+        assert line_prefix.has_class("-cursor")
         assert all("-cursor" not in w.classes for w in code_widgets)
-        assert "--cursor-line" in thread.classes
+        assert "--cursor-line" in thread_comment.classes
 
         await pilot.press("k")
         await pilot.pause()
         code_widgets = diff_view._get_code_widgets(1)
+        assert line_prefix.has_class("-cursor")
         assert all("-cursor" in w.classes for w in code_widgets)
-        assert "--cursor-line" not in thread.classes
+        assert "--cursor-line" not in thread_comment.classes
 
 
 @pytest.mark.asyncio
@@ -436,9 +537,7 @@ async def test_cursor_line_after_many_comments_stays_visible_inside_grouped_bloc
 ):
     """Leaving a tall comment stack should reveal the next grouped-block row."""
 
-    patch = "@@ -1,180 +1,180 @@\n" + "\n".join(
-        f" line{i}" for i in range(1, 181)
-    )
+    patch = "@@ -1,180 +1,180 @@\n" + "\n".join(f" line{i}" for i in range(1, 181))
     body = "\n".join(f"comment line {i}" for i in range(8))
     store = PRStore()
     comment_count = 3

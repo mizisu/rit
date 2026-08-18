@@ -53,8 +53,7 @@ class FullFilePreviewRestoreTarget:
 class FilesRenderSession:
     """Tracks render-session state for the Files tab."""
 
-    def __init__(self, *, combined_threshold: int = 2) -> None:
-        self._combined_threshold = combined_threshold
+    def __init__(self) -> None:
         self._queued_combined_render: CombinedRenderRequest | None = None
         self._combined_files_signature: tuple[str, ...] | None = None
         self._combined_document: CombinedDiffDocument | None = None
@@ -79,7 +78,7 @@ class FilesRenderSession:
         return tuple(map(_FILENAME_FOR_SIGNATURE, files))
 
     def uses_combined_files(self, files: Sequence[PRFile]) -> bool:
-        return len(files) >= self._combined_threshold
+        return bool(files)
 
     def set_showing_combined_files(self, showing: bool) -> None:
         self._showing_combined_files = showing
@@ -102,7 +101,7 @@ class FilesRenderSession:
         force: bool = False,
     ) -> bool:
         signature = self.files_signature(files)
-        if len(signature) < self._combined_threshold:
+        if not signature:
             return False
 
         if (

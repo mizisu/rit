@@ -1,6 +1,6 @@
+import rit.ui.widgets.diff_layout as diff_layout_module
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.state.models import PRFile
-import rit.ui.widgets.diff_layout as diff_layout_module
 from rit.ui.widgets.diff_layout import (
     code_widths_for_layout,
     file_header_width_for_layout,
@@ -159,54 +159,79 @@ def test_code_widths_for_layout_keep_empty_columns_addressable() -> None:
 
 
 def test_split_prefix_width_for_layout_respects_line_number_visibility() -> None:
-    assert split_prefix_width_for_layout(
-        show_line_numbers=False,
-        line_number_width=3,
-    ) == 2
-    assert split_prefix_width_for_layout(
-        show_line_numbers=True,
-        line_number_width=3,
-    ) == 5
+    assert (
+        split_prefix_width_for_layout(
+            show_line_numbers=False,
+            line_number_width=3,
+        )
+        == 3
+    )
+    assert (
+        split_prefix_width_for_layout(
+            show_line_numbers=True,
+            line_number_width=3,
+        )
+        == 7
+    )
 
 
 def test_unified_and_preview_prefix_widths_for_layout() -> None:
-    assert unified_prefix_width_for_layout(
-        show_line_numbers=False,
-        old_line_number_width=4,
-        new_line_number_width=5,
-    ) == 2
-    assert unified_prefix_width_for_layout(
-        show_line_numbers=True,
-        old_line_number_width=4,
-        new_line_number_width=5,
-    ) == 13
-    assert unified_prefix_width_for_layout(
-        show_line_numbers=True,
-        old_line_number_width=4,
-        new_line_number_width=5,
-        line_number_columns="old",
-    ) == 7
-    assert unified_prefix_width_for_layout(
-        show_line_numbers=True,
-        old_line_number_width=4,
-        new_line_number_width=5,
-        line_number_columns="new",
-    ) == 8
-    assert preview_prefix_width_for_layout(
-        show_line_numbers=False,
-        new_line_number_width=5,
-    ) == 3
-    assert preview_prefix_width_for_layout(
-        show_line_numbers=True,
-        new_line_number_width=5,
-    ) == 9
+    assert (
+        unified_prefix_width_for_layout(
+            show_line_numbers=False,
+            old_line_number_width=4,
+            new_line_number_width=5,
+        )
+        == 3
+    )
+    assert (
+        unified_prefix_width_for_layout(
+            show_line_numbers=True,
+            old_line_number_width=4,
+            new_line_number_width=5,
+        )
+        == 14
+    )
+    assert (
+        unified_prefix_width_for_layout(
+            show_line_numbers=True,
+            old_line_number_width=4,
+            new_line_number_width=5,
+            line_number_columns="old",
+        )
+        == 8
+    )
+    assert (
+        unified_prefix_width_for_layout(
+            show_line_numbers=True,
+            old_line_number_width=4,
+            new_line_number_width=5,
+            line_number_columns="new",
+        )
+        == 9
+    )
+    assert (
+        preview_prefix_width_for_layout(
+            show_line_numbers=False,
+            new_line_number_width=5,
+        )
+        == 4
+    )
+    assert (
+        preview_prefix_width_for_layout(
+            show_line_numbers=True,
+            new_line_number_width=5,
+        )
+        == 10
+    )
 
 
-def test_line_number_width_for_layout_uses_visible_number_digits() -> None:
+def test_line_number_width_for_layout_reserves_four_digits() -> None:
     assert line_number_width_for_layout(show_line_numbers=False, numbers=[100]) == 0
-    assert line_number_width_for_layout(show_line_numbers=True, numbers=[]) == 1
-    assert line_number_width_for_layout(show_line_numbers=True, numbers=[1, 9]) == 1
-    assert line_number_width_for_layout(show_line_numbers=True, numbers=[1, 120]) == 3
+    assert line_number_width_for_layout(show_line_numbers=True, numbers=[]) == 4
+    assert line_number_width_for_layout(show_line_numbers=True, numbers=[1, 9]) == 4
+    assert line_number_width_for_layout(show_line_numbers=True, numbers=[1, 120]) == 4
+    assert line_number_width_for_layout(show_line_numbers=True, numbers=[1, 12000]) == 5
 
 
 def test_line_number_columns_for_change_counts_hides_unused_side() -> None:
@@ -228,22 +253,31 @@ def test_line_number_width_for_layout_single_number_skips_max(
         raising=False,
     )
 
-    assert line_number_width_for_layout(show_line_numbers=True, numbers=[120]) == 3
+    assert line_number_width_for_layout(show_line_numbers=True, numbers=[120]) == 4
 
 
 def test_split_placeholder_width_for_layout_uses_visible_pane_budget() -> None:
-    assert split_placeholder_width_for_layout(
-        side_code_width=0,
-        viewport_width=0,
-    ) == 1
-    assert split_placeholder_width_for_layout(
-        side_code_width=20,
-        viewport_width=10,
-    ) == 20
-    assert split_placeholder_width_for_layout(
-        side_code_width=4,
-        viewport_width=30,
-    ) == 15
+    assert (
+        split_placeholder_width_for_layout(
+            side_code_width=0,
+            viewport_width=0,
+        )
+        == 1
+    )
+    assert (
+        split_placeholder_width_for_layout(
+            side_code_width=20,
+            viewport_width=10,
+        )
+        == 20
+    )
+    assert (
+        split_placeholder_width_for_layout(
+            side_code_width=4,
+            viewport_width=30,
+        )
+        == 15
+    )
 
 
 def test_file_header_width_for_layout_prefers_visible_viewport() -> None:
@@ -275,7 +309,9 @@ def test_file_header_width_for_layout_prefers_visible_viewport() -> None:
     )
 
 
-def test_file_header_width_for_layout_uses_render_mode_when_viewport_is_unknown() -> None:
+def test_file_header_width_for_layout_uses_render_mode_when_viewport_is_unknown() -> (
+    None
+):
     assert (
         file_header_width_for_layout(
             fallback_width=20,

@@ -1,10 +1,10 @@
 from rit.core.types import FileDiff
 from rit.state.models import PRFile
+from rit.ui.components import files_render_session as files_render_session_module
 from rit.ui.components.combined_diff import (
     COMBINED_DIFF_FILENAME,
     CombinedDiffDocument,
 )
-from rit.ui.components import files_render_session as files_render_session_module
 from rit.ui.components.files_render_session import (
     CombinedFileJump,
     FilesRenderSession,
@@ -104,15 +104,15 @@ def test_queue_combined_render_skips_current_signature() -> None:
     assert session.take_queued_combined_render() is None
 
 
-def test_queue_combined_render_records_latest_request() -> None:
+def test_queue_combined_render_accepts_a_single_file() -> None:
     session = FilesRenderSession()
-    files = _files("one.py", "two.py")
+    files = _files("one.py")
 
     assert session.queue_combined_render(files, current_file=None, focus_diff=True)
 
     request = session.take_queued_combined_render()
     assert request is not None
-    assert request.signature == ("one.py", "two.py")
+    assert request.signature == ("one.py",)
     assert request.focus_diff is True
     assert session.take_queued_combined_render() is None
 

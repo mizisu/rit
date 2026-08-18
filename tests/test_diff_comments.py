@@ -170,6 +170,45 @@ def test_build_comment_map_skips_sort_when_no_comment_lines(
     assert view._comment_line_indices == []
 
 
+def test_build_comment_map_keeps_file_comment_separate_from_line_one() -> None:
+    draft = PendingReviewComment(
+        body="whole file",
+        path="test.py",
+        line=0,
+        side="RIGHT",
+        subject_type="file",
+    )
+
+    class Store:
+        state = SimpleNamespace(review_threads=[])
+
+        def get_pending_file_comments(
+            self, _filename: str
+        ) -> list[PendingReviewComment]:
+            return [draft]
+
+    view = SimpleNamespace(
+        store=Store(),
+        current_file="test.py",
+        _diff_file_paths=frozenset({"test.py"}),
+        _all_lines=[],
+        _comment_threads_by_line={},
+        _comment_line_indices=[],
+        _comment_widgets_by_line={},
+        _comment_layout_widgets_by_line={},
+        _comment_side_by_line={},
+        _pending_comment_drafts_by_line={},
+        _pending_comment_widgets_by_line={},
+        _pending_comment_layout_widgets_by_line={},
+    )
+
+    _comments.build_comment_map(view)
+
+    assert view._pending_comment_drafts_by_line == {}
+    assert view._pending_file_comment_drafts_by_path == {"test.py": [draft]}
+    assert view._comment_line_indices == []
+
+
 def test_build_comment_map_skips_sort_for_single_comment_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -713,7 +752,9 @@ def test_pending_draft_widget_builds_side_id_without_lower_call() -> None:
     widget = _comments._build_pending_draft_widget(draft, line_index=3, index=0)
 
     assert widget.id == "pending-draft-3-left-0"
-    assert widget._header == "test.py:7 (pending)"
+    assert widget.has_class("thread-comment")
+    assert widget.has_class("--empty-header")
+    assert widget._header == ""
 
 
 def test_nearest_line_index_in_hunk_scans_lines_once() -> None:
@@ -782,7 +823,7 @@ async def test_refresh_thread_metadata_updates_inline_thread_without_rerender() 
 
         assert diff_view._comment_widgets_by_line[line_index][0] is widget
         assert diff_view._comment_threads_by_line[line_index][0].id == "thread-1"
-        assert getattr(widget, "is_resolved") is True
+        assert widget.is_resolved is True
 
 
 @pytest.mark.asyncio

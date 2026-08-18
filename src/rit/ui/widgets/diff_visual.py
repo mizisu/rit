@@ -4,6 +4,7 @@ from collections.abc import Callable, Iterable
 
 from rich.segment import Segment
 from rich.style import Style as RichStyle
+from textual.containers import HorizontalScroll
 from textual.content import Content
 from textual.css.styles import RulesMap
 from textual.geometry import Region, Size
@@ -14,17 +15,16 @@ from textual.style import Style
 from textual.visual import RenderOptions, Visual
 from textual.widget import Widget
 from textual.widgets import Static
-from textual.containers import HorizontalScroll
 
 __all__ = (
-    "DiffCode",
-    "LineAnnotations",
-    "LineContent",
     "MISSING_SIDE_BACKGROUND_STYLE",
     "MISSING_SIDE_HATCH",
     "MISSING_SIDE_HATCH_STEP",
     "MISSING_SIDE_HATCH_STYLE",
     "MISSING_SIDE_STYLE",
+    "DiffCode",
+    "LineAnnotations",
+    "LineContent",
     "SyncedCodeScroll",
     "missing_side_hatch_text",
 )
@@ -99,24 +99,18 @@ class LineContent(Visual):
         if line is None:
             meta = {"offset": (0, y)}
             hatch_style = options.get_style(MISSING_SIDE_HATCH_STYLE).rich_style
-            row_style = (
-                options.get_style(color).rich_style if color else RichStyle()
-            )
+            row_style = options.get_style(color).rich_style if color else RichStyle()
             missing_style = (
-                style.rich_style
-                + hatch_style
-                + row_style
-                + RichStyle.from_meta(meta)
+                style.rich_style + hatch_style + row_style + RichStyle.from_meta(meta)
             )
             text = missing_side_hatch_text(width, row_index=y)
             return Strip([Segment(text, missing_style)], width)
 
-        if selection is not None:
-            if span := selection.get_span(y):
-                start, end = span
-                if end == -1:
-                    end = len(line)
-                line = line.stylize(selection_style, start, end)
+        if selection is not None and (span := selection.get_span(y)):
+            start, end = span
+            if end == -1:
+                end = len(line)
+            line = line.stylize(selection_style, start, end)
 
         if line.cell_length < width:
             line = line.pad_right(width - line.cell_length)
@@ -171,6 +165,7 @@ class LineAnnotations(Widget):
     ):
         super().__init__(name=name, id=id, classes=classes, disabled=disabled)
         self._number_width = 0
+        self._active_rows: set[int] = set()
         self.numbers = list(numbers)
         self.line_styles = list(line_styles or [])
 
@@ -206,6 +201,8 @@ class LineAnnotations(Widget):
             line_style = ""
         if line_style:
             visual_style += self._get_style(line_style)
+        if y in self._active_rows:
+            visual_style += self._get_style("$text")
         rich_style = visual_style.rich_style
 
         try:
@@ -218,6 +215,18 @@ class LineAnnotations(Widget):
         )
         strip = strip.adjust_cell_length(width, rich_style)
         return strip
+
+    def set_active_rows(self, rows: Iterable[int]) -> None:
+        """Highlight the active annotation rows without relayout."""
+        active_rows = set(rows)
+        dirty_rows = self._active_rows.symmetric_difference(active_rows)
+        if not dirty_rows:
+            return
+        self._active_rows = active_rows
+        self.refresh(
+            *(Region(0, row, self.size.width, 1) for row in sorted(dirty_rows)),
+            layout=False,
+        )
 
 
 class SyncedCodeScroll(HorizontalScroll):
@@ -233,7 +242,7 @@ class SyncedCodeScroll(HorizontalScroll):
     def __init__(
         self,
         *children,
-        on_scroll_x: Callable[[float, "SyncedCodeScroll | None"], None] | None = None,
+        on_scroll_x: Callable[[float, SyncedCodeScroll | None], None] | None = None,
         name: str | None = None,
         id: str | None = None,
         classes: str | None = None,
@@ -250,7 +259,7 @@ class SyncedCodeScroll(HorizontalScroll):
 
     def set_on_scroll_x(
         self,
-        callback: Callable[[float, "SyncedCodeScroll | None"], None] | None,
+        callback: Callable[[float, SyncedCodeScroll | None], None] | None,
     ) -> None:
         self._on_scroll_x = callback
 
@@ -277,9 +286,7 @@ class DiffCode(Static):
         visual = self._render()
         width = self.size.width
         visual_style = self.visual_style
-        if not isinstance(visual, LineContent) or not 0 <= y < len(
-            visual.code_lines
-        ):
+        if not isinstance(visual, LineContent) or not 0 <= y < len(visual.code_lines):
             return Strip.blank(width, visual_style.rich_style)
 
         selection = self.text_selection

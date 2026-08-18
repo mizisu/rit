@@ -9,7 +9,6 @@ from textual.widgets import Static
 from rit.core.diff import parse_patch
 from rit.ui.widgets import diff_cursor as _cursor
 from rit.ui.widgets.diff_view import DiffView
-from tests.conftest import wait_until
 
 
 def _diff_view_render_idle(diff_view: DiffView) -> bool:
@@ -217,10 +216,8 @@ class TestDiffViewVisualMode:
             assert diff_view.visual_mode is False
 
     @pytest.mark.asyncio
-    async def test_normal_mode_yank_uses_app_clipboard(
-        self, sample_patch: str
-    ) -> None:
-        """Normal yank should use the same app clipboard path as other copy actions."""
+    async def test_yank_shortcuts_use_app_clipboard(self, sample_patch: str) -> None:
+        """Yank shortcuts should copy lines and the current file path."""
 
         class TestApp(App):
             def compose(self) -> ComposeResult:
@@ -229,12 +226,18 @@ class TestDiffViewVisualMode:
         app = TestApp()
         async with app.run_test() as pilot:
             diff_view = app.query_one(DiffView)
-            diff = parse_patch(sample_patch, "test.py")
+            filename = "src/example/test.py"
+            diff = parse_patch(sample_patch, filename)
 
-            await diff_view.show_diff("test.py", diff)
+            await diff_view.show_diff(filename, diff)
             await pilot.pause()
             diff_view.focus()
             await pilot.pause()
+
+            await pilot.press("Y")
+            await pilot.pause()
+
+            assert app.clipboard == filename
 
             await pilot.press("y")
             await pilot.pause()

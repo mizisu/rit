@@ -13,7 +13,6 @@ from rit.state.models import (
 from rit.state.store import PRStore
 from rit.ui.components.file_changes import FileChanges
 from rit.ui.widgets.comment_card import CommentCard
-from rit.ui.widgets.diff_folding import FOLDED_VIEWED_FILE_MESSAGE
 from rit.ui.widgets.diff_view import DiffView
 from tests.conftest import wait_until
 
@@ -87,8 +86,13 @@ async def test_enter_toggles_viewed_file_fold_in_combined_diff() -> None:
             lambda: len(file_changes.diff_view.query("#file-header-0")) == 1
         )
         await wait_until(
-            lambda: len(file_changes.diff_view.query("#line-1-old")) == 1
-            and len(file_changes.diff_view.query("#line-1-new")) == 1
+            lambda: (
+                len(file_changes.diff_view.query("#line-1-old")) == 1
+                and len(file_changes.diff_view.query("#line-1-new")) == 1
+            )
+        )
+        await wait_until(
+            lambda: file_changes.diff_view.selected_file_header_path() == "one.py"
         )
 
         diff_view = file_changes.diff_view
@@ -97,14 +101,23 @@ async def test_enter_toggles_viewed_file_fold_in_combined_diff() -> None:
 
         assert header_text.startswith("▸ one.py")
         assert diff_view._folded_file_paths == frozenset({"one.py"})
-        assert diff_view._all_lines[0].new_content == FOLDED_VIEWED_FILE_MESSAGE
+        assert diff_view._all_lines[0].is_folded_file_placeholder
+        assert diff_view.selected_file_header_path() == "one.py"
+        assert diff_view._line_heights[0] == 0
         assert diff_view.split is True
+        assert len(diff_view.query("#line-0")) == 0
         assert len(diff_view.query("#line-0-old")) == 0
         assert len(diff_view.query("#line-0-new")) == 0
         assert len(diff_view.query("#line-1-old")) == 1
         assert len(diff_view.query("#line-1-new")) == 1
 
         diff_view.focus()
+        await pilot.press("j")
+        await wait_until(lambda: diff_view.selected_file_header_path() == "two.py")
+        assert diff_view.cursor_line == 1
+        await pilot.press("k")
+        await wait_until(lambda: diff_view.selected_file_header_path() == "one.py")
+
         await pilot.press("enter")
         await wait_until(lambda: "one.py" not in diff_view._folded_file_paths)
 
@@ -112,13 +125,14 @@ async def test_enter_toggles_viewed_file_fold_in_combined_diff() -> None:
         header_text = str(getattr(first_header.content, "plain", first_header.content))
         assert header_text.startswith("▾ one.py")
         assert all(
-            line.new_content != FOLDED_VIEWED_FILE_MESSAGE
+            not line.is_folded_file_placeholder
             for line in diff_view._all_lines
             if line.file_path == "one.py"
         )
 
         await pilot.press("enter")
         await wait_until(lambda: "one.py" in diff_view._folded_file_paths)
+        await wait_until(lambda: diff_view.selected_file_header_path() == "one.py")
 
         first_header = diff_view.query_one("#file-header-0", Static)
         header_text = str(getattr(first_header.content, "plain", first_header.content))
@@ -154,11 +168,14 @@ async def test_enter_toggles_unviewed_file_fold_in_combined_diff() -> None:
         diff_view.focus()
         await pilot.press("enter")
         await wait_until(lambda: "one.py" in diff_view._folded_file_paths)
+        await wait_until(lambda: diff_view.selected_file_header_path() == "one.py")
 
         first_header = diff_view.query_one("#file-header-0", Static)
         header_text = str(getattr(first_header.content, "plain", first_header.content))
         assert header_text.startswith("▸ one.py")
-        assert diff_view._all_lines[0].new_content == FOLDED_VIEWED_FILE_MESSAGE
+        assert diff_view._all_lines[0].is_folded_file_placeholder
+        assert diff_view.selected_file_header_path() == "one.py"
+        assert len(diff_view.query("#line-0")) == 0
 
         await pilot.press("enter")
         await wait_until(lambda: "one.py" not in diff_view._folded_file_paths)
@@ -197,8 +214,7 @@ async def test_enter_on_selected_pending_draft_does_not_fold_file() -> None:
         file_changes.refresh_files()
         await wait_until(lambda: file_changes.diff_view.current_file == "All files")
         await wait_until(
-            lambda: len(file_changes.diff_view.query("CommentCard.pending-draft"))
-            == 1
+            lambda: len(file_changes.diff_view.query("CommentCard.pending-draft")) == 1
         )
 
         diff_view = file_changes.diff_view

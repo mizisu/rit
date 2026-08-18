@@ -30,6 +30,14 @@ Vertical.diff-line {
     margin: 0;
 }
 
+DiffView .line-prefix {
+    color: $text-disabled;
+}
+
+DiffView .line-prefix.-cursor {
+    color: $text;
+}
+
 /* === Global Styles === */
 Screen {
     background: $background;

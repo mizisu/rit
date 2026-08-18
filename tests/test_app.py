@@ -4,34 +4,31 @@ import asyncio
 from typing import cast
 
 import pytest
-from textual.widgets import Static
+from textual.widgets import Static, TextArea
 
 from rit.app import RitApp
 from rit.cli import parse_pr_reference
 from rit.core.diff import parse_patch
-from rit.state.models import PR, LoadingState, PRComment, PRFile, PRReview
+from rit.state.models import (
+    PR,
+    LoadingState,
+    NodeList,
+    PendingReviewComment,
+    PRComment,
+    PRFile,
+    PRReview,
+    ReviewState,
+    ReviewThread,
+)
 from rit.ui.screens.settings import SettingsScreen
+from tests.conftest import wait_until
 
 
-def _stub_initial_loads(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    include_view_states: bool = False,
-) -> None:
+def _stub_initial_loads(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_load_all(_self) -> None:
         return None
 
     monkeypatch.setattr("rit.state.store.PRStore.load_all", fake_load_all)
-
-    if include_view_states:
-
-        async def fake_load_file_view_states(_self) -> None:
-            return None
-
-        monkeypatch.setattr(
-            "rit.state.store.PRStore.load_file_view_states",
-            fake_load_file_view_states,
-        )
 
 
 def _simple_diff(
@@ -131,7 +128,7 @@ class TestRitApp:
     @pytest.fixture
     def app(self, monkeypatch: pytest.MonkeyPatch) -> RitApp:
         """Create a test app instance."""
-        _stub_initial_loads(monkeypatch, include_view_states=True)
+        _stub_initial_loads(monkeypatch)
         return RitApp(owner="test", repo="repo", pr_number=123)
 
     async def test_pr_loaded_refreshes_description_before_discussion(
@@ -333,7 +330,7 @@ class TestRitApp:
             assert calls == ["data", "comments"]
             assert screen._pr_info_refresh_pending is False
 
-    async def test_staged_load_paints_first_file_then_combined_diff(
+    async def test_staged_load_paints_first_file_then_continuous_diff(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         release = asyncio.Event()
@@ -377,13 +374,15 @@ class TestRitApp:
                 )
             )
 
-        async def fake_load_file_view_states(_store) -> None:
-            return None
+        async def unexpected_load_file_view_states(_store) -> None:
+            raise AssertionError(
+                "viewed states are already included with changed files"
+            )
 
         monkeypatch.setattr("rit.state.store.PRStore.load_all", fake_load_all)
         monkeypatch.setattr(
             "rit.state.store.PRStore.load_file_view_states",
-            fake_load_file_view_states,
+            unexpected_load_file_view_states,
         )
 
         app = RitApp(owner="test", repo="repo", pr_number=123)
@@ -488,6 +487,171 @@ class TestRitApp:
                 )
 
             assert diff_view.inline_comment_target() == ("preview.py", 3, "RIGHT")
+
+    async def test_file_comment_ctrl_s_queues_pending_review(
+        self,
+        app: RitApp,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from rit.ui.screens.comment_delete import CommentDeleteScreen
+        from rit.ui.screens.main import MainScreen
+
+        path = "src/app.py"
+        source_diff = parse_patch("@@ -1 +1 @@\n-old\n+new", path)
+        source_diff.hunks[0].starts_file = True
+        source_diff.hunks[0].file_path = path
+        queued: list[tuple[str, str]] = []
+        posted: list[tuple[str, str]] = []
+
+        async with app.run_test() as pilot:
+            screen = cast(MainScreen, app.screen)
+            screen.switch_tab(1)
+            screen.store.state.pr = PR(number=123, head_sha="deadbeef")
+
+            async def queue_pending_file_comment(
+                body: str,
+                *,
+                path: str,
+                after_local_save=None,
+            ) -> PendingReviewComment:
+                queued.append((body, path))
+                draft = PendingReviewComment(
+                    body=body,
+                    path=path,
+                    line=0,
+                    subject_type="file",
+                )
+                screen.store.state.pending_review_comments.append(draft)
+                if after_local_save is not None:
+                    await after_local_save()
+                return draft
+
+            async def submit_file_comment(body: str, *, path: str) -> PRComment:
+                posted.append((body, path))
+                return PRComment(body=body, path=path, subject_type="file")
+
+            monkeypatch.setattr(
+                screen.store,
+                "queue_pending_file_comment",
+                queue_pending_file_comment,
+            )
+            monkeypatch.setattr(
+                screen.store,
+                "submit_file_comment",
+                submit_file_comment,
+            )
+
+            diff_view = screen.file_changes.diff_view
+            await diff_view.show_diff("All files", source_diff)
+            await pilot.pause()
+            assert diff_view._set_file_header_selection(0) is True
+            assert await diff_view.open_file_comment_editor() is True
+            await pilot.pause()
+            await pilot.pause()
+
+            editor = diff_view.query_one("#diff-file-comment-editor")
+            editor.query_one("#comment-editor-body", TextArea).text = "whole file"
+            await pilot.press("ctrl+s")
+            await wait_until(
+                lambda: (
+                    len(diff_view.query("#pending-file-draft-0-0")) == 1
+                    and diff_view.selected_file_header_path() == path
+                    and diff_view.file_comment_target() is None
+                )
+            )
+
+            assert queued == [("whole file", path)]
+            assert posted == []
+            assert diff_view.file_comment_target() is None
+
+            diff_view.focus()
+            await pilot.press("j")
+            assert diff_view.active_pending_draft_index() == 0
+
+            await pilot.press("d")
+            await pilot.pause()
+            assert isinstance(app.screen, CommentDeleteScreen)
+
+            await pilot.press("enter")
+            await wait_until(
+                lambda: not screen.store.state.pending_review_comments,
+                timeout=1,
+            )
+            await wait_until(
+                lambda: len(diff_view.query("#pending-file-draft-0-0")) == 0,
+                timeout=1,
+            )
+
+    async def test_post_file_comment_keeps_file_subject_after_refresh(
+        self,
+        app: RitApp,
+    ) -> None:
+        from rit.ui.screens.main import MainScreen
+
+        path = "src/app.py"
+        source_diff = parse_patch("@@ -1 +1 @@\n-old\n+new", path)
+        source_diff.hunks[0].starts_file = True
+        source_diff.hunks[0].file_path = path
+        comment = PRComment(
+            id=901,
+            body="whole file",
+            path=path,
+            line=1,
+            original_line=1,
+            side="RIGHT",
+            subject_type="file",
+            pull_request_review_id=91,
+        )
+        thread = ReviewThread(
+            id="thread-901",
+            path=path,
+            line=1,
+            original_line=1,
+            diff_side="RIGHT",
+            subject_type="FILE",
+            comments_connection=NodeList(nodes=[comment]),
+        )
+
+        class CommentService:
+            async def create_file_comment(self, *args, **kwargs) -> PRComment:
+                return comment
+
+            async def get_pr_all(self, pr_number: int) -> PR:
+                return PR(
+                    number=pr_number,
+                    head_sha="deadbeef",
+                    reviews_connection=NodeList(
+                        nodes=[PRReview(id=91, state=ReviewState.PENDING)]
+                    ),
+                    review_threads_connection=NodeList(nodes=[thread]),
+                )
+
+        async with app.run_test() as pilot:
+            screen = cast(MainScreen, app.screen)
+            screen.store.state.pr = PR(number=123, head_sha="deadbeef")
+            screen.store._service = CommentService()  # type: ignore[assignment]
+            diff_view = screen.file_changes.diff_view
+            await diff_view.show_diff("All files", source_diff)
+            await pilot.pause()
+            assert diff_view._set_file_header_selection(0) is True
+            assert await diff_view.open_file_comment_editor() is True
+            await pilot.pause()
+
+            assert await screen._post_file_comment("whole file", path=path) is True
+
+            assert diff_view.file_comment_target() is None
+            assert screen.store.state.pending_review_comments == [
+                PendingReviewComment(
+                    body="whole file",
+                    path=path,
+                    line=0,
+                    side="RIGHT",
+                    subject_type="file",
+                    review_comment_id=901,
+                )
+            ]
+            await pilot.pause()
+            assert len(diff_view.query("#pending-file-draft-0-0")) == 1
 
     async def test_save_inline_comment_draft_renders_immediately(
         self,
@@ -654,6 +818,83 @@ class TestRitApp:
             assert await task is True
             assert refresh_calls == 1
 
+    async def test_update_submitted_comment_from_diff_view(
+        self,
+        app: RitApp,
+    ) -> None:
+        from rit.ui.screens.main import MainScreen
+
+        patch = "@@ -1,2 +1,2 @@\n line 1\n line 2"
+        source_diff = parse_patch(patch, "preview.py")
+        comment = PRComment(
+            id=501,
+            node_id="PRRC_501",
+            body="before",
+            path="preview.py",
+            line=1,
+            side="RIGHT",
+            pull_request_review_id=91,
+        )
+        thread = ReviewThread.model_validate(
+            {
+                "id": "thread-501",
+                "path": "preview.py",
+                "line": 1,
+                "diffSide": "RIGHT",
+                "comments": {"nodes": [comment]},
+            }
+        )
+
+        class UpdateService:
+            def __init__(self) -> None:
+                self.updated: list[tuple[str, str]] = []
+
+            async def update_review_comment(
+                self,
+                node_id: str,
+                body: str,
+            ) -> PRComment:
+                self.updated.append((node_id, body))
+                return PRComment(node_id=node_id, body=body)
+
+        service = UpdateService()
+
+        async with app.run_test() as pilot:
+            screen = cast(MainScreen, app.screen)
+            screen.store._apply_discussion_state(
+                PR(
+                    number=123,
+                    review_threads_connection=NodeList(nodes=[thread]),
+                )
+            )
+            screen.store.state.file_diffs = {"preview.py": source_diff}
+            screen.store._service = service  # type: ignore[assignment]
+            screen.switch_tab(1)
+            diff_view = screen.file_changes.diff_view
+            await diff_view.show_diff("preview.py", source_diff)
+            diff_view.focus()
+            await pilot.press("j")
+            assert diff_view.active_review_comment() == comment
+
+            await pilot.press("c")
+            await wait_until(
+                lambda: diff_view.inline_comment_edit_target() == comment,
+                timeout=1,
+            )
+            body = diff_view.query_one("#comment-editor-body", TextArea)
+            assert body.text == "before"
+            body.text = "after"
+
+            await pilot.press("ctrl+s")
+            await wait_until(lambda: service.updated, timeout=1)
+            await wait_until(
+                lambda: screen.store.state.comments[0].body == "after",
+                timeout=1,
+            )
+
+            assert service.updated == [("PRRC_501", "after")]
+            assert diff_view.inline_comment_edit_target() is None
+
     async def test_delete_inline_comment_draft_requires_selected_draft(
         self,
         app: RitApp,
@@ -707,7 +948,7 @@ class TestRitApp:
                 count_refresh,
             )
 
-            assert await screen._delete_pending_inline_comment() is False
+            assert screen._selected_comment_delete_target() is None
 
             assert screen.store.state.pending_review_comments[0].body == "hello draft"
             assert service.delete_called is False
@@ -782,7 +1023,9 @@ class TestRitApp:
                 count_refresh,
             )
 
-            task = asyncio.create_task(screen._delete_pending_inline_comment())
+            target = screen._selected_comment_delete_target()
+            assert target is not None
+            task = asyncio.create_task(screen._delete_comment(target))
             await pilot.pause()
             await pilot.pause()
 
@@ -790,8 +1033,174 @@ class TestRitApp:
             assert not task.done()
 
             service.allow_delete.set()
-            assert await task is True
+            assert await task == "draft"
             assert refresh_calls == 1
+
+    async def test_delete_pending_comment_requires_confirmation(
+        self,
+        app: RitApp,
+    ) -> None:
+        from rit.ui.screens.comment_delete import CommentDeleteScreen
+        from rit.ui.screens.main import MainScreen
+
+        patch = "@@ -1,2 +1,2 @@\n line 1\n line 2"
+        source_diff = parse_patch(patch, "preview.py")
+
+        async with app.run_test() as pilot:
+            screen = cast(MainScreen, app.screen)
+            screen.store.state.pr = PR(number=123, head_sha="deadbeef")
+            screen.store.state.file_diffs = {"preview.py": source_diff}
+            screen.store.save_pending_inline_comment(
+                "pending draft",
+                path="preview.py",
+                line=1,
+                side="RIGHT",
+            )
+            screen.switch_tab(1)
+            diff_view = screen.file_changes.diff_view
+            await diff_view.show_diff("preview.py", source_diff)
+            diff_view.focus()
+            await pilot.press("j")
+            assert diff_view.active_pending_draft_index() == 0
+
+            await pilot.press("d")
+            await pilot.pause()
+            assert isinstance(app.screen, CommentDeleteScreen)
+            assert len(screen.store.state.pending_review_comments) == 1
+
+            await pilot.press("escape")
+            await pilot.pause()
+            assert len(screen.store.state.pending_review_comments) == 1
+
+            await pilot.press("d")
+            await pilot.pause()
+            assert isinstance(app.screen, CommentDeleteScreen)
+            await pilot.press("enter")
+            await wait_until(
+                lambda: not screen.store.state.pending_review_comments,
+                timeout=1,
+            )
+
+    async def test_delete_submitted_comment_from_diff_view(
+        self,
+        app: RitApp,
+    ) -> None:
+        from rit.ui.screens.comment_delete import CommentDeleteScreen
+        from rit.ui.screens.main import MainScreen
+
+        patch = "@@ -1,2 +1,2 @@\n line 1\n line 2"
+        source_diff = parse_patch(patch, "preview.py")
+        comment = PRComment(
+            id=501,
+            node_id="PRRC_501",
+            body="submitted comment",
+            path="preview.py",
+            line=1,
+            side="RIGHT",
+        )
+        thread = ReviewThread.model_validate(
+            {
+                "id": "thread-501",
+                "path": "preview.py",
+                "line": 1,
+                "diffSide": "RIGHT",
+                "comments": {"nodes": [comment]},
+            }
+        )
+
+        class DeleteService:
+            def __init__(self) -> None:
+                self.deleted: list[str] = []
+
+            async def delete_review_comment(self, node_id: str) -> None:
+                self.deleted.append(node_id)
+
+            async def get_pr_all(self, pr_number: int) -> PR:
+                return PR(number=pr_number)
+
+        service = DeleteService()
+
+        async with app.run_test() as pilot:
+            screen = cast(MainScreen, app.screen)
+            screen.store.state.pr = PR(number=123)
+            screen.store.state.file_diffs = {"preview.py": source_diff}
+            screen.store.state.review_threads = [thread]
+            screen.store.state.comments = [comment]
+            screen.store._service = service  # type: ignore[assignment]
+            screen.switch_tab(1)
+            diff_view = screen.file_changes.diff_view
+            await diff_view.show_diff("preview.py", source_diff)
+            diff_view.focus()
+            await pilot.press("j")
+            assert diff_view.active_review_comment() == comment
+
+            await pilot.press("d")
+            await pilot.pause()
+            assert isinstance(app.screen, CommentDeleteScreen)
+
+            await pilot.press("enter")
+            await wait_until(lambda: service.deleted, timeout=1)
+            await wait_until(
+                lambda: not screen.store.state.review_threads,
+                timeout=1,
+            )
+
+        assert service.deleted == ["PRRC_501"]
+
+    async def test_delete_submitted_comment_from_pr_timeline(
+        self,
+        app: RitApp,
+    ) -> None:
+        from rit.ui.screens.comment_delete import CommentDeleteScreen
+        from rit.ui.screens.main import MainScreen
+
+        comment = PRComment(
+            id=601,
+            node_id="PRRC_601",
+            body="timeline comment",
+            path="preview.py",
+            line=1,
+            side="RIGHT",
+            pull_request_review_id=91,
+        )
+
+        class DeleteService:
+            def __init__(self) -> None:
+                self.deleted: list[str] = []
+
+            async def delete_review_comment(self, node_id: str) -> None:
+                self.deleted.append(node_id)
+
+            async def get_pr_all(self, pr_number: int) -> PR:
+                return PR(number=pr_number)
+
+        service = DeleteService()
+
+        async with app.run_test() as pilot:
+            screen = cast(MainScreen, app.screen)
+            screen.store.state.pr = PR(number=123)
+            screen.store.state.reviews = [PRReview(id=91, state=ReviewState.COMMENTED)]
+            screen.store.state.comments = [comment]
+            screen.store._service = service  # type: ignore[assignment]
+            timeline = screen.pr_info._timeline_widget()
+            await timeline._build_timeline_async()
+            await pilot.pause()
+            timeline.select_first_item()
+            timeline.next_item()
+            assert screen.pr_info.current_review_comment() == comment
+
+            await pilot.press("d")
+            await pilot.pause()
+            assert isinstance(app.screen, CommentDeleteScreen)
+
+            await pilot.press("enter")
+            await wait_until(lambda: service.deleted, timeout=1)
+            await wait_until(
+                lambda: not screen.store.state.comments,
+                timeout=1,
+            )
+
+        assert service.deleted == ["PRRC_601"]
 
     async def test_save_full_file_preview_draft_outside_diff_renders_locally(
         self,
@@ -848,7 +1257,7 @@ class TestRitApp:
             assert screen.store.state.pending_review_id is None
             assert service.create_calls == 0
 
-    async def test_save_combined_diff_draft_renders_immediately(
+    async def test_save_continuous_diff_draft_renders_immediately(
         self,
         app: RitApp,
     ) -> None:
@@ -881,11 +1290,12 @@ class TestRitApp:
 
             diff_view = screen.file_changes.diff_view
             assert diff_view.current_file == COMBINED_DIFF_FILENAME
-            line_index = diff_view._line_index_by_file_new_number[("two.py", 1)]
-            diff_view.cursor_line = line_index
+            diff_view.cursor_line = diff_view._line_index_by_file_new_number[
+                ("two.py", 1)
+            ]
 
             await screen._save_inline_comment_draft(
-                "combined draft",
+                "continuous draft",
                 path="two.py",
                 line=1,
                 side="RIGHT",
@@ -894,7 +1304,7 @@ class TestRitApp:
             await pilot.pause()
 
             draft = diff_view.query_one("#pending-draft-3-right-0", CommentCard)
-            assert draft._body == "combined draft"
+            assert draft._body == "continuous draft"
 
     async def test_quit_action(self, app: RitApp) -> None:
         """Test that q quits the app."""

@@ -3,7 +3,7 @@
 import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
 from textual._context import NoActiveAppError
@@ -45,9 +45,9 @@ if TYPE_CHECKING:
 
 __all__ = (
     "INITIAL_TIMELINE_BODY_COUNT",
-    "PRTimeline",
     "TIMELINE_BODY_MOUNT_DELAY",
     "TIMELINE_BODY_MOUNT_MAX_DELAY",
+    "PRTimeline",
 )
 
 
@@ -173,13 +173,15 @@ class PRTimeline(Vertical):
         root_comment_id: int
         is_resolved: bool  # New state after toggle
 
-    def __init__(self, store: "PRStore", id: str | None = None) -> None:
+    def __init__(self, store: PRStore, id: str | None = None) -> None:
         super().__init__(id=id)
         self.store = store
         self._navigable_items: list[Widget] = []
         self._current_index: int = -1  # -1 means no selection
         self._navigable_items_valid: bool = False  # Cache validity flag
         self._thread_widget_info: dict[Widget, tuple[str, int, bool]] = {}
+        self._review_comment_by_widget: dict[Widget, PRComment] = {}
+        self._thread_item_by_comment_widget: dict[Widget, ReviewThreadItem] = {}
         self._pending_resolve_threads: set[str] = set()
         self._scroll_container: VerticalScroll | None = None
         self._refresh_worker: Worker[None] | None = None
@@ -338,6 +340,8 @@ class PRTimeline(Vertical):
         with self.app.batch_update():
             await container.remove_children()
             self._thread_widget_info.clear()
+            self._review_comment_by_widget.clear()
+            self._thread_item_by_comment_widget.clear()
             self._reset_navigable_item_source()
 
             timeline_items = build_timeline_items(
@@ -524,6 +528,14 @@ class PRTimeline(Vertical):
         )
         container.mount(item)
         self._register_navigable_item(item)
+        for index in range(item.comment_count):
+            comment = item.comment_at(index)
+            card = item.comment_card_at(index)
+            if comment is None or card is None:
+                continue
+            self._register_navigable_item(card)
+            self._review_comment_by_widget[card] = comment
+            self._thread_item_by_comment_widget[card] = item
 
     def _reset_navigable_item_source(self) -> None:
         self._navigable_item_source = []
@@ -539,11 +551,27 @@ class PRTimeline(Vertical):
         return [
             item
             for item in self._navigable_item_source
-            if item.is_mounted
-            and (
-                not isinstance(item, Collapsible) or self._is_visible_collapsible(item)
-            )
+            if self._is_navigable_source_item(item)
         ]
+
+    def _is_navigable_source_item(self, item: Widget) -> bool:
+        if not item.is_mounted:
+            return False
+
+        parent_thread = self._thread_item_by_comment_widget.get(item)
+        if parent_thread is not None:
+            return not parent_thread.collapsed
+
+        if isinstance(item, ReviewThreadItem) and item in self._thread_widget_info:
+            if item.collapsed or item.comment_count == 0:
+                return True
+            for index in range(item.comment_count):
+                card = item.comment_card_at(index)
+                if card is not None and card.is_mounted:
+                    return False
+            return True
+
+        return not isinstance(item, Collapsible) or self._is_visible_collapsible(item)
 
     def _build_comment_thread_item(
         self,
@@ -627,9 +655,8 @@ class PRTimeline(Vertical):
 
     def _is_visible_collapsible(self, collapsible: Collapsible) -> bool:
         for ancestor in collapsible.ancestors:
-            if isinstance(ancestor, Collapsible):
-                if ancestor.collapsed:
-                    return False  # Parent is collapsed, so this is not visible
+            if isinstance(ancestor, Collapsible) and ancestor.collapsed:
+                return False
         return True
 
     def _invalidate_navigable_items(self) -> None:
@@ -676,19 +703,30 @@ class PRTimeline(Vertical):
 
         self._navigable_items_valid = True
 
+    def _set_item_selected(self, item: Widget, selected: bool) -> None:
+        parent_thread = self._thread_item_by_comment_widget.get(item)
+        if selected:
+            item.add_class("--selected")
+            if parent_thread is not None:
+                parent_thread.add_class("--selected")
+        else:
+            item.remove_class("--selected")
+            if parent_thread is not None:
+                parent_thread.remove_class("--selected")
+
     def _update_selection(self, new_index: int, scroll_to_view: bool = True) -> None:
         if scroll_to_view:
             self._preserve_initial_scroll_home = False
 
         if 0 <= self._current_index < len(self._navigable_items):
             old_item = self._navigable_items[self._current_index]
-            old_item.remove_class("--selected")
+            self._set_item_selected(old_item, False)
 
         self._current_index = new_index
 
         if 0 <= self._current_index < len(self._navigable_items):
             new_item = self._navigable_items[self._current_index]
-            new_item.add_class("--selected")
+            self._set_item_selected(new_item, True)
 
             if scroll_to_view and self._scroll_container:
                 try:
@@ -724,15 +762,37 @@ class PRTimeline(Vertical):
             return
 
         current_item = self._navigable_items[self._current_index]
+        parent_thread = self._thread_item_by_comment_widget.get(current_item)
+        if parent_thread is not None:
+            self._set_item_selected(current_item, False)
+            parent_thread.collapsed = True
+            self._invalidate_navigable_items()
+            self._select_widget(parent_thread)
+            return
+
+        if isinstance(current_item, ReviewThreadItem):
+            current_item.collapsed = False
+            self._invalidate_navigable_items()
+            first_card = current_item.comment_card_at(0)
+            if first_card is not None:
+                self._select_widget(first_card)
+            return
 
         if isinstance(current_item, Collapsible):
             current_item.collapsed = not current_item.collapsed
             self._invalidate_navigable_items()
 
+    def _select_widget(self, target: Widget) -> None:
+        self._collect_navigable_items()
+        for index, item in enumerate(self._navigable_items):
+            if item is target:
+                self._update_selection(index)
+                return
+
     def clear_selection(self) -> None:
         if 0 <= self._current_index < len(self._navigable_items):
             old_item = self._navigable_items[self._current_index]
-            old_item.remove_class("--selected")
+            self._set_item_selected(old_item, False)
         self._current_index = -1
 
     @property
@@ -748,12 +808,8 @@ class PRTimeline(Vertical):
     def _is_unresolved_thread_or_comment(self, widget: Widget) -> bool:
         if widget in self._thread_widget_info:
             _, _, is_resolved = self._thread_widget_info[widget]
-            if is_resolved:
-                return False
-            return True
-        if isinstance(widget, Collapsible):
-            return False
-        return True
+            return not is_resolved
+        return not isinstance(widget, Collapsible)
 
     def next_comment(self) -> None:
         self._collect_navigable_items()
@@ -835,11 +891,18 @@ class PRTimeline(Vertical):
             return None
 
         current = self._navigable_items[self._current_index]
+        thread_item = self._thread_item_by_comment_widget.get(current)
+        if thread_item is not None:
+            current = thread_item
+        return self._thread_widget_info.get(current)
 
-        if current in self._thread_widget_info:
-            return self._thread_widget_info[current]
-
-        return None
+    def current_review_comment(self) -> PRComment | None:
+        """Return the individually selected review comment."""
+        if not (0 <= self._current_index < len(self._navigable_items)):
+            return None
+        return self._review_comment_by_widget.get(
+            self._navigable_items[self._current_index]
+        )
 
     def get_current_thread_location(
         self,
@@ -1023,7 +1086,7 @@ class PRTimeline(Vertical):
         if is_min_datetime(dt):
             return ""
 
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         dt = datetime_sort_key(dt)
 
         diff = now - dt

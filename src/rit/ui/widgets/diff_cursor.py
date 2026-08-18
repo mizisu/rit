@@ -11,6 +11,7 @@ from textual.geometry import Size
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets import diff_cursor_update as _cursor_update
+from rit.ui.widgets import diff_folding as _folding
 from rit.ui.widgets import diff_geometry as _geometry
 from rit.ui.widgets import diff_search as _search
 from rit.ui.widgets import diff_virtual as _virtual
@@ -100,6 +101,15 @@ def _activate_comment_cursor(view: DiffView, line_index: int) -> None:
         view.scroll_to_widget(widget, animate=False)
 
 
+def _activate_file_comment_cursor(view: DiffView, hunk_index: int) -> None:
+    if view._cursor_ui.flush_pending:
+        _flush_queued_cursor_ui_updates(view)
+    _comments.update_file_comment_cursor_highlight(view, hunk_index)
+    widget = _comments.active_file_comment_widget(view, hunk_index)
+    if widget is not None and widget.is_mounted:
+        view.scroll_to_widget(widget, animate=False)
+
+
 def _file_header_before_row(view: DiffView, row: RenderedRow) -> int | None:
     diff = view._diff
     hunk_index = row.hunk_index
@@ -125,9 +135,7 @@ def _scroll_to_file_header(view: DiffView, hunk_index: int) -> None:
     for widget in view.query(f"#file-header-{hunk_index}"):
         if not widget.is_mounted:
             continue
-        top = int(view.scroll_y) + (
-            widget.region.y - view.scrollable_content_region.y
-        )
+        top = int(view.scroll_y) + (widget.region.y - view.scrollable_content_region.y)
         _scroll_to_vertical_span(view, top, top + 1, animate=False)
         return
 
@@ -163,6 +171,30 @@ def _move_down_one_row_or_header(
 def _step_down_one(view: DiffView) -> bool:
     cur_line = view.cursor_line
     if view._selected_file_header_hunk is not None:
+        hunk_index = view._selected_file_header_hunk
+        comment_count = _comments.total_comments_at_file_header(view, hunk_index)
+        comment_offset = view._comment_cursor_index
+        if comment_offset > 0:
+            if comment_offset < comment_count:
+                view._comment_cursor_index = comment_offset + 1
+                _activate_file_comment_cursor(view, hunk_index)
+                return True
+            view._comment_cursor_index = 0
+            _comments.update_file_comment_cursor_highlight(view, hunk_index)
+        elif not view.visual_mode and comment_count > 0:
+            view._comment_cursor_index = 1
+            _activate_file_comment_cursor(view, hunk_index)
+            return True
+
+        line = view._current_line()
+        if line is not None and _folding.is_folded_placeholder_line(line):
+            moved = _move_down_one_row_or_header(
+                view,
+                scroll_in_visual=view.visual_mode,
+            )
+            if moved:
+                _flush_cursor_ui_now_if_safe(view)
+            return moved
         view._set_file_header_selection(None)
         _scroll_to_cursor(view)
         return True
@@ -206,6 +238,18 @@ def _step_down_one(view: DiffView) -> bool:
 
 def _step_up_one(view: DiffView) -> bool:
     if view._selected_file_header_hunk is not None:
+        hunk_index = view._selected_file_header_hunk
+        comment_offset = view._comment_cursor_index
+        if comment_offset > 1:
+            view._comment_cursor_index = comment_offset - 1
+            _activate_file_comment_cursor(view, hunk_index)
+            return True
+        if comment_offset == 1:
+            view._comment_cursor_index = 0
+            _comments.update_file_comment_cursor_highlight(view, hunk_index)
+            _scroll_to_file_header(view, hunk_index)
+            return True
+
         current = view._current_row_index()
         if current <= 0:
             return False
@@ -235,7 +279,14 @@ def _step_up_one(view: DiffView) -> bool:
         if row is not None:
             hunk_index = _file_header_before_row(view, row)
             if hunk_index is not None:
-                return _select_file_header(view, hunk_index)
+                selected = _select_file_header(view, hunk_index)
+                comment_count = _comments.total_comments_at_file_header(
+                    view, hunk_index
+                )
+                if selected and comment_count > 0:
+                    view._comment_cursor_index = comment_count
+                    _activate_file_comment_cursor(view, hunk_index)
+                return selected
 
     moved = _move_cursor_rows(view, -1, scroll_in_visual=view.visual_mode)
     if not moved:
@@ -747,9 +798,7 @@ def _has_height_estimate_drift(view: DiffView) -> bool:
         return True
     if view._comment_threads_by_line:
         return True
-    if view._pending_comment_drafts_by_line:
-        return True
-    return False
+    return bool(view._pending_comment_drafts_by_line)
 
 
 def _scroll_to_cursor(view: DiffView) -> None:
@@ -1113,7 +1162,7 @@ def _move_cursor_to_row(
         target_pane = None
     else:
         target_pane = "old" if row.side == "old" else "new"
-    return _move_cursor(
+    moved = _move_cursor(
         view,
         line=row.line_index,
         pane=target_pane,
@@ -1122,6 +1171,10 @@ def _move_cursor_to_row(
         preserve_desired_column=preserve_desired_column,
         update_active_pane=update_active_pane,
     )
+    line = view._all_lines[row.line_index]
+    if not view.visual_mode and _folding.is_folded_placeholder_line(line):
+        return _select_file_header(view, row.hunk_index) or moved
+    return moved
 
 
 def _set_cursor_from_row(view: DiffView, row: RenderedRow) -> None:
@@ -1246,8 +1299,8 @@ def _scroll_to_hunk(view: DiffView, index: int) -> None:
             else None
         )
         if target_range is not None:
-            _, start, end = target_range
-            target_line = start if end >= start else start
+            _, start, _end = target_range
+            target_line = start
             if not (view._virt.window_start <= target_line <= view._virt.window_end):
                 _virtual._set_virtual_window_around(view, target_line)
                 view._virt.render_pending = True

@@ -11,11 +11,12 @@ from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.state.models import PRFile
 
 __all__ = (
+    "MIN_LINE_NUMBER_WIDTH",
     "LineNumberColumns",
     "code_widths_for_layout",
     "file_header_width_for_layout",
-    "line_number_width_for_layout",
     "line_number_columns_for_change_counts",
+    "line_number_width_for_layout",
     "preview_prefix_width_for_layout",
     "should_force_unified_for_file",
     "should_force_unified_for_hunk",
@@ -26,6 +27,10 @@ __all__ = (
 
 
 type LineNumberColumns = Literal["old", "new", "both"]
+
+
+MIN_LINE_NUMBER_WIDTH = 4
+_CODE_GAP_WIDTH = 2
 
 
 def should_force_unified_for_file(
@@ -71,8 +76,8 @@ def split_prefix_width_for_layout(
 ) -> int:
     """Return prefix cell width for one split diff side."""
     if not show_line_numbers:
-        return 2
-    return line_number_width + 2
+        return 1 + _CODE_GAP_WIDTH
+    return line_number_width + 2 + _CODE_GAP_WIDTH
 
 
 def unified_prefix_width_for_layout(
@@ -84,8 +89,8 @@ def unified_prefix_width_for_layout(
 ) -> int:
     """Return prefix cell width for unified diff lines."""
     if not show_line_numbers:
-        return 2
-    width = 2
+        return 1 + _CODE_GAP_WIDTH
+    width = 1 + _CODE_GAP_WIDTH
     if line_number_columns in {"old", "both"}:
         width += old_line_number_width + 1
     if line_number_columns in {"new", "both"}:
@@ -112,8 +117,8 @@ def preview_prefix_width_for_layout(
 ) -> int:
     """Return prefix cell width for full-file preview lines."""
     if not show_line_numbers:
-        return 3
-    return new_line_number_width + 4
+        return 2 + _CODE_GAP_WIDTH
+    return new_line_number_width + 3 + _CODE_GAP_WIDTH
 
 
 def line_number_width_for_layout(
@@ -125,11 +130,13 @@ def line_number_width_for_layout(
     if not show_line_numbers:
         return 0
     if not numbers:
-        return 1
+        return MIN_LINE_NUMBER_WIDTH
     if len(numbers) == 1:
         width = len(str(next(iter(numbers))))
-        return width if width > 1 else 1
-    return max(1, len(str(max(numbers))))
+        if width < MIN_LINE_NUMBER_WIDTH:
+            return MIN_LINE_NUMBER_WIDTH
+        return width
+    return max(MIN_LINE_NUMBER_WIDTH, len(str(max(numbers))))
 
 
 def split_placeholder_width_for_layout(

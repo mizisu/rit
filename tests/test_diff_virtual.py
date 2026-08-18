@@ -3,12 +3,14 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import pytest
+from textual.app import App, ComposeResult
 
 from rit.core.diff import parse_patch
-from rit.ui.widgets import diff_virtual
-from rit.ui.widgets import diff_comments
+from rit.core.types import DiffHunk, DiffLine, FileDiff
+from rit.ui.widgets import diff_comments, diff_virtual
 from rit.ui.widgets.diff_plan import build_diff_plan
 from rit.ui.widgets.diff_types import VirtualState
+from rit.ui.widgets.diff_view import DiffView
 
 
 class VirtualLineGroupView:
@@ -65,6 +67,80 @@ def test_iter_virtualized_line_groups_does_not_copy_line_window() -> None:
 
     assert all(not isinstance(group, list) for group in groups)
     assert [[line.line_index for line in group] for group in groups] == [[1], [2]]
+
+
+@pytest.mark.asyncio
+async def test_virtual_window_shift_preserves_file_headers() -> None:
+    def file_hunk(path: str) -> DiffHunk:
+        return DiffHunk(
+            old_start=1,
+            old_count=8,
+            new_start=1,
+            new_count=8,
+            lines=[
+                DiffLine(
+                    old_line_no=line_number,
+                    new_line_no=line_number,
+                    old_content=f"{path} {line_number}",
+                    new_content=f"{path} {line_number}",
+                    file_path=path,
+                )
+                for line_number in range(1, 9)
+            ],
+            starts_file=True,
+            file_path=path,
+        )
+
+    diff = FileDiff(
+        filename="All files",
+        hunks=[file_hunk("one.py"), file_hunk("two.py")],
+        show_hunk_headers=False,
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        diff_view.VIRTUALIZE_LINE_THRESHOLD = 1
+        diff_view.VIRTUAL_WINDOW_RADIUS = 3
+        diff_view.VIRTUAL_WINDOW_SHIFT_MARGIN = 1
+        await diff_view.show_diff("All files", diff)
+        await pilot.pause()
+
+        assert diff_view._virt.active
+        assert len(diff_view.query("#file-header-0")) == 1
+        assert len(diff_view.query("#file-header-1")) == 0
+
+        diff_virtual._set_virtual_window_around(diff_view, 4)
+        assert await diff_virtual._try_shift_virtual_window_incremental(diff_view)
+        await pilot.pause()
+
+        assert len(diff_view.query("#file-header-0")) == 0
+
+        diff_virtual._set_virtual_window_around(diff_view, 6)
+        assert await diff_virtual._try_shift_virtual_window_incremental(diff_view)
+        await pilot.pause()
+
+        second_header = diff_view.query_one("#file-header-1")
+        second_file_lines = diff_view._line_widgets_by_index[8]
+        assert second_header.region.y < second_file_lines.region.y
+
+        diff_virtual._set_virtual_window_around(diff_view, 4)
+        assert await diff_virtual._try_shift_virtual_window_incremental(diff_view)
+        await pilot.pause()
+
+        assert len(diff_view.query("#file-header-1")) == 0
+
+        diff_virtual._set_virtual_window_around(diff_view, 2)
+        assert await diff_virtual._try_shift_virtual_window_incremental(diff_view)
+        await pilot.pause()
+
+        first_header = diff_view.query_one("#file-header-0")
+        first_file_lines = diff_view._line_widgets_by_index[0]
+        assert first_header.region.y < first_file_lines.region.y
 
 
 def test_mount_virtualized_ranges_at_bottom_uses_sorted_repair_order(
@@ -187,7 +263,9 @@ async def test_clear_virtual_hunk_headers_does_not_copy_header_items() -> None:
 
 
 @pytest.mark.asyncio
-async def test_remove_stale_virtual_hunk_headers_does_not_copy_all_header_keys() -> None:
+async def test_remove_stale_virtual_hunk_headers_does_not_copy_all_header_keys() -> (
+    None
+):
     class HeaderMap(dict[int, HeaderWidget]):
         def __iter__(self):
             raise AssertionError("stale header cleanup should not copy all keys")

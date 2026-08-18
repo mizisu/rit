@@ -120,6 +120,11 @@ PRInfo CommentCard.comment-box.--selected {
     border: solid #8aadf4;
 }
 
+PRInfo CommentCard.thread-comment.--selected,
+PRInfo CommentCard.thread-reply.--selected {
+    background: #363a4f;
+}
+
 PRInfo Collapsible.--selected {
     border: solid #8aadf4;
 }

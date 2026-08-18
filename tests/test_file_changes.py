@@ -646,6 +646,25 @@ async def test_file_changes_renders_loaded_file_diffs_as_combined_scroll() -> No
 
 
 @pytest.mark.asyncio
+async def test_single_file_uses_continuous_scroll_by_default() -> None:
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    store = PRStore()
+    store.state.files = [PRFile(filename="one.py", status="modified", patch=patch)]
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test():
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await wait_until(lambda: file_changes.diff_view.current_file == "All files")
+
+        assert file_changes._combined_file_line_starts == {"one.py": 0}
+
+
+@pytest.mark.asyncio
 async def test_file_changes_waits_for_files_to_finish_before_combined_diff() -> None:
     patch = "@@ -1,1 +1,1 @@\n-old\n+new"
     store = PRStore()

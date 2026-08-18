@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from textual.containers import VerticalScroll
 from textual.content import Content
@@ -16,10 +16,6 @@ from rit.ui.widgets.diff_types import (
     UnifiedBlockRowStaticData,
     UnifiedDiffBlock,
 )
-
-if TYPE_CHECKING:
-    pass
-
 
 __all__ = ()
 
@@ -39,16 +35,14 @@ def _invalidate_block_static_row_cache(
 
 def _should_use_unified_block_renderer(view) -> bool:
     return (
-        (view._virt.active or len(view._all_lines) >= view.BLOCK_RENDER_LINE_THRESHOLD)
-        and not view.split
-    )
+        view._virt.active or len(view._all_lines) >= view.BLOCK_RENDER_LINE_THRESHOLD
+    ) and not view.split
 
 
 def _should_use_split_block_renderer(view) -> bool:
     return (
-        (view._virt.active or len(view._all_lines) >= view.BLOCK_RENDER_LINE_THRESHOLD)
-        and view.split
-    )
+        view._virt.active or len(view._all_lines) >= view.BLOCK_RENDER_LINE_THRESHOLD
+    ) and view.split
 
 
 def _can_render_in_unified_block(view, line: DiffLine) -> bool:
@@ -56,9 +50,7 @@ def _can_render_in_unified_block(view, line: DiffLine) -> bool:
         return False
     if line.line_index in view._pending_comment_drafts_by_line:
         return False
-    if line.line_index == getattr(view, "_inline_comment_editor_line_index", None):
-        return False
-    return True
+    return line.line_index != getattr(view, "_inline_comment_editor_line_index", None)
 
 
 def _can_render_in_split_block(view, line: DiffLine) -> bool:
@@ -66,9 +58,7 @@ def _can_render_in_split_block(view, line: DiffLine) -> bool:
         return False
     if line.line_index in view._pending_comment_drafts_by_line:
         return False
-    if line.line_index == getattr(view, "_inline_comment_editor_line_index", None):
-        return False
-    return True
+    return line.line_index != getattr(view, "_inline_comment_editor_line_index", None)
 
 
 def _compute_unified_block_static_rows(
@@ -161,6 +151,46 @@ def _cursor_block_line_style(line_style: str) -> str:
     return "on $primary 25%"
 
 
+def _sync_unified_block_annotation_cursor(view, block: UnifiedDiffBlock) -> None:
+    setter = getattr(block, "set_active_annotation_rows", None)
+    if not callable(setter):
+        return
+
+    active_rows: tuple[int, ...] = ()
+    line_index = getattr(view, "cursor_line", -1)
+    if view._line_number_cursor_active(line_index):
+        row_range = block._row_ranges_by_line.get(line_index)
+        if row_range is not None:
+            start, end = row_range
+            side = view._cursor_side_for_line(view._all_lines[line_index])
+            if end - start == 1 or side == "old":
+                active_rows = (start,)
+            elif side == "new":
+                active_rows = (end - 1,)
+            else:
+                active_rows = tuple(range(start, end))
+    setter(active_rows)
+
+
+def _sync_split_block_annotation_cursor(view, block: SplitDiffBlock) -> None:
+    setter = getattr(block, "set_active_annotation_rows", None)
+    if not callable(setter):
+        return
+
+    left_rows: tuple[int, ...] = ()
+    right_rows: tuple[int, ...] = ()
+    line_index = getattr(view, "cursor_line", -1)
+    if view._line_number_cursor_active(line_index):
+        row = block._rows_by_line.get(line_index)
+        if row is not None:
+            side = view._cursor_side_for_line(view._all_lines[line_index])
+            if side in ("old", "auto"):
+                left_rows = (row,)
+            if side in ("new", "auto"):
+                right_rows = (row,)
+    setter(left=left_rows, right=right_rows)
+
+
 def _selection_spec_for_rendered_line(view, line_index: int):
     if not getattr(view, "visual_mode", False):
         return None
@@ -177,7 +207,7 @@ def _build_unified_block_row_data(
     cursor_side = (
         view._cursor_side_for_line(line)
         if view._diff_line_cursor_active(line.line_index)
-            else None
+        else None
     )
     spec = _selection_spec_for_rendered_line(view, line.line_index)
 
@@ -343,7 +373,10 @@ def _refresh_unified_block_rows(
         line = view._all_lines[line_idx]
         _, code_lines, line_styles = _build_unified_block_row_data(view, line)
         updates[line_idx] = (code_lines, line_styles)
-    return block.update_rows(updates)
+    updated = block.update_rows(updates)
+    if updated:
+        _sync_unified_block_annotation_cursor(view, block)
+    return updated
 
 
 def _refresh_unified_block(view, block: UnifiedDiffBlock) -> None:
@@ -369,6 +402,7 @@ def _refresh_unified_block(view, block: UnifiedDiffBlock) -> None:
         width=view._unified_code_width,
         row_ranges=row_ranges,
     )
+    _sync_unified_block_annotation_cursor(view, block)
 
 
 def _register_split_block(
@@ -457,7 +491,10 @@ def _refresh_split_block_rows(
             right_style,
         ) = _build_split_block_row_data(view, line)
         updates[line_idx] = (left_code, left_style, right_code, right_style)
-    return block.update_rows(updates)
+    updated = block.update_rows(updates)
+    if updated:
+        _sync_split_block_annotation_cursor(view, block)
+    return updated
 
 
 def _refresh_split_block(view, block: SplitDiffBlock) -> None:
@@ -503,6 +540,7 @@ def _refresh_split_block(view, block: SplitDiffBlock) -> None:
         left_width=view._split_old_code_width,
         right_width=view._split_new_code_width,
     )
+    _sync_split_block_annotation_cursor(view, block)
 
 
 def _refresh_grouped_blocks_for_lines(view, line_indices: Collection[int]) -> bool:
@@ -586,6 +624,7 @@ def _render_split_line_block(
         left_width=view._split_old_code_width,
         right_width=view._split_new_code_width,
     )
+    _sync_split_block_annotation_cursor(view, block)
     if before is not None:
         container.mount(block, before=before)
     else:
@@ -627,6 +666,7 @@ def _render_unified_line_block(
         width=view._unified_code_width,
         row_ranges=row_ranges,
     )
+    _sync_unified_block_annotation_cursor(view, block)
     if before is not None:
         container.mount(block, before=before)
     else:

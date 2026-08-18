@@ -162,7 +162,7 @@ def test_line_number_width_reuses_number_index_keys_without_tuple_copy(
         raising=False,
     )
 
-    assert _render_mod._old_line_number_width(View()) == 3
+    assert _render_mod._old_line_number_width(View()) == 4
     assert _render_mod._new_line_number_width(View()) == 4
 
 

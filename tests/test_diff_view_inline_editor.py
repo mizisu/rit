@@ -4,6 +4,8 @@ from textual.widgets import Static, TextArea
 
 from rit.core.diff import parse_patch
 from rit.core.types import DiffHunk, DiffLine, FileDiff
+from rit.state.models import PRComment, PRUser, ReviewThread
+from rit.state.store import PRStore
 from rit.ui.widgets.diff_view import DiffView
 from tests.conftest import wait_until
 
@@ -180,10 +182,62 @@ async def test_open_inline_comment_editor_mounts_below_current_line() -> None:
 
 
 @pytest.mark.asyncio
-async def test_virtualized_diff_tracks_growing_inline_editor_height() -> None:
-    patch = "@@ -1,40 +1,40 @@\n" + "\n".join(
-        f" line {line}" for line in range(1, 41)
+async def test_open_inline_comment_editor_prefills_selected_submitted_comment() -> None:
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    comment = PRComment(
+        id=501,
+        node_id="PRRC_501",
+        body="submitted body",
+        user=PRUser(login="alice"),
+        path="test.py",
+        line=1,
+        side="RIGHT",
     )
+    store = PRStore()
+    store.state.review_threads = [
+        ReviewThread.model_validate(
+            {
+                "id": "thread-501",
+                "path": "test.py",
+                "line": 1,
+                "diffSide": "RIGHT",
+                "comments": {"nodes": [comment]},
+            }
+        )
+    ]
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(store=store, mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        await diff_view.show_diff("test.py", parse_patch(patch, "test.py"))
+        await pilot.pause()
+        diff_view.cursor_line = 1
+        diff_view._comment_cursor_index = 1
+        diff_view.focus()
+        await pilot.pause()
+
+        assert diff_view.active_review_comment() == comment
+        assert await diff_view.open_inline_comment_editor() is True
+        await pilot.pause()
+        await pilot.pause()
+
+        editor = app.query_one("#diff-inline-comment-editor")
+        body = editor.query_one("#comment-editor-body", TextArea)
+        title = editor.query_one(".comment-editor-title", Static)
+
+        assert body.text == "submitted body"
+        assert str(title.content) == "Edit inline comment"
+        assert diff_view.inline_comment_edit_target() == comment
+        assert diff_view.inline_comment_draft_index() is None
+
+
+@pytest.mark.asyncio
+async def test_virtualized_diff_tracks_growing_inline_editor_height() -> None:
+    patch = "@@ -1,40 +1,40 @@\n" + "\n".join(f" line {line}" for line in range(1, 41))
 
     class TestApp(App):
         def compose(self) -> ComposeResult:
@@ -219,7 +273,9 @@ async def test_virtualized_diff_tracks_growing_inline_editor_height() -> None:
 
         height_delta = layout.region.height - initial_layout_height
         assert diff_view._inline_comment_editor_height() == layout.region.height
-        assert diff_view._virtual_content_height - initial_virtual_height == height_delta
+        assert (
+            diff_view._virtual_content_height - initial_virtual_height == height_delta
+        )
         assert diff_view._line_top_offsets[2] - initial_next_line_top == height_delta
         assert body.text.endswith("comment line 19")
         assert body.has_focus is True

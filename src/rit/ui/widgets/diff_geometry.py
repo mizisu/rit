@@ -5,14 +5,14 @@ from __future__ import annotations
 from bisect import bisect_right
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from typing import cast, overload
+from typing import overload
 
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.ui.widgets.diff_types import RenderedRow
 
 __all__ = (
-    "DiffGeometry",
     "FILE_DIFF_HEADER_HEIGHT",
+    "DiffGeometry",
     "ViewportGeometry",
     "build_diff_geometry",
     "cursor_viewport_offset",
@@ -84,6 +84,8 @@ class ViewportGeometry:
 
 
 def render_height_for_line(line: DiffLine, *, split: bool) -> int:
+    if line.is_folded_file_placeholder:
+        return 0
     if not split and line.is_modified:
         return 2
     return 1
@@ -95,6 +97,7 @@ def build_diff_geometry(
     split: bool,
     line_count: int | None = None,
     extra_heights_by_line: dict[int, int] | None = None,
+    extra_heights_by_hunk: dict[int, int] | None = None,
     inline_editor_line_index: int | None = None,
     inline_editor_height: int = 0,
     file_editor_hunk_index: int | None = None,
@@ -121,6 +124,7 @@ def build_diff_geometry(
     line_bottom_offsets = [0] * line_count
     total_line_render_height = 0
     extras = extra_heights_by_line or {}
+    hunk_extras = extra_heights_by_hunk or {}
     show_hunk_headers = diff.show_hunk_headers
 
     offset = 0
@@ -128,9 +132,13 @@ def build_diff_geometry(
         hunk_header_top_offsets.append(offset)
         if hunk.starts_file:
             offset += FILE_DIFF_HEADER_HEIGHT
+            offset += max(0, hunk_extras.get(hunk_index, 0))
             if hunk_index == file_editor_hunk_index:
                 offset += max(0, file_editor_height)
-        if show_hunk_headers:
+        is_folded_file = (
+            len(hunk.lines) == 1 and hunk.lines[0].is_folded_file_placeholder
+        )
+        if show_hunk_headers and not is_folded_file:
             offset += 1
         for line in hunk.lines:
             line_index = line.line_index
@@ -240,7 +248,7 @@ def merge_line_ranges(
     """Return sorted, coalesced inclusive line ranges."""
     merged: list[tuple[int, int]] = []
     if not already_sorted and isinstance(ranges, Sequence) and len(ranges) <= 1:
-        return list(cast(Sequence[tuple[int, int]], ranges))
+        return list(ranges)
     ordered_ranges = ranges if already_sorted else sorted(ranges)
     for start, end in ordered_ranges:
         if not merged:
@@ -311,9 +319,8 @@ def virtual_top_buffer_height(
         hunk_index=hunk_index,
         window_start=window_start,
         window_end=window_end,
-    ):
-        if 0 <= hunk_index < len(hunk_header_top_offsets):
-            return hunk_header_top_offsets[hunk_index]
+    ) and 0 <= hunk_index < len(hunk_header_top_offsets):
+        return hunk_header_top_offsets[hunk_index]
     return line_top_offsets[window_start]
 
 

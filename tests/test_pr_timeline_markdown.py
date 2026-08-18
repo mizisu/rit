@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -110,7 +110,7 @@ def test_mount_review_with_threads_checks_review_body_without_allocating_strip(
             body=Body("LGTM"),
             state=ReviewState.COMMENTED,
             user=PRUser(login="alice"),
-            created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+            created_at=datetime(2026, 1, 1, tzinfo=UTC),
             submitted_at=None,
         ),
         [],
@@ -170,8 +170,8 @@ def test_refresh_timeline_skips_unchanged_render_signature(
                 "id": 1,
                 "body": "Already rendered",
                 "user": {"login": "alice"},
-                "createdAt": datetime(2026, 4, 21, tzinfo=timezone.utc),
-                "updatedAt": datetime(2026, 4, 21, tzinfo=timezone.utc),
+                "createdAt": datetime(2026, 4, 21, tzinfo=UTC),
+                "updatedAt": datetime(2026, 4, 21, tzinfo=UTC),
             }
         )
     ]
@@ -275,15 +275,15 @@ async def test_timeline_yields_after_first_mounted_item() -> None:
             id=1,
             body="First",
             user=PRUser(login="alice"),
-            created_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 21, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 21, tzinfo=UTC),
         ),
         PRIssueComment(
             id=2,
             body="Second",
             user=PRUser(login="bob"),
-            created_at=datetime(2026, 4, 22, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 4, 22, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
         ),
     ]
 
@@ -332,8 +332,8 @@ async def test_timeline_staggers_body_mount_delay_after_initial_items() -> None:
             id=index,
             body=f"Comment {index}",
             user=PRUser(login="alice"),
-            created_at=datetime(2026, 4, index, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 4, index, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, index, tzinfo=UTC),
+            updated_at=datetime(2026, 4, index, tzinfo=UTC),
         )
         for index in range(1, INITIAL_TIMELINE_BODY_COUNT + 4)
     ]
@@ -377,8 +377,8 @@ async def test_issue_comment_left_aligns_markdown_h1(
             id=1,
             body="# Test",
             user=PRUser(login="alice"),
-            created_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 21, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 21, tzinfo=UTC),
         )
     ]
 
@@ -410,8 +410,8 @@ async def test_description_and_issue_comment_use_shared_comment_cards() -> None:
             id=1,
             body="Issue comment body",
             user=PRUser(login="bob"),
-            created_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 21, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 21, tzinfo=UTC),
         )
     ]
 
@@ -439,8 +439,8 @@ async def test_timeline_replaces_loading_cards_when_comments_load() -> None:
             id=1,
             body="Issue comment body",
             user=PRUser(login="bob"),
-            created_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 21, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 21, tzinfo=UTC),
         )
     ]
 
@@ -468,8 +468,8 @@ async def test_timeline_awaits_loading_card_removal_before_mounting_comments() -
             id=1,
             body="Issue comment body",
             user=PRUser(login="bob"),
-            created_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 21, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 21, tzinfo=UTC),
         )
     ]
 
@@ -527,8 +527,8 @@ async def test_timeline_sorts_pending_review_with_aware_comment_dates() -> None:
             id=1,
             body="Issue comment",
             user=PRUser(login="alice"),
-            created_at=datetime(2026, 5, 19, 2, 20, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 5, 19, 2, 20, tzinfo=timezone.utc),
+            created_at=datetime(2026, 5, 19, 2, 20, tzinfo=UTC),
+            updated_at=datetime(2026, 5, 19, 2, 20, tzinfo=UTC),
         )
     ]
     store.state.reviews = [
@@ -546,8 +546,8 @@ async def test_timeline_sorts_pending_review_with_aware_comment_dates() -> None:
             user=PRUser(login="bob"),
             path="app.py",
             line=12,
-            created_at=datetime(2026, 5, 19, 2, 27, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 5, 19, 2, 27, tzinfo=timezone.utc),
+            created_at=datetime(2026, 5, 19, 2, 27, tzinfo=UTC),
+            updated_at=datetime(2026, 5, 19, 2, 27, tzinfo=UTC),
             pull_request_review_id=10,
         )
     ]
@@ -567,6 +567,62 @@ async def test_timeline_sorts_pending_review_with_aware_comment_dates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_timeline_selects_root_and_reply_comments_individually() -> None:
+    store = PRStore()
+    store.state.reviews = [PRReview(id=10, state=ReviewState.COMMENTED)]
+    root = PRComment(
+        id=100,
+        node_id="PRRC_100",
+        body="Root comment",
+        user=PRUser(login="alice"),
+        path="app.py",
+        line=12,
+        side="RIGHT",
+        pull_request_review_id=10,
+    )
+    reply = PRComment(
+        id=101,
+        node_id="PRRC_101",
+        body="Reply comment",
+        user=PRUser(login="bob"),
+        path="app.py",
+        line=12,
+        side="RIGHT",
+        in_reply_to_id=100,
+        pull_request_review_id=10,
+    )
+    store.state.comments = [root, reply]
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield PRTimeline(store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        timeline = app.query_one(PRTimeline)
+        await timeline._build_timeline_async()
+        await pilot.pause()
+        timeline.select_first_item()
+        thread_item = app.query_one(ReviewThreadItem)
+
+        timeline.next_item()
+        assert timeline.current_review_comment() == root
+        assert isinstance(timeline.current_item, CommentCard)
+        assert timeline.current_item.has_class("--selected")
+        assert thread_item.has_class("--selected")
+
+        timeline.next_item()
+        assert timeline.current_review_comment() == reply
+        assert isinstance(timeline.current_item, CommentCard)
+        assert timeline.current_item.has_class("--selected")
+        assert thread_item.has_class("--selected")
+        assert timeline.get_current_thread_info() == ("", 100, False)
+
+        timeline.clear_selection()
+        assert not thread_item.has_class("--selected")
+
+
+@pytest.mark.asyncio
 async def test_timeline_refresh_thread_metadata_updates_existing_thread_card() -> None:
     store = PRStore()
     comment = PRComment(
@@ -576,8 +632,8 @@ async def test_timeline_refresh_thread_metadata_updates_existing_thread_card() -
         path="app.py",
         line=12,
         side="RIGHT",
-        created_at=datetime(2026, 5, 19, 2, 27, tzinfo=timezone.utc),
-        updated_at=datetime(2026, 5, 19, 2, 27, tzinfo=timezone.utc),
+        created_at=datetime(2026, 5, 19, 2, 27, tzinfo=UTC),
+        updated_at=datetime(2026, 5, 19, 2, 27, tzinfo=UTC),
     )
     store.state.comments = [comment]
     store.state.review_threads = [
@@ -641,7 +697,7 @@ async def test_timeline_sorts_review_threads_with_missing_and_aware_dates() -> N
             id=10,
             body="",
             user=PRUser(login="bob"),
-            submitted_at=datetime(2026, 5, 19, 2, 30, tzinfo=timezone.utc),
+            submitted_at=datetime(2026, 5, 19, 2, 30, tzinfo=UTC),
         )
     ]
     store.state.comments = [
@@ -651,8 +707,8 @@ async def test_timeline_sorts_review_threads_with_missing_and_aware_dates() -> N
             user=PRUser(login="bob"),
             path="app.py",
             line=12,
-            created_at=datetime(2026, 5, 19, 2, 27, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 5, 19, 2, 27, tzinfo=timezone.utc),
+            created_at=datetime(2026, 5, 19, 2, 27, tzinfo=UTC),
+            updated_at=datetime(2026, 5, 19, 2, 27, tzinfo=UTC),
             pull_request_review_id=10,
         ),
         PRComment(
@@ -687,8 +743,8 @@ async def test_timeline_sorts_pending_review_threads_by_comment_created_at() -> 
             id=1,
             body="Earlier issue comment",
             user=PRUser(login="sonarqubecloud"),
-            created_at=datetime(2026, 6, 18, 5, 25, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 6, 18, 5, 25, tzinfo=timezone.utc),
+            created_at=datetime(2026, 6, 18, 5, 25, tzinfo=UTC),
+            updated_at=datetime(2026, 6, 18, 5, 25, tzinfo=UTC),
         ),
         PRIssueComment(
             id=2,
@@ -702,7 +758,7 @@ async def test_timeline_sorts_pending_review_threads_by_comment_created_at() -> 
                 25,
                 36,
                 500000,
-                tzinfo=timezone.utc,
+                tzinfo=UTC,
             ),
             updated_at=datetime(
                 2026,
@@ -712,7 +768,7 @@ async def test_timeline_sorts_pending_review_threads_by_comment_created_at() -> 
                 25,
                 36,
                 500000,
-                tzinfo=timezone.utc,
+                tzinfo=UTC,
             ),
         ),
     ]
@@ -736,8 +792,8 @@ async def test_timeline_sorts_pending_review_threads_by_comment_created_at() -> 
             path="app.py",
             line=12,
             side="RIGHT",
-            created_at=datetime(2026, 6, 18, 6, 25, 37, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 6, 18, 6, 25, 37, tzinfo=timezone.utc),
+            created_at=datetime(2026, 6, 18, 6, 25, 37, tzinfo=UTC),
+            updated_at=datetime(2026, 6, 18, 6, 25, 37, tzinfo=UTC),
             pull_request_review_id=10,
         )
     ]
@@ -785,8 +841,8 @@ async def test_timeline_shows_pending_review_summary_before_threads() -> None:
             path="app.py",
             line=72,
             side="RIGHT",
-            created_at=datetime(2026, 6, 18, 6, 25, 37, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 6, 18, 6, 25, 37, tzinfo=timezone.utc),
+            created_at=datetime(2026, 6, 18, 6, 25, 37, tzinfo=UTC),
+            updated_at=datetime(2026, 6, 18, 6, 25, 37, tzinfo=UTC),
             pull_request_review_id=10,
         ),
         PRComment(
@@ -796,8 +852,8 @@ async def test_timeline_shows_pending_review_summary_before_threads() -> None:
             path="app.py",
             line=89,
             side="RIGHT",
-            created_at=datetime(2026, 6, 18, 6, 26, 39, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 6, 18, 6, 26, 39, tzinfo=timezone.utc),
+            created_at=datetime(2026, 6, 18, 6, 26, 39, tzinfo=UTC),
+            updated_at=datetime(2026, 6, 18, 6, 26, 39, tzinfo=UTC),
             pull_request_review_id=10,
         ),
     ]
@@ -851,8 +907,8 @@ async def test_timeline_keeps_submitted_review_threads_ungrouped() -> None:
             path="app.py",
             line=12,
             side="RIGHT",
-            created_at=datetime(2026, 6, 18, 6, 25, 37, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 6, 18, 6, 25, 37, tzinfo=timezone.utc),
+            created_at=datetime(2026, 6, 18, 6, 25, 37, tzinfo=UTC),
+            updated_at=datetime(2026, 6, 18, 6, 25, 37, tzinfo=UTC),
             pull_request_review_id=10,
         )
     ]
@@ -884,8 +940,8 @@ async def test_pr_timeline_thread_title_identifies_root_author() -> None:
             path="app.py",
             line=12,
             side="RIGHT",
-            created_at=datetime(2026, 5, 19, 2, 27, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 5, 19, 2, 27, tzinfo=timezone.utc),
+            created_at=datetime(2026, 5, 19, 2, 27, tzinfo=UTC),
+            updated_at=datetime(2026, 5, 19, 2, 27, tzinfo=UTC),
         )
     ]
 
@@ -915,8 +971,8 @@ async def test_pr_timeline_thread_uses_single_path_header() -> None:
             user=PRUser(login="bob"),
             path="app.py",
             line=12,
-            created_at=datetime(2026, 5, 19, 2, 27, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 5, 19, 2, 27, tzinfo=timezone.utc),
+            created_at=datetime(2026, 5, 19, 2, 27, tzinfo=UTC),
+            updated_at=datetime(2026, 5, 19, 2, 27, tzinfo=UTC),
         )
     ]
 
