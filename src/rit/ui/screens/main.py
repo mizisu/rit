@@ -1459,7 +1459,7 @@ class MainScreen(Screen[None]):
         diff_view = self.file_changes.diff_view
         if target == "tree":
             if diff_view.split:
-                diff_view.active_pane = "old"
+                diff_view.active_pane = diff_view._focus_entry_pane("old")
             diff_view.focus()
             return
 

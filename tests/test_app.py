@@ -9,6 +9,7 @@ from textual.widgets import Static, TextArea
 from rit.app import RitApp
 from rit.cli import parse_pr_reference
 from rit.core.diff import parse_patch
+from rit.core.types import FileDiff
 from rit.state.models import (
     PR,
     LoadingState,
@@ -329,6 +330,56 @@ class TestRitApp:
 
             assert calls == ["data", "comments"]
             assert screen._pr_info_refresh_pending is False
+
+    async def test_file_tree_return_uses_added_placeholder_visible_pane(
+        self,
+        app: RitApp,
+    ) -> None:
+        from rit.ui.screens.main import MainScreen
+
+        modified_patch = "@@ -1 +1 @@\n-old\n+new"
+        async with app.run_test(size=(200, 12)) as pilot:
+            screen = cast(MainScreen, app.screen)
+            screen.current_tab = 1
+            screen.store.state.files = [
+                PRFile(
+                    filename="modified.py",
+                    status="modified",
+                    patch=modified_patch,
+                ),
+                PRFile(filename="added.bin", status="added"),
+            ]
+            screen.store.state.file_diffs = {
+                "modified.py": parse_patch(modified_patch, "modified.py"),
+                "added.bin": FileDiff(
+                    filename="added.bin",
+                    is_new=True,
+                    is_binary=True,
+                ),
+            }
+            screen.store.state.selected_file = "modified.py"
+            screen.file_changes.refresh_files()
+
+            diff_view = screen.file_changes.diff_view
+            await wait_until(lambda: diff_view.current_file == "All files")
+            diff_view.mode = "split"
+            target = diff_view.file_start_line_index("added.bin")
+            assert target is not None
+            await wait_until(
+                lambda: (
+                    diff_view.split and len(diff_view._get_code_widgets(target)) == 1
+                ),
+                timeout=1,
+            )
+            diff_view.jump_to_line_index(target, side="RIGHT", focus=True)
+            await pilot.pause()
+
+            await pilot.press("e")
+            await pilot.press("L")
+            await pilot.pause()
+
+            assert diff_view.has_focus
+            assert diff_view.active_pane == "new"
 
     async def test_staged_load_paints_first_file_then_continuous_diff(
         self, monkeypatch: pytest.MonkeyPatch

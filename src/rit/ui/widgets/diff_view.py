@@ -655,6 +655,24 @@ class DiffView(VerticalScroll):
             self.active_pane if pane is None else pane,
         )
 
+    def _focus_entry_pane(
+        self,
+        preferred_pane: Literal["old", "new"],
+    ) -> Literal["old", "new"]:
+        line = self._current_line()
+        if line is None:
+            return preferred_pane
+
+        hunk_index = self._get_hunk_index_for_line(line.line_index)
+        if self._diff is not None and hunk_index is not None:
+            file_status = self._diff.hunks[hunk_index].file_status
+            if file_status == "added":
+                return "new"
+            if file_status == "removed":
+                return "old"
+
+        return self._resolve_active_pane_for_line(line, preferred_pane)
+
     def _cursor_side_for_line(
         self,
         line: DiffLine,

@@ -1,9 +1,12 @@
 from types import SimpleNamespace
+from typing import Literal
 
 import pytest
 from textual.css.query import NoMatches
 
+from rit.core.types import DiffLine
 from rit.ui.screens.main import MainScreen
+from rit.ui.widgets.diff_cursor_side import resolve_active_pane_for_line
 
 
 class MissingFileTree:
@@ -42,6 +45,20 @@ class FocusTarget:
 
     def focus(self) -> None:
         self.focused = True
+
+
+class SingleSidedFocusTarget(FocusTarget):
+    split = True
+
+    def __init__(self, line: DiffLine) -> None:
+        super().__init__()
+        self.line = line
+
+    def _focus_entry_pane(
+        self,
+        preferred_pane: Literal["old", "new"],
+    ) -> Literal["old", "new"]:
+        return resolve_active_pane_for_line(self.line, preferred_pane)
 
 
 class ToggleFileChanges:
@@ -178,3 +195,34 @@ def test_toggle_file_tree_focuses_tree_when_opening() -> None:
 
     assert file_changes.toggled is True
     assert tree.focused is True
+
+
+@pytest.mark.parametrize(
+    ("line", "expected_pane"),
+    [
+        (DiffLine(old_line_no=None, new_line_no=1, is_added=True), "new"),
+        (DiffLine(old_line_no=1, new_line_no=None, is_deleted=True), "old"),
+    ],
+)
+def test_focus_right_from_tree_uses_visible_side_for_single_sided_line(
+    line: DiffLine,
+    expected_pane: Literal["old", "new"],
+) -> None:
+    diff_view = SingleSidedFocusTarget(line)
+    file_tree = SimpleNamespace(
+        has_focus_within=True,
+        query_one=lambda *_args: FocusTarget(),
+    )
+
+    class TestScreen(MainScreen):
+        @property
+        def file_changes(self):
+            return SimpleNamespace(diff_view=diff_view, file_tree=file_tree)
+
+    screen = TestScreen(owner="test", repo="repo", pr_number=123)
+    screen.current_tab = 1
+
+    screen.action_focus_right()
+
+    assert diff_view.focused is True
+    assert diff_view.active_pane == expected_pane
