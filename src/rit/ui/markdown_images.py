@@ -919,25 +919,25 @@ def _iter_raw_image_matches(body: str) -> Iterator[tuple[int, int, MarkdownImage
 
 def _iter_image_matches(body: str) -> Iterator[tuple[int, int, MarkdownImageRef]]:
     for start, end, image in _iter_raw_image_matches(body):
-        if _is_renderable_image_match(body, start, end):
+        standalone_start = _standalone_image_part_start(body, start, end)
+        if standalone_start is not None:
+            yield standalone_start, end, image
+        elif _is_table_cell_image_match(body, start, end):
             yield start, end, image
 
 
-def _is_renderable_image_match(body: str, start: int, end: int) -> bool:
-    return _is_standalone_image_match(body, start, end) or _is_table_cell_image_match(
-        body,
-        start,
-        end,
-    )
-
-
-def _is_standalone_image_match(body: str, start: int, end: int) -> bool:
+def _standalone_image_part_start(body: str, start: int, end: int) -> int | None:
     line_start = body.rfind("\n", 0, start) + 1
     line_end = body.find("\n", end)
     if line_end == -1:
         line_end = len(body)
 
-    return body[line_start:start].strip() == "" and body[end:line_end].strip() == ""
+    prefix = body[line_start:start]
+    if prefix.strip() and _BLOCKQUOTE_PREFIX_RE.fullmatch(prefix) is None:
+        return None
+    if body[end:line_end].strip():
+        return None
+    return line_start
 
 
 def _is_table_cell_image_match(body: str, start: int, end: int) -> bool:
@@ -1165,6 +1165,7 @@ def _is_fetchable_image_source(src: str) -> bool:
     return src.startswith("data:") or urlparse(src).scheme in {"http", "https"}
 
 
+_BLOCKQUOTE_PREFIX_RE = re.compile(r"[ \t]{0,3}(?:>[ \t]*)+")
 _MARKDOWN_IMAGE_RE = re.compile(
     r"!\[(?P<alt>(?:\\.|[^\\\]])*)\]\((?P<dest>(?:\\.|[^\\)])*)\)",
     re.DOTALL,

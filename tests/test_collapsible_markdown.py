@@ -336,6 +336,24 @@ class TestParseMarkdownImages:
         assert image.alt == "Screenshot"
         assert image.src == "https://example.com/ui.png"
 
+    def test_github_alert_html_image_is_split_from_blockquote(self) -> None:
+        body = """> [!IMPORTANT]
+> `security-review` result
+>  <img width="1416" height="1472" alt="Review result" src="https://github.com/user-attachments/assets/abc123" />
+"""
+
+        result = parse_markdown_image_parts(
+            body,
+            base_url="https://github.com/owner/repo/pull/123",
+        )
+
+        images = [part.image for part in result if part.image is not None]
+        assert len(images) == 1
+        assert result[0].content == "> [!IMPORTANT]\n> `security-review` result"
+        assert images[0].alt == "Review result"
+        assert images[0].src == ("https://github.com/user-attachments/assets/abc123")
+        assert images[0].github_context == "owner/repo"
+
     def test_html_image_parser_errors_are_not_silently_dropped(
         self,
         monkeypatch: pytest.MonkeyPatch,
