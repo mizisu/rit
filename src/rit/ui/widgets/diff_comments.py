@@ -927,6 +927,81 @@ def _thread_entry_count(widget: Widget) -> int:
     return widget.comment_count
 
 
+def _comment_target_index(
+    pending_widgets: Sequence[Widget] | None,
+    thread_widgets: Sequence[Widget] | None,
+    target: Widget,
+) -> int | None:
+    offset = 0
+    if pending_widgets is not None:
+        for widget in pending_widgets:
+            offset += 1
+            if widget is target:
+                return offset
+
+    if thread_widgets is None:
+        return None
+    for widget in thread_widgets:
+        if widget is target:
+            return offset + 1
+        if (
+            isinstance(widget, ReviewThreadItem)
+            and not widget.collapsed
+            and widget.comment_count
+        ):
+            for comment_index in range(widget.comment_count):
+                offset += 1
+                if widget.comment_card_at(comment_index) is target:
+                    return offset
+        else:
+            offset += 1
+    return None
+
+
+def select_comment_widget(view: DiffView, target: Widget) -> bool:
+    line_indices = (
+        view._pending_comment_widgets_by_line.keys()
+        | view._comment_widgets_by_line.keys()
+    )
+    for line_index in line_indices:
+        index = _comment_target_index(
+            view._pending_comment_widgets_by_line.get(line_index),
+            view._comment_widgets_by_line.get(line_index),
+            target,
+        )
+        if index is None:
+            continue
+        side = view._comment_side_by_line.get(line_index, "auto")
+        view._comment_cursor_index = 0
+        view._move_cursor(
+            line=line_index,
+            pane=None if side == "auto" else side,
+            update_active_pane=side != "auto",
+        )
+        view._comment_cursor_index = index
+        update_cursor_highlight(view, view.cursor_line, view.cursor_line)
+        view._update_line_cursor(line_index)
+        return True
+
+    hunk_indices = (
+        view._pending_file_comment_widgets_by_hunk.keys()
+        | view._file_comment_widgets_by_hunk.keys()
+    )
+    for hunk_index in hunk_indices:
+        index = _comment_target_index(
+            view._pending_file_comment_widgets_by_hunk.get(hunk_index),
+            view._file_comment_widgets_by_hunk.get(hunk_index),
+            target,
+        )
+        if index is None:
+            continue
+        view._set_file_header_selection(hunk_index)
+        view._comment_cursor_index = index
+        update_file_comment_cursor_highlight(view, hunk_index)
+        return True
+    return False
+
+
 def total_comments_at_line(view: DiffView, line_index: int) -> int:
     pending_widgets = view._pending_comment_widgets_by_line.get(line_index)
     comment_widgets = view._comment_widgets_by_line.get(line_index)

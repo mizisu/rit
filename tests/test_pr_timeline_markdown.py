@@ -604,6 +604,10 @@ async def test_timeline_selects_root_and_reply_comments_individually() -> None:
         await pilot.pause()
         timeline.select_first_item()
         thread_item = app.query_one(ReviewThreadItem)
+        root_card = thread_item.comment_card_at(0)
+        reply_card = thread_item.comment_card_at(1)
+        assert root_card is not None
+        assert reply_card is not None
 
         timeline.next_item()
         assert timeline.current_review_comment() == root
@@ -617,6 +621,14 @@ async def test_timeline_selects_root_and_reply_comments_individually() -> None:
         assert timeline.current_item.has_class("--selected")
         assert thread_item.has_class("--selected")
         assert timeline.get_current_thread_info() == ("", 100, False)
+
+        await pilot.click(root_card)
+        await pilot.pause()
+        assert timeline.current_review_comment() == root
+
+        await pilot.click(reply_card)
+        await pilot.pause()
+        assert timeline.current_review_comment() == reply
 
         timeline.clear_selection()
         assert not thread_item.has_class("--selected")

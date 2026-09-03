@@ -29,6 +29,10 @@ DiffView .file-diff-header {
     content-align: left middle;
 }
 
+DiffView .file-diff-header:hover {
+    background: #363a4f;
+}
+
 DiffView .file-diff-header.-collapsed {
     color: $text-muted;
 }

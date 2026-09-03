@@ -42,6 +42,7 @@ from rit.ui.widgets import diff_search as _search
 from rit.ui.widgets import diff_selection as _selection
 from rit.ui.widgets import diff_virtual as _virtual
 from rit.ui.widgets import diff_visual_mode as _visual_mode
+from rit.ui.widgets.comment_card import CommentCard
 from rit.ui.widgets.comment_editor import InlineCommentEditor
 from rit.ui.widgets.diff_types import (
     DEFAULT_DIFF_LAYOUT,
@@ -535,6 +536,143 @@ class DiffView(VerticalScroll):
                 self,
                 selection_dirty_lines=queue_update.selection_dirty_lines,
             )
+
+    def on_click(self, event: events.Click) -> None:
+        if event.button != 1 or event.widget is None:
+            return
+
+        ancestors: list[Widget] = []
+        target: Widget | None = event.widget
+        while target is not None and target is not self:
+            ancestors.append(target)
+            parent = target.parent
+            target = parent if isinstance(parent, Widget) else None
+
+        comment = next(
+            (widget for widget in ancestors if isinstance(widget, CommentCard)),
+            None,
+        )
+        if comment is not None and _comments.select_comment_widget(self, comment):
+            if self.visual_mode:
+                _selection._exit_visual_mode(self)
+            self.focus(scroll_visible=False)
+            event.stop()
+            return
+
+        for widget in ancestors:
+            widget_id = widget.id or ""
+            if not widget_id.startswith("file-header-"):
+                continue
+            suffix = widget_id.removeprefix("file-header-")
+            if not suffix.isdigit():
+                continue
+            if self.visual_mode:
+                _selection._exit_visual_mode(self)
+            self._set_file_header_selection(int(suffix))
+            self.focus(scroll_visible=False)
+            self.run_worker(
+                self.toggle_current_file_fold(),
+                exclusive=True,
+                name="diff-toggle-file-fold",
+            )
+            event.stop()
+            return
+
+        clicked = self._clicked_line_target(event, ancestors)
+        if clicked is None:
+            return
+        line_index, pane, column = clicked
+        if event.shift:
+            if not self.visual_mode or self.visual_type != "line":
+                if self.visual_mode:
+                    _selection._exit_visual_mode(self)
+                _selection._enter_visual_mode(self, "line")
+        elif self.visual_mode:
+            _selection._exit_visual_mode(self)
+        self._comment_cursor_index = 0
+        self._move_cursor(
+            line=line_index,
+            pane=pane,
+            column=column,
+            update_active_pane=True,
+        )
+        self.focus(scroll_visible=False)
+        event.stop()
+
+    def _clicked_line_target(
+        self,
+        event: events.Click,
+        ancestors: list[Widget],
+    ) -> tuple[int, Literal["old", "new"], int] | None:
+        pane: Literal["old", "new"] | None = None
+        code_widget: Widget | None = None
+        line_index: int | None = None
+
+        for widget in ancestors:
+            if widget.has_class("-old-side") or widget.has_class("split-pane-left"):
+                pane = "old"
+            elif widget.has_class("-new-side") or widget.has_class("split-pane-right"):
+                pane = "new"
+            if code_widget is None and widget.has_class("code-content"):
+                code_widget = widget
+
+            widget_id = widget.id or ""
+            if not widget_id.startswith("line-"):
+                continue
+            parts = widget_id.split("-")
+            if len(parts) < 2 or not parts[1].isdigit():
+                continue
+            line_index = int(parts[1])
+            if len(parts) > 2 and parts[2] in {"old", "new"}:
+                pane = "old" if parts[2] == "old" else "new"
+                break
+
+        if line_index is None:
+            block = next(
+                (
+                    widget
+                    for widget in ancestors
+                    if isinstance(widget, (UnifiedDiffBlock, SplitDiffBlock))
+                ),
+                None,
+            )
+            if block is None:
+                return None
+            row = max(0, event.screen_y - block.content_region.y)
+            if isinstance(block, SplitDiffBlock):
+                if row >= len(block.line_indices):
+                    return None
+                line_index = block.line_indices[row]
+                if pane is None:
+                    pane = (
+                        "new" if event.screen_x >= block._right_pane.region.x else "old"
+                    )
+            else:
+                for candidate in block.line_indices:
+                    start, end = block._row_ranges_by_line[candidate]
+                    if start <= row < end:
+                        line_index = candidate
+                        if end - start == 2:
+                            pane = "old" if row == start else "new"
+                        break
+
+        if line_index is None or not 0 <= line_index < len(self._all_lines):
+            return None
+        line = self._all_lines[line_index]
+        if pane is None:
+            if line.is_deleted:
+                pane = "old"
+            elif line.is_added:
+                pane = "new"
+            else:
+                pane = self.cursor_pane
+
+        column = (
+            max(0, event.screen_x - code_widget.content_region.x)
+            if code_widget is not None
+            else 0
+        )
+        return line_index, pane, column
 
     # ------------------------------------------------------------------
     # Key handling

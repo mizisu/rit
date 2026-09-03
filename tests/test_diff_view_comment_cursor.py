@@ -155,6 +155,17 @@ async def test_diff_cursor_selects_root_and_reply_individually() -> None:
         assert diff_view._comment_cursor_index == 0
         assert "--cursor-line" not in thread_item.classes
 
+        await pilot.click(reply_card)
+        await pilot.pause()
+        assert diff_view.cursor_line == 0
+        assert diff_view._comment_cursor_index == 2
+        assert diff_view.active_review_comment() == reply
+
+        await pilot.click(root_card)
+        await pilot.pause()
+        assert diff_view._comment_cursor_index == 1
+        assert diff_view.active_review_comment() == root
+
 
 @pytest.mark.asyncio
 async def test_j_after_diff_line_selects_first_comment_then_advances() -> None:

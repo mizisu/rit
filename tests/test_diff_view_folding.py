@@ -140,7 +140,7 @@ async def test_enter_toggles_viewed_file_fold_in_combined_diff() -> None:
 
 
 @pytest.mark.asyncio
-async def test_enter_toggles_unviewed_file_fold_in_combined_diff() -> None:
+async def test_click_toggles_unviewed_file_fold_in_combined_diff() -> None:
     patch = "@@ -1,1 +1,1 @@\n-old\n+new"
     store = PRStore()
     store.state.files_loading = LoadingState.LOADED
@@ -164,9 +164,12 @@ async def test_enter_toggles_unviewed_file_fold_in_combined_diff() -> None:
 
         diff_view = file_changes.diff_view
         assert diff_view._folded_file_paths == frozenset()
+        await wait_until(
+            lambda: len(diff_view.query("#file-header-0")) == 1
+            and diff_view.query_one("#file-header-0").region.height == 1
+        )
 
-        diff_view.focus()
-        await pilot.press("enter")
+        await pilot.click("#file-header-0", offset=(1, 0))
         await wait_until(lambda: "one.py" in diff_view._folded_file_paths)
         await wait_until(lambda: diff_view.selected_file_header_path() == "one.py")
 

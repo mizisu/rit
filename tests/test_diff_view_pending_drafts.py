@@ -158,6 +158,16 @@ async def test_diff_view_renders_pending_file_draft_below_file_header() -> None:
         assert diff_view.selected_file_header_path() == "test.py"
         assert diff_view._comment_cursor_index == 0
 
+        await pilot.click(draft_widget)
+        await pilot.pause()
+        assert diff_view.active_pending_draft_index() == 0
+
+        submitted_card = submitted_item.comment_card_at(0)
+        assert submitted_card is not None
+        await pilot.click(submitted_card)
+        await pilot.pause()
+        assert diff_view.active_review_comment() == selected_comment
+
 
 @pytest.mark.asyncio
 async def test_diff_view_renders_pending_draft_below_line() -> None:

@@ -50,6 +50,38 @@ class TestDiffViewVisualMode:
     """Test Vim-like visual mode behavior."""
 
     @pytest.mark.asyncio
+    async def test_click_selects_split_line_side_and_shift_clicks_range(
+        self, sample_patch: str
+    ) -> None:
+        class TestApp(App):
+            def compose(self) -> ComposeResult:
+                yield DiffView(mode="split", id="diff-view")
+
+        app = TestApp()
+        async with app.run_test() as pilot:
+            diff_view = app.query_one(DiffView)
+            await diff_view.show_diff("test.py", parse_patch(sample_patch, "test.py"))
+            await pilot.pause()
+
+            right = app.query_one("#line-1-new .code-content", Static)
+            await pilot.click(right, offset=(2, 0))
+            await pilot.pause()
+
+            assert diff_view.cursor_line == 1
+            assert diff_view.cursor_pane == "new"
+            assert diff_view.cursor_column == 2
+
+            left = app.query_one("#line-3-old .code-content", Static)
+            await pilot.click(left, offset=(1, 0), shift=True)
+            await pilot.pause()
+
+            assert diff_view.visual_mode is True
+            assert diff_view.visual_type == "line"
+            assert diff_view.visual_anchor_line == 1
+            assert diff_view.cursor_line == 3
+            assert diff_view.cursor_pane == "old"
+
+    @pytest.mark.asyncio
     async def test_v_toggles_character_visual_mode(self, sample_patch: str) -> None:
         """`v` should toggle character-wise visual mode."""
 

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
+from textual import events
 from textual._context import NoActiveAppError
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
@@ -702,6 +703,21 @@ class PRTimeline(Vertical):
                     break
 
         self._navigable_items_valid = True
+
+    def on_click(self, event: events.Click) -> None:
+        if event.button != 1 or event.widget is None:
+            return
+
+        self._collect_navigable_items()
+        target: Widget | None = event.widget
+        while target is not None and target is not self:
+            for index, item in enumerate(self._navigable_items):
+                if item is target:
+                    self._update_selection(index, scroll_to_view=False)
+                    self.focus(scroll_visible=False)
+                    return
+            parent = target.parent
+            target = parent if isinstance(parent, Widget) else None
 
     def _set_item_selected(self, item: Widget, selected: bool) -> None:
         parent_thread = self._thread_item_by_comment_widget.get(item)
