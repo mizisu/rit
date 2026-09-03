@@ -3,9 +3,11 @@
 from pathlib import Path
 
 import pytest
+from textual import on
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.css.query import NoMatches
+from textual.widgets import Button
 
 import rit.ui.components.pr_info as pr_info_module
 from rit.state.models import PR, PRLabel, PRUser
@@ -13,6 +15,7 @@ from rit.state.reviewer_status import ReviewerDisplayState
 from rit.state.store import PRStore
 from rit.ui.components.pr_info import PRInfo
 from rit.ui.components.pr_timeline import PRTimeline
+from tests.conftest import wait_until
 
 ROOT = Path(__file__).parents[1]
 
@@ -35,6 +38,111 @@ async def test_pr_info_groups_main_and_sidebar_in_centered_layout() -> None:
 
         assert main_scroll.parent is layout
         assert sidebar.parent is layout
+
+
+@pytest.mark.asyncio
+async def test_pr_info_summary_actions_are_clickable() -> None:
+    store = PRStore()
+    store.state.pr = PR(number=1, head_ref="feature", base_ref="main")
+
+    class TestApp(App[None]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.requests: list[str] = []
+
+        def compose(self) -> ComposeResult:
+            yield PRInfo(store)
+
+        @on(PRInfo.CopyBranchRequested)
+        def capture_copy(self) -> None:
+            self.requests.append("branch")
+
+        @on(PRInfo.EditReviewersRequested)
+        def capture_reviewers(self) -> None:
+            self.requests.append("reviewers")
+
+        @on(PRInfo.EditAssigneesRequested)
+        def capture_assignees(self) -> None:
+            self.requests.append("assignees")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        copy_button = app.query_one("#copy-branch", Button)
+        reviewer_button = app.query_one("#edit-reviewers", Button)
+        assignee_button = app.query_one("#edit-assignees", Button)
+
+        assert copy_button.tooltip == "Copy branch"
+        assert reviewer_button.tooltip == "Edit reviewers"
+        assert assignee_button.tooltip == "Edit assignees"
+        assert copy_button.region.x == app.query_one("#branch-info").region.right + 1
+        assert reviewer_button.parent is not None
+        assert reviewer_button.region.x == (
+            reviewer_button.parent.query_one(".sidebar-section-title").region.right + 1
+        )
+
+        await pilot.click("#copy-branch")
+        await pilot.click("#edit-reviewers")
+        await pilot.click("#edit-assignees")
+        await pilot.pause()
+
+    assert app.requests == ["branch", "reviewers", "assignees"]
+
+
+@pytest.mark.asyncio
+async def test_pr_info_stacks_sidebar_below_main_when_compact() -> None:
+    store = PRStore()
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield PRInfo(store)
+
+    app = TestApp()
+    async with app.run_test(size=(80, 30)) as pilot:
+        pr_info = app.query_one(PRInfo)
+        await wait_until(lambda: pr_info.compact)
+        await pilot.pause()
+
+        main_scroll = app.query_one("#main-scroll")
+        sidebar = app.query_one("#sidebar")
+
+        assert main_scroll.region.width == pr_info.region.width
+        assert sidebar.region.y >= main_scroll.region.bottom
+
+        await pilot.resize_terminal(100, 30)
+        await wait_until(lambda: not pr_info.compact)
+        await pilot.pause()
+
+        assert sidebar.region.x >= main_scroll.region.right
+
+
+@pytest.mark.asyncio
+async def test_pr_description_uses_full_width_and_block_rhythm() -> None:
+    store = PRStore()
+    store.state.pr = PR(
+        number=1,
+        title="Improve description rendering",
+        body="Opening context for reviewers.\n\n- First change\n- Second change",
+        user=PRUser(login="alice"),
+    )
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield PRInfo(store)
+
+    app = TestApp()
+    async with app.run_test(size=(160, 40)):
+        await wait_until(lambda: len(app.query("MarkdownBulletList")) == 1)
+
+        description = app.query_one("#pr-description-card")
+        main_content = app.query_one("#main-content")
+        paragraph = app.query_one("Markdown > MarkdownParagraph")
+        bullet_list = app.query_one("Markdown > MarkdownBulletList")
+
+        assert description.has_class("reading")
+        assert description.region.width == main_content.content_region.width
+        assert paragraph.styles.margin.bottom == 1
+        assert bullet_list.styles.margin.bottom == 1
 
 
 def test_pr_info_mount_ignores_missing_scroll_widgets(

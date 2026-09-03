@@ -344,6 +344,42 @@ async def test_submit_inline_comment_uses_head_sha_and_target() -> None:
 
 
 @pytest.mark.asyncio
+async def test_post_inline_comment_submits_only_selected_pending_draft() -> None:
+    store = PRStore(pr_number=123)
+    store.state.pr = PR(number=123, head_sha="deadbeef")
+    service = FakeInlineCommentService()
+    store._service = service  # type: ignore[assignment]
+    store.save_pending_inline_comment(
+        "first",
+        path="src/app.py",
+        line=7,
+        side="RIGHT",
+    )
+    store.save_pending_inline_comment(
+        "second",
+        path="src/app.py",
+        line=7,
+        side="RIGHT",
+    )
+
+    await store.post_inline_comment(
+        "second",
+        path="src/app.py",
+        line=7,
+        side="RIGHT",
+        draft_index=1,
+    )
+
+    assert service.inline_comment_calls == [
+        (123, "second", "deadbeef", "src/app.py", 7, "RIGHT")
+    ]
+    assert [draft.body for draft in store.state.pending_review_comments] == ["first"]
+    assert service.create_pending_review_calls == [
+        [("src/app.py", 7, "RIGHT", "first")]
+    ]
+
+
+@pytest.mark.asyncio
 async def test_submit_file_comment_uses_head_sha_without_line_target() -> None:
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")

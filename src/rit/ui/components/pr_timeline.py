@@ -199,7 +199,7 @@ class PRTimeline(Vertical):
             "[#6e738d]Loading PR details[/]",
             "Fetching title and description...",
             id="pr-description-card",
-            classes="description-container timeline-loading",
+            classes="description-container reading timeline-loading",
             header_id="pr-author-header",
             content_id="pr-description",
         )

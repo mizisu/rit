@@ -130,6 +130,13 @@ class CommentCard(Vertical):
         margin: 0;
     }
 
+    CommentCard.reading .comment-content Markdown > MarkdownParagraph,
+    CommentCard.reading .comment-content Markdown > MarkdownBulletList,
+    CommentCard.reading .comment-content Markdown > MarkdownOrderedList,
+    CommentCard.reading .comment-content Markdown > MarkdownBlockQuote {
+        margin: 0 0 1 0;
+    }
+
     CommentCard .comment-content MarkdownH1,
     CommentCard .comment-content MarkdownH2,
     CommentCard .comment-content MarkdownH3 {

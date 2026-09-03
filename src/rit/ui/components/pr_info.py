@@ -11,7 +11,7 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import var
-from textual.widgets import Rule, Static
+from textual.widgets import Button, Rule, Static
 
 from rit.state.models import PRComment
 from rit.state.reviewer_status import ReviewerDisplayState, derive_reviewer_states
@@ -30,18 +30,31 @@ _PR_STATUS_LABELS: dict[str, str] = {
     "Draft": "[#6e738d]◌ Draft[/]",
 }
 _DEFAULT_PR_STATUS_LABEL = _PR_STATUS_LABELS["Open"]
+_COMPACT_LAYOUT_BREAKPOINT = 94
+_COPY_ICON = "\U000f018f"
+_EDIT_ICON = "\U000f03eb"
 
 
 class PRInfo(Container):
     DEFAULT_CSS = _DEFAULT_CSS
 
     wide: var[bool] = var(False, toggle_class="-wide")
+    compact: var[bool] = var(False, toggle_class="-compact")
 
     @dataclass
     class ResolveToggled(Message):
         thread_id: str
         root_comment_id: int
         is_resolved: bool  # New state after toggle
+
+    class CopyBranchRequested(Message):
+        pass
+
+    class EditReviewersRequested(Message):
+        pass
+
+    class EditAssigneesRequested(Message):
+        pass
 
     def __init__(self, store: PRStore) -> None:
         super().__init__()
@@ -68,22 +81,51 @@ class PRInfo(Container):
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="pr-info-layout"):
-            with VerticalScroll(id="main-scroll"):
-                with Vertical(classes="main-content", id="main-content"):
-                    yield Static("Loading...", classes="pr-title", id="pr-title")
-                    yield Static("", id="pr-status")
+            with (
+                VerticalScroll(id="main-scroll"),
+                Vertical(classes="main-content", id="main-content"),
+            ):
+                yield Static("Loading...", classes="pr-title", id="pr-title")
+                yield Static("", id="pr-status")
+                with Horizontal(id="branch-row"):
                     yield Static("", classes="branch-info", id="branch-info")
-                    yield Static("", classes="stats-bar", id="pr-stats")
-                    yield Rule()
-                    yield PRTimeline(self.store, id="pr-timeline")
+                    yield Button(
+                        _COPY_ICON,
+                        id="copy-branch",
+                        name="Copy branch",
+                        tooltip="Copy branch",
+                        compact=True,
+                        flat=True,
+                    )
+                yield Static("", classes="stats-bar", id="pr-stats")
+                yield Rule()
+                yield PRTimeline(self.store, id="pr-timeline")
 
             with Vertical(classes="sidebar", id="sidebar"):
                 with Vertical(classes="sidebar-section"):
-                    yield Static("Reviewers", classes="sidebar-section-title")
+                    with Horizontal(classes="sidebar-section-heading"):
+                        yield Static("Reviewers", classes="sidebar-section-title")
+                        yield Button(
+                            _EDIT_ICON,
+                            id="edit-reviewers",
+                            name="Edit reviewers",
+                            tooltip="Edit reviewers",
+                            compact=True,
+                            flat=True,
+                        )
                     yield Static("Loading...", classes="placeholder", id="pr-reviewers")
 
                 with Vertical(classes="sidebar-section"):
-                    yield Static("Assignees", classes="sidebar-section-title")
+                    with Horizontal(classes="sidebar-section-heading"):
+                        yield Static("Assignees", classes="sidebar-section-title")
+                        yield Button(
+                            _EDIT_ICON,
+                            id="edit-assignees",
+                            name="Edit assignees",
+                            tooltip="Edit assignees",
+                            compact=True,
+                            flat=True,
+                        )
                     yield Static("Loading...", classes="placeholder", id="pr-assignees")
 
                 with Vertical(classes="sidebar-section"):
@@ -91,7 +133,7 @@ class PRInfo(Container):
                     yield Static("Loading...", classes="placeholder", id="pr-labels")
 
     def on_mount(self) -> None:
-        self._update_wide_state()
+        self._update_layout_state()
 
         try:
             main_scroll = self.query_one("#main-scroll", VerticalScroll)
@@ -104,10 +146,27 @@ class PRInfo(Container):
             self.refresh_pr_data()
 
     def on_resize(self, event: events.Resize) -> None:
-        self._update_wide_state()
+        self._update_layout_state()
 
-    def _update_wide_state(self) -> None:
-        self.wide = self.size.width >= 120
+    def _update_layout_state(self) -> None:
+        width = self.size.width
+        self.wide = width >= 120
+        self.compact = width < _COMPACT_LAYOUT_BREAKPOINT
+
+    @on(Button.Pressed, "#copy-branch")
+    def _request_copy_branch(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.post_message(self.CopyBranchRequested())
+
+    @on(Button.Pressed, "#edit-reviewers")
+    def _request_edit_reviewers(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.post_message(self.EditReviewersRequested())
+
+    @on(Button.Pressed, "#edit-assignees")
+    def _request_edit_assignees(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.post_message(self.EditAssigneesRequested())
 
     @on(PRTimeline.ResolveToggled)
     def on_timeline_resolve_toggled(self, event: PRTimeline.ResolveToggled) -> None:

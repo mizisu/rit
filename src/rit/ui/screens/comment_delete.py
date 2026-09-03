@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Static
+from textual.widgets import Button, Static
 
 from rit.state.models import PendingReviewComment, PRComment
 
@@ -46,8 +47,15 @@ class CommentDeleteScreen(ModalScreen[bool]):
         margin-bottom: 1;
     }
 
-    #comment-delete-help {
-        color: $text-disabled;
+    #comment-delete-actions {
+        height: 3;
+        width: 1fr;
+        align-horizontal: right;
+    }
+
+    #comment-delete-actions Button {
+        min-width: 10;
+        margin-left: 1;
     }
     """
 
@@ -89,11 +97,24 @@ class CommentDeleteScreen(ModalScreen[bool]):
                 id="comment-delete-preview",
                 markup=False,
             )
-            yield Static(
-                "Enter/y to delete • Esc/n to cancel",
-                id="comment-delete-help",
-                markup=False,
-            )
+            with Horizontal(id="comment-delete-actions"):
+                yield Button("Cancel", id="comment-delete-cancel")
+                yield Button(
+                    "Delete",
+                    id="comment-delete-confirm",
+                    variant="error",
+                )
+
+    @on(Button.Pressed, "#comment-delete-confirm")
+    def _confirm_from_button(self) -> None:
+        self.action_confirm()
+
+    @on(Button.Pressed, "#comment-delete-cancel")
+    def _cancel_from_button(self) -> None:
+        self.action_cancel()
+
+    def on_mount(self) -> None:
+        self.query_one("#comment-delete-confirm", Button).focus()
 
     def action_confirm(self) -> None:
         self.dismiss(True)

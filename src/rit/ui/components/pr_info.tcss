@@ -66,9 +66,22 @@ PRInfo .pr-status-draft {
     color: #6e738d;
 }
 
+PRInfo #branch-row {
+    height: 1;
+    width: 100%;
+    margin-bottom: 1;
+}
+
 PRInfo .branch-info {
     color: #8aadf4;
-    margin-bottom: 1;
+    width: auto;
+    max-width: 90%;
+    height: 1;
+    text-wrap: nowrap;
+}
+
+PRInfo #copy-branch {
+    margin-left: 1;
 }
 
 /* Stats bar */
@@ -82,9 +95,47 @@ PRInfo .sidebar-section {
     margin-bottom: 1;
 }
 
+PRInfo .sidebar-section-heading {
+    height: 1;
+    width: 100%;
+}
+
+PRInfo #copy-branch,
+PRInfo #edit-reviewers,
+PRInfo #edit-assignees {
+    width: 3;
+    min-width: 3;
+    height: 1;
+    border: none;
+    padding: 0;
+    background: transparent;
+    color: $text-muted;
+    content-align: center middle;
+}
+
+PRInfo #copy-branch:hover,
+PRInfo #edit-reviewers:hover,
+PRInfo #edit-assignees:hover {
+    background: #363a4f;
+    color: $text;
+}
+
+PRInfo #copy-branch:focus,
+PRInfo #edit-reviewers:focus,
+PRInfo #edit-assignees:focus {
+    background: $primary;
+    color: $background;
+}
+
 PRInfo .sidebar-section-title {
     text-style: bold;
     color: #6e738d;
+    width: auto;
+}
+
+PRInfo #edit-reviewers,
+PRInfo #edit-assignees {
+    margin-left: 1;
 }
 
 /* Comments container - must be auto height for scrolling */
@@ -101,6 +152,16 @@ PRInfo CommentCard.pending-review-summary .comment-header {
     color: #eed49f;
 }
 
+PRInfo CommentCard.description-container:hover,
+PRInfo CommentCard.comment-box:hover {
+    background: #24273a;
+}
+
+PRInfo CommentCard.thread-comment:hover,
+PRInfo CommentCard.thread-reply:hover {
+    background: #2f3348;
+}
+
 /* Placeholder text */
 PRInfo .placeholder {
     color: #6e738d;
@@ -109,6 +170,28 @@ PRInfo .placeholder {
 PRInfo #pr-reviewers {
     text-wrap: nowrap;
     overflow: hidden;
+}
+
+PRInfo.-compact #pr-info-layout {
+    layout: vertical;
+}
+
+PRInfo.-compact #main-scroll {
+    width: 100%;
+    height: 1fr;
+}
+
+PRInfo.-compact .sidebar {
+    layout: horizontal;
+    width: 100%;
+    height: auto;
+    border-left: none;
+    border-top: solid #363a4f;
+}
+
+PRInfo.-compact .sidebar-section {
+    width: 1fr;
+    margin-bottom: 0;
 }
 
 /* Selected item highlight */

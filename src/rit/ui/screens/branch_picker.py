@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import ClassVar, Literal
 
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import OptionList, Static
+from textual.widgets import Button, OptionList, Static
 from textual.widgets.option_list import Option
 
 __all__ = ("BranchPickerScreen",)
@@ -41,9 +41,20 @@ class BranchPickerScreen(ModalScreen[Literal["head", "base"] | None]):
         height: auto;
         max-height: 6;
     }
+
+    #branch-picker-actions {
+        height: 3;
+        width: 1fr;
+        align-horizontal: right;
+        margin-top: 1;
+    }
+
+    #branch-picker-actions Button {
+        min-width: 10;
+    }
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("j", "cursor_down", "Next", show=False),
         Binding("k", "cursor_up", "Prev", show=False),
         Binding("escape", "cancel", "Cancel", show=False),
@@ -71,9 +82,11 @@ class BranchPickerScreen(ModalScreen[Literal["head", "base"] | None]):
                 id="branch-options",
             )
             yield Static(
-                "↑/↓ or j/k to choose • Enter to copy • Esc to cancel",
+                "Select a branch to copy it.",
                 id="branch-picker-help",
             )
+            with Horizontal(id="branch-picker-actions"):
+                yield Button("Cancel", id="branch-picker-cancel")
 
     def on_mount(self) -> None:
         options = self.query_one("#branch-options", OptionList)
@@ -88,6 +101,10 @@ class BranchPickerScreen(ModalScreen[Literal["head", "base"] | None]):
 
     def action_cancel(self) -> None:
         self.dismiss(None)
+
+    @on(Button.Pressed, "#branch-picker-cancel")
+    def _cancel_from_button(self) -> None:
+        self.action_cancel()
 
     @on(OptionList.OptionSelected, "#branch-options")
     def on_option_selected(self, event: OptionList.OptionSelected) -> None:

@@ -121,7 +121,29 @@ async def test_multi_select_picker_toggles_and_submits_selection() -> None:
         await pilot.press("enter")
         await pilot.press("j")
         await pilot.press("space")
-        await pilot.press("ctrl+s")
+        await pilot.click("#multi-select-apply")
         await pilot.pause()
 
         assert app.result == MultiSelectResult(selected_keys=("user:bob",))
+
+
+@pytest.mark.asyncio
+async def test_multi_select_picker_cancel_button_dismisses_without_changes() -> None:
+    results: list[MultiSelectResult | None] = []
+    app = App()
+
+    async with app.run_test() as pilot:
+        app.push_screen(
+            MultiSelectPickerScreen(
+                title="Edit assignees",
+                items=[MultiSelectItem(key="user:alice", label="@alice")],
+                selected_keys={"user:alice"},
+            ),
+            results.append,
+        )
+        await pilot.pause()
+
+        await pilot.click("#multi-select-cancel")
+        await pilot.pause()
+
+    assert results == [None]

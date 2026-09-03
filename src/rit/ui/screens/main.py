@@ -9,7 +9,7 @@ from textual.containers import VerticalScroll
 from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.screen import Screen
-from textual.widgets import Footer, Input, TabbedContent, TabPane, TextArea, Tree
+from textual.widgets import Input, TabbedContent, TabPane, TextArea, Tree
 from textual.worker import Worker, WorkerState
 
 from rit.app import RitApp
@@ -215,8 +215,6 @@ class MainScreen(Screen[None]):
             with TabPane("Files", id="files"):
                 yield FileChanges(store=self.store)
 
-        yield Footer()
-
     async def on_mount(self) -> None:
         self.run_worker(self._load_data(), exclusive=True)
 
@@ -370,6 +368,18 @@ class MainScreen(Screen[None]):
             self._copy_branch(pr.head_ref if pr else None, label="head")
         elif selection == "base":
             self._copy_branch(pr.base_ref if pr else None, label="base")
+
+    @on(PRInfo.CopyBranchRequested)
+    def _copy_branch_from_summary(self) -> None:
+        self.action_copy_branch()
+
+    @on(PRInfo.EditReviewersRequested)
+    def _edit_reviewers_from_summary(self) -> None:
+        self.action_edit_reviewers()
+
+    @on(PRInfo.EditAssigneesRequested)
+    def _edit_assignees_from_summary(self) -> None:
+        self.action_edit_assignees()
 
     def action_copy_branch(self) -> None:
         pr = self.store.state.pr
@@ -1391,7 +1401,7 @@ class MainScreen(Screen[None]):
         return fallback
 
     def on_key(self, event: events.Key) -> None:
-        if self._text_entry_has_focus():
+        if self._text_entry_has_focus() or self._comment_editor_has_focus():
             return
         if self.current_tab == 1 and event.key in {"ctrl+h", "ctrl+l", "H", "L"}:
             if event.key in {"ctrl+h", "H"}:
@@ -1412,12 +1422,22 @@ class MainScreen(Screen[None]):
             event.prevent_default()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if self._text_entry_has_focus():
+        if self._text_entry_has_focus() or self._comment_editor_has_focus():
             return False
         return super().check_action(action, parameters)
 
     def _text_entry_has_focus(self) -> bool:
         return isinstance(self.focused, (Input, TextArea))
+
+    def _comment_editor_has_focus(self) -> bool:
+        focused = self.focused
+        if focused is None:
+            return False
+        if isinstance(focused, InlineCommentEditor):
+            return True
+        return any(
+            isinstance(ancestor, InlineCommentEditor) for ancestor in focused.ancestors
+        )
 
     def _current_files_focus_target(self) -> str | None:
         if self.current_tab != 1:

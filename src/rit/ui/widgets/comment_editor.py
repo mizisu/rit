@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import ClassVar, Literal
 
 from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import HorizontalGroup, Vertical
 from textual.message import Message
-from textual.widgets import OptionList, Static, TextArea
+from textual.widget import Widget
+from textual.widgets import Button, OptionList, Static, TextArea
 
 from rit.ui.widgets.emoji_picker import EMOJI_PICKER_BINDINGS, EmojiPicker
 
@@ -55,17 +56,23 @@ class InlineCommentEditor(Vertical):
         max-height: 12;
         margin-bottom: 1;
     }
+
+    InlineCommentEditor .comment-editor-actions {
+        height: 3;
+        align-horizontal: right;
+    }
+
+    InlineCommentEditor .comment-editor-actions Button {
+        min-width: 12;
+        margin-left: 1;
+    }
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         *EMOJI_PICKER_BINDINGS,
         Binding("ctrl+s,ctrl+enter", "submit('queue')", "Save draft", show=False),
-        Binding(
-            "ctrl+shift+s,ctrl+shift+enter",
-            "submit('post')",
-            "Post now",
-            show=False,
-        ),
+        Binding("tab", "focus_next", "Next action", show=False),
+        Binding("shift+tab", "focus_previous", "Previous action", show=False),
         Binding("escape", "cancel", "Cancel", show=False),
     ]
 
@@ -125,13 +132,27 @@ class InlineCommentEditor(Vertical):
             placeholder=self._placeholder,
         )
         yield EmojiPicker(id="comment-editor-emoji-options")
-        if self._update_existing:
-            hint = "Ctrl+S update • Esc cancel"
-        elif self._kind in {"inline", "file"}:
-            hint = "Ctrl+S pending • Ctrl+Shift+S post now • Esc cancel"
-        else:
-            hint = "Ctrl+S submit • Esc cancel"
-        yield Static(hint)
+        with HorizontalGroup(classes="comment-editor-actions"):
+            if self._update_existing:
+                yield Button(
+                    "Update",
+                    id="comment-editor-submit",
+                    variant="primary",
+                )
+            elif self._kind in {"inline", "file"}:
+                yield Button(
+                    "Add to review",
+                    id="comment-editor-queue",
+                    variant="primary",
+                )
+                yield Button("Post now", id="comment-editor-post")
+            else:
+                yield Button(
+                    "Submit",
+                    id="comment-editor-submit",
+                    variant="primary",
+                )
+            yield Button("Cancel", id="comment-editor-cancel")
 
     def on_mount(self) -> None:
         if self._pending_focus:
@@ -195,6 +216,26 @@ class InlineCommentEditor(Vertical):
         body = self.query_one("#comment-editor-body", TextArea)
         self._emoji_picker().accept(body, event.option_id)
 
+    @on(Button.Pressed, "#comment-editor-queue")
+    def _on_queue_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.action_submit("queue")
+
+    @on(Button.Pressed, "#comment-editor-post")
+    def _on_post_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.action_submit("post")
+
+    @on(Button.Pressed, "#comment-editor-submit")
+    def _on_submit_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.action_submit("queue")
+
+    @on(Button.Pressed, "#comment-editor-cancel")
+    def _on_cancel_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.action_cancel()
+
     def action_emoji_next(self) -> None:
         self._emoji_picker().action_cursor_down()
 
@@ -211,6 +252,27 @@ class InlineCommentEditor(Vertical):
 
     def _emoji_picker(self) -> EmojiPicker:
         return self.query_one("#comment-editor-emoji-options", EmojiPicker)
+
+    def _focus_targets(self) -> tuple[Widget, ...]:
+        return (
+            self.query_one("#comment-editor-body", TextArea),
+            *self.query(Button),
+        )
+
+    def _move_focus(self, offset: int) -> None:
+        targets = self._focus_targets()
+        focused = self.screen.focused
+        try:
+            index = targets.index(focused)
+        except ValueError:
+            index = -1 if offset > 0 else 0
+        targets[(index + offset) % len(targets)].focus()
+
+    def action_focus_next(self) -> None:
+        self._move_focus(1)
+
+    def action_focus_previous(self) -> None:
+        self._move_focus(-1)
 
     def action_cancel(self) -> None:
         self.post_message(self.Cancelled(self._kind))

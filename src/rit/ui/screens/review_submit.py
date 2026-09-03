@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import ClassVar, Literal
 
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical, VerticalScroll
+from textual.containers import HorizontalGroup, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import OptionList, Static, TextArea
+from textual.widget import Widget
+from textual.widgets import Button, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from rit.state.models import PendingReviewComment
@@ -102,9 +103,19 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
     .review-submit-pending-empty {
         color: $text-muted;
     }
+
+    #review-submit-buttons {
+        height: 3;
+        align-horizontal: right;
+    }
+
+    #review-submit-buttons Button {
+        min-width: 14;
+        margin-left: 1;
+    }
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         *EMOJI_PICKER_BINDINGS,
         Binding("j", "cursor_down", "Next", show=False),
         Binding("k", "cursor_up", "Prev", show=False),
@@ -150,10 +161,13 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
                                 f"{self._pending_comments_count} pending comments ready to submit",
                                 classes="review-submit-pending-empty",
                             )
-            yield Static(
-                "Write summary • :emoji to insert • Tab to action • "
-                "Enter/Ctrl+S to submit • Esc to cancel"
-            )
+            with HorizontalGroup(id="review-submit-buttons"):
+                yield Button(
+                    "Submit review",
+                    id="review-submit-confirm",
+                    variant="primary",
+                )
+                yield Button("Cancel", id="review-submit-cancel")
 
     def on_mount(self) -> None:
         options = self.query_one("#review-submit-actions", OptionList)
@@ -199,16 +213,28 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
     def action_cursor_up(self) -> None:
         self.query_one("#review-submit-actions", OptionList).action_cursor_up()
 
+    def _focus_targets(self) -> tuple[Widget, ...]:
+        return (
+            self.query_one("#review-submit-body", TextArea),
+            self.query_one("#review-submit-actions", OptionList),
+            self.query_one("#review-submit-confirm", Button),
+            self.query_one("#review-submit-cancel", Button),
+        )
+
+    def _move_focus(self, offset: int) -> None:
+        targets = self._focus_targets()
+        focused = self.focused
+        try:
+            index = targets.index(focused)
+        except ValueError:
+            index = -1 if offset > 0 else 0
+        targets[(index + offset) % len(targets)].focus()
+
     def action_focus_next(self) -> None:
-        options = self.query_one("#review-submit-actions", OptionList)
-        body = self.query_one("#review-submit-body", TextArea)
-        if body.has_focus:
-            options.focus()
-        else:
-            body.focus()
+        self._move_focus(1)
 
     def action_focus_prev(self) -> None:
-        self.action_focus_next()
+        self._move_focus(-1)
 
     def _pending_comment_meta(self, comment: PendingReviewComment) -> str:
         if comment.is_file_level:
@@ -232,6 +258,16 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
     def action_cancel(self) -> None:
         self.dismiss(None)
 
+    @on(Button.Pressed, "#review-submit-confirm")
+    def on_submit_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.action_submit()
+
+    @on(Button.Pressed, "#review-submit-cancel")
+    def on_cancel_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.action_cancel()
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action.startswith("emoji_"):
             return self.is_mounted and self._emoji_picker().is_open
@@ -242,5 +278,6 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
         return super().check_action(action, parameters)
 
     @on(OptionList.OptionSelected, "#review-submit-actions")
-    def on_option_selected(self, _event: OptionList.OptionSelected) -> None:
-        self.action_submit()
+    def on_option_selected(self, event: OptionList.OptionSelected) -> None:
+        event.stop()
+        self.query_one("#review-submit-confirm", Button).focus()

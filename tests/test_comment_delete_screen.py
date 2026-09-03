@@ -36,7 +36,7 @@ async def test_comment_delete_screen_confirms_and_cancels() -> None:
         assert "Pending draft • src/draft.py:7" in str(
             app.screen.query_one("#comment-delete-meta", Static).content
         )
-        await pilot.press("escape")
+        await pilot.click("#comment-delete-cancel")
         await pilot.pause()
         assert results == [False]
 
@@ -45,7 +45,7 @@ async def test_comment_delete_screen_confirms_and_cancels() -> None:
         assert "@alice • src/app.py:42" in str(
             app.screen.query_one("#comment-delete-meta", Static).content
         )
-        await pilot.press("enter")
+        await pilot.click("#comment-delete-confirm")
         await pilot.pause()
 
     assert results == [False, True]

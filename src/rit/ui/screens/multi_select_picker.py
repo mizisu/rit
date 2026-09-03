@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import ClassVar
 
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Vertical
+from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Input, OptionList, Static
+from textual.widget import Widget
+from textual.widgets import Button, Input, OptionList, Static
 from textual.widgets.option_list import Option, OptionDoesNotExist
 
 __all__ = (
@@ -57,18 +59,25 @@ class MultiSelectPickerScreen(ModalScreen[MultiSelectResult | None]):
     }
 
     #multi-select-options {
-        height: 14;
-        min-height: 8;
-        max-height: 18;
+        height: 7;
+        min-height: 5;
+        max-height: 10;
         margin-bottom: 1;
     }
 
-    #multi-select-help {
-        color: $text-muted;
+    #multi-select-actions {
+        height: 3;
+        width: 1fr;
+        align-horizontal: right;
+    }
+
+    #multi-select-actions Button {
+        min-width: 10;
+        margin-left: 1;
     }
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding("j", "cursor_down", "Next", show=False),
         Binding("down", "cursor_down", "Next", show=False),
         Binding("k", "cursor_up", "Prev", show=False),
@@ -102,10 +111,13 @@ class MultiSelectPickerScreen(ModalScreen[MultiSelectResult | None]):
             yield Static(self._title, id="multi-select-title")
             yield Input(placeholder=self._placeholder, id="multi-select-search")
             yield OptionList(id="multi-select-options")
-            yield Static(
-                "Type to filter • Tab to list • Space/Enter to toggle • Ctrl+S apply • Esc cancel",
-                id="multi-select-help",
-            )
+            with Horizontal(id="multi-select-actions"):
+                yield Button("Cancel", id="multi-select-cancel")
+                yield Button(
+                    "Apply",
+                    id="multi-select-apply",
+                    variant="primary",
+                )
 
     def on_mount(self) -> None:
         self._refresh_options()
@@ -196,16 +208,33 @@ class MultiSelectPickerScreen(ModalScreen[MultiSelectResult | None]):
             self._selected_keys.add(key)
         self._refresh_options()
 
+    def _focus_order(self) -> list[Widget]:
+        return [
+            self.query_one("#multi-select-search", Input),
+            self.query_one("#multi-select-options", OptionList),
+            self.query_one("#multi-select-cancel", Button),
+            self.query_one("#multi-select-apply", Button),
+        ]
+
     def action_focus_next(self) -> None:
-        search = self.query_one("#multi-select-search", Input)
-        options = self.query_one("#multi-select-options", OptionList)
-        if search.has_focus:
-            options.focus()
-        else:
-            search.focus()
+        controls = self._focus_order()
+        focused = self.screen.focused
+        current = controls.index(focused) if focused in controls else -1
+        controls[(current + 1) % len(controls)].focus()
 
     def action_focus_prev(self) -> None:
-        self.action_focus_next()
+        controls = self._focus_order()
+        focused = self.screen.focused
+        current = controls.index(focused) if focused in controls else 0
+        controls[(current - 1) % len(controls)].focus()
+
+    @on(Button.Pressed, "#multi-select-apply")
+    def _apply_from_button(self) -> None:
+        self.action_submit()
+
+    @on(Button.Pressed, "#multi-select-cancel")
+    def _cancel_from_button(self) -> None:
+        self.action_cancel()
 
     def action_submit(self) -> None:
         self.dismiss(

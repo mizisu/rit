@@ -2,7 +2,7 @@ from typing import cast
 
 import pytest
 from textual.app import App
-from textual.widgets import OptionList, Static, TextArea
+from textual.widgets import Button, OptionList, Static, TextArea
 
 from rit.state.models import PendingReviewComment
 from rit.ui.screens.review_submit import ReviewSubmitScreen
@@ -24,16 +24,26 @@ async def test_review_submit_screen_places_actions_below_body_in_requested_order
         screen = app.screen
         children = list(screen.query_one("#review-submit-dialog").children)
         options = screen.query_one("#review-submit-actions", OptionList)
+        buttons = [
+            screen.query_one("#review-submit-confirm", Button),
+            screen.query_one("#review-submit-cancel", Button),
+        ]
 
         assert children[1].id == "review-submit-body"
         assert children[2].id == "review-submit-emoji-options"
         assert children[3].id == "review-submit-actions"
+        assert children[4].id == "review-submit-buttons"
         assert [option.id for option in options.options] == [
             "COMMENT",
             "APPROVE",
             "REQUEST_CHANGES",
         ]
         assert options.region.height >= len(options.options)
+        assert [str(button.label) for button in buttons] == [
+            "Submit review",
+            "Cancel",
+        ]
+        assert buttons[0].variant == "primary"
 
 
 @pytest.mark.asyncio
@@ -196,7 +206,9 @@ async def test_review_submit_screen_allows_empty_comment_when_pending_drafts_exi
 
 
 @pytest.mark.asyncio
-async def test_review_submit_screen_submits_selected_action_with_enter() -> None:
+async def test_review_submit_screen_requires_explicit_submit_after_action_choice() -> (
+    None
+):
     class TestApp(App):
         def __init__(self) -> None:
             super().__init__()
@@ -214,6 +226,13 @@ async def test_review_submit_screen_submits_selected_action_with_enter() -> None
 
         await pilot.press("tab")
         await pilot.press("j")
+        await pilot.press("enter")
+        await pilot.pause()
+
+        submit = app.screen.query_one("#review-submit-confirm", Button)
+        assert app.result is None
+        assert app.screen.focused is submit
+
         await pilot.press("enter")
         await pilot.pause()
 
