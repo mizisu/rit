@@ -7,7 +7,7 @@ A terminal UI for reviewing GitHub pull requests.
 | ![rit demo 1](docs/assets/demo_1.gif) | ![rit demo 2](docs/assets/demo_2.gif) |
 
 ## Requirements
-
+ <!-- temporary context probe -->
 - Python 3.14+
 - uv
 - GitHub CLI (`gh`)
