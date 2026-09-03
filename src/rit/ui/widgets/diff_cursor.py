@@ -1057,6 +1057,7 @@ def _apply_cursor_move_side_effects(
     )
 
     if move_update.line_changed:
+        view._record_file_navigation(view.file_for_line_index(new_line))
         hunk_index = view._get_hunk_index_for_line(new_line)
         if hunk_index is not None and hunk_index != view.current_hunk_index:
             view.current_hunk_index = hunk_index

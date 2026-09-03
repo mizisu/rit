@@ -760,7 +760,7 @@ async def test_combined_diff_uses_prominent_file_headers_without_hunk_headers() 
 
 
 @pytest.mark.asyncio
-async def test_file_view_state_update_refreshes_combined_file_header_label() -> None:
+async def test_file_view_state_update_refreshes_header_before_folding() -> None:
     patch = "@@ -1,1 +1,1 @@\n-old\n+new"
     store = PRStore()
     store.state.files = [
@@ -789,11 +789,27 @@ async def test_file_view_state_update_refreshes_combined_file_header_label() -> 
 
         store.state.files[0].viewer_viewed_state = FileViewedState.VIEWED
         file_changes.update_file_view_state("one.py")
-        await pilot.pause()
+        assert "Viewed" in str(
+            getattr(first_header.content, "plain", first_header.content)
+        )
+        assert "one.py" not in file_changes.diff_view._folded_file_paths
 
+        await wait_until(
+            lambda: any(
+                header.is_mounted and header.has_class("-collapsed")
+                for header in file_changes.diff_view.query("#file-header-0")
+                if isinstance(header, Static)
+            )
+        )
+
+        content = file_changes.diff_view._content_widget
+        assert content is not None
+        await wait_until(lambda: all(child.is_mounted for child in content.children))
+        first_header = file_changes.diff_view.query_one("#file-header-0", Static)
         header_text = str(getattr(first_header.content, "plain", first_header.content))
         assert "Viewed" in header_text
         assert "Unviewed" not in header_text
+        assert file_changes.diff_view.selected_file_header_path() == "one.py"
 
 
 def test_file_header_prefers_current_file_stats_over_stale_hunk_metadata() -> None:
