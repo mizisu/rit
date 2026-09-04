@@ -2076,8 +2076,8 @@ async def test_visual_selection_cache_tracks_rendered_window_only() -> None:
 async def test_medium_unified_diff_uses_blocks_without_virtualization() -> None:
     """Medium unified diffs should use grouped blocks before full virtualization kicks in."""
 
-    context_lines = "\n".join(f" line{i}" for i in range(1, 151))
-    patch = f"@@ -1,150 +1,150 @@\n{context_lines}"
+    context_lines = "\n".join(f" line{i}" for i in range(1, 101))
+    patch = f"@@ -1,100 +1,100 @@\n{context_lines}"
 
     class TestApp(App):
         def compose(self) -> ComposeResult:
@@ -2093,7 +2093,7 @@ async def test_medium_unified_diff_uses_blocks_without_virtualization() -> None:
 
         assert diff_view._virt.active is False
         assert len(diff_view.query(".diff-block")) >= 1
-        assert len(diff_view.query(".diff-block .code-content")) < 150
+        assert len(diff_view.query(".diff-block .code-content")) < 100
 
 
 @pytest.mark.asyncio

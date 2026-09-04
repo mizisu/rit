@@ -9,7 +9,6 @@ from textual.containers import VerticalScroll
 from rit.core.diff import parse_patch
 from rit.ui.widgets.diff_view import DiffView
 
-
 _LONG_LINE = "long_" * 30
 
 
@@ -106,6 +105,7 @@ async def test_cursor_move_brings_widget_into_view_with_pending_drafts() -> None
     app = TestApp()
     async with app.run_test(size=(100, 8)) as pilot:
         diff_view = app.query_one(DiffView)
+        diff_view.BLOCK_RENDER_LINE_THRESHOLD = line_count + 1
         diff = parse_patch(patch, "test.py")
 
         await diff_view.show_diff("test.py", diff)
