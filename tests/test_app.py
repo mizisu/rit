@@ -797,9 +797,13 @@ class TestRitApp:
                 side="RIGHT",
             )
             await pilot.pause()
+            await wait_until(
+                lambda: round(diff_view.scroll_y) == scroll_before,
+                timeout=2,
+            )
 
             assert diff_view.inline_comment_target() is None
-            assert int(diff_view.scroll_y) == scroll_before
+            assert round(diff_view.scroll_y) == scroll_before
 
     async def test_update_inline_comment_draft_renders_before_sync_finishes(
         self,

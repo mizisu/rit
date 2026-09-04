@@ -5,7 +5,9 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from rich.console import RenderableType
 from textual.app import App, ComposeResult
+from textual.screen import Screen
 from textual.signal import Signal
 from textual.widgets import Static
 
@@ -760,7 +762,7 @@ async def test_combined_diff_uses_prominent_file_headers_without_hunk_headers() 
 
 
 @pytest.mark.asyncio
-async def test_file_view_state_update_refreshes_header_before_folding() -> None:
+async def test_file_view_state_update_does_not_paint_before_folding() -> None:
     patch = "@@ -1,1 +1,1 @@\n-old\n+new"
     store = PRStore()
     store.state.files = [
@@ -771,9 +773,29 @@ async def test_file_view_state_update_refreshes_header_before_folding() -> None:
         filename: parse_patch(patch, filename) for filename in ["one.py", "two.py"]
     }
 
-    class TestApp(App):
+    class TestApp(App[None]):
+        def __init__(self) -> None:
+            super().__init__()
+            self.capture_fold_frames = False
+            self.fold_frames: list[tuple[bool, bool]] = []
+
         def compose(self) -> ComposeResult:
             yield FileChanges(store=store)
+
+        def _display(
+            self,
+            screen: Screen,
+            renderable: RenderableType | None,
+        ) -> None:
+            if self.capture_fold_frames:
+                diff_view = self.query_one(FileChanges).diff_view
+                header = diff_view.query_one("#file-header-0", Static)
+                header_text = str(getattr(header.content, "plain", header.content))
+                viewed = "Viewed" in header_text and "Unviewed" not in header_text
+                self.fold_frames.append(
+                    (viewed, "one.py" in diff_view._folded_file_paths)
+                )
+            super()._display(screen, renderable)
 
     app = TestApp()
     async with app.run_test() as pilot:
@@ -787,6 +809,7 @@ async def test_file_view_state_update_refreshes_header_before_folding() -> None:
             getattr(first_header.content, "plain", first_header.content)
         )
 
+        app.capture_fold_frames = True
         store.state.files[0].viewer_viewed_state = FileViewedState.VIEWED
         file_changes.update_file_view_state("one.py")
         assert "Viewed" in str(
@@ -805,6 +828,10 @@ async def test_file_view_state_update_refreshes_header_before_folding() -> None:
         content = file_changes.diff_view._content_widget
         assert content is not None
         await wait_until(lambda: all(child.is_mounted for child in content.children))
+        await pilot.pause()
+        app.capture_fold_frames = False
+        assert app.fold_frames
+        assert (True, False) not in app.fold_frames
         first_header = file_changes.diff_view.query_one("#file-header-0", Static)
         header_text = str(getattr(first_header.content, "plain", first_header.content))
         assert "Viewed" in header_text

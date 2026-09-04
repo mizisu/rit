@@ -1040,11 +1040,57 @@ class DiffView(VerticalScroll):
             return self._all_lines[line_index].file_path or self.current_file
         return None
 
+    async def _await_content_mounts(self) -> None:
+        content = self._content_widget
+        if content is None:
+            return
+        pending = [child for child in content.children if not child.is_mounted]
+        if pending:
+            await AwaitMount(content, pending)
+
+    def _restore_file_fold_target(
+        self,
+        filename: str,
+        *,
+        preserve_header_position: bool,
+        viewport_offset: int | None,
+    ) -> None:
+        target_line = self._first_line_index_for_file(filename)
+        if target_line is not None:
+            if preserve_header_position:
+                suppress_scroll = self._cursor_ui.suppress_scroll
+                self._cursor_ui.suppress_scroll = True
+                try:
+                    self._move_cursor(line=target_line, pane="new")
+                finally:
+                    self._cursor_ui.suppress_scroll = suppress_scroll
+            else:
+                self.jump_to_line_index(
+                    target_line,
+                    side="RIGHT",
+                    focus=self.has_focus,
+                    viewport_offset=max(1, viewport_offset)
+                    if viewport_offset is not None
+                    else 2,
+                )
+
+        if not preserve_header_position and filename not in self._folded_file_paths:
+            return
+        hunk_index = self._file_header_hunk_index(filename)
+        if hunk_index is None:
+            return
+        self._set_file_header_selection(hunk_index)
+        if not preserve_header_position and viewport_offset is None:
+            _cursor._scroll_to_file_header(self, hunk_index)
+
     async def toggle_current_file_fold(self) -> bool:
         filename = self._current_fold_target()
         if filename is None:
             return False
         header_selected = self.selected_file_header_path() == filename
+        viewport_offset = (
+            None if header_selected else self._current_cursor_viewport_offset()
+        )
 
         if filename in self._folded_file_paths:
             self._manually_folded_files.discard(filename)
@@ -1059,16 +1105,14 @@ class DiffView(VerticalScroll):
         if source is None or current_file is None:
             return False
 
-        await self.show_diff(current_file, source, preserve_full_file_state=True)
-        target_line = self._first_line_index_for_file(filename)
-        if target_line is not None:
-            self.jump_to_line_index(target_line, side="RIGHT", focus=self.has_focus)
-
-        if header_selected or filename in self._folded_file_paths:
-            hunk_index = self._file_header_hunk_index(filename)
-            if hunk_index is not None:
-                self._set_file_header_selection(hunk_index)
-                _cursor._scroll_to_file_header(self, hunk_index)
+        with self.app.batch_update():
+            await self.show_diff(current_file, source, preserve_full_file_state=True)
+            await self._await_content_mounts()
+            self._restore_file_fold_target(
+                filename,
+                preserve_header_position=header_selected,
+                viewport_offset=viewport_offset,
+            )
         return True
 
     def refresh_viewed_folds(self) -> None:
@@ -1088,44 +1132,36 @@ class DiffView(VerticalScroll):
         if next_folded_files == self._folded_file_paths:
             return
 
-        self.call_after_refresh(
-            lambda: self.run_worker(
-                self._refresh_viewed_folds(source, current_file),
-                exclusive=True,
-                name="diff-viewed-fold-refresh",
-            )
+        self.run_worker(
+            self._refresh_viewed_folds(source, current_file),
+            exclusive=True,
+            name="diff-viewed-fold-refresh",
         )
 
     async def _refresh_viewed_folds(self, source: FileDiff, current_file: str) -> None:
         target_file = self._current_fold_target()
+        preserve_header_position = self.selected_file_header_path() == target_file
+        viewport_offset = (
+            None
+            if preserve_header_position
+            else self._current_cursor_viewport_offset()
+        )
         navigation_revision = self._file_navigation_revision
         with self.app.batch_update():
             await self.show_diff(current_file, source, preserve_full_file_state=True)
-
-            content = self._content_widget
-            if content is not None:
-                pending_children = [
-                    child for child in content.children if not child.is_mounted
-                ]
-                if pending_children:
-                    await AwaitMount(content, pending_children)
+            await self._await_content_mounts()
 
             if self._file_navigation_revision != navigation_revision:
                 target_file = self._last_navigated_file
+                preserve_header_position = False
+                viewport_offset = None
             if target_file is None:
                 return
-            target_line = self._first_line_index_for_file(target_file)
-            if target_line is not None:
-                self.jump_to_line_index(
-                    target_line,
-                    side="RIGHT",
-                    focus=self.has_focus,
-                )
-            if target_file in self._folded_file_paths:
-                hunk_index = self._file_header_hunk_index(target_file)
-                if hunk_index is not None:
-                    self._set_file_header_selection(hunk_index)
-                    _cursor._scroll_to_file_header(self, hunk_index)
+            self._restore_file_fold_target(
+                target_file,
+                preserve_header_position=preserve_header_position,
+                viewport_offset=viewport_offset,
+            )
 
     def line_index_for_location(
         self,

@@ -94,7 +94,6 @@ async def test_enter_toggles_viewed_file_fold_in_combined_diff() -> None:
         await wait_until(
             lambda: file_changes.diff_view.selected_file_header_path() == "one.py"
         )
-
         diff_view = file_changes.diff_view
         first_header = diff_view.query_one("#file-header-0", Static)
         header_text = str(getattr(first_header.content, "plain", first_header.content))
@@ -130,7 +129,10 @@ async def test_enter_toggles_viewed_file_fold_in_combined_diff() -> None:
             if line.file_path == "one.py"
         )
 
-        await pilot.press("enter")
+        assert await diff_view.toggle_current_file_fold()
+        content = diff_view._content_widget
+        assert content is not None
+        assert all(child.is_mounted for child in content.children)
         await wait_until(lambda: "one.py" in diff_view._folded_file_paths)
         await wait_until(lambda: diff_view.selected_file_header_path() == "one.py")
 
@@ -165,8 +167,10 @@ async def test_click_toggles_unviewed_file_fold_in_combined_diff() -> None:
         diff_view = file_changes.diff_view
         assert diff_view._folded_file_paths == frozenset()
         await wait_until(
-            lambda: len(diff_view.query("#file-header-0")) == 1
-            and diff_view.query_one("#file-header-0").region.height == 1
+            lambda: (
+                len(diff_view.query("#file-header-0")) == 1
+                and diff_view.query_one("#file-header-0").region.height == 1
+            )
         )
 
         await pilot.click("#file-header-0", offset=(1, 0))
@@ -186,6 +190,57 @@ async def test_click_toggles_unviewed_file_fold_in_combined_diff() -> None:
         first_header = diff_view.query_one("#file-header-0", Static)
         header_text = str(getattr(first_header.content, "plain", first_header.content))
         assert header_text.startswith("▾ one.py")
+
+
+@pytest.mark.asyncio
+async def test_repeated_file_header_fold_preserves_scroll_position() -> None:
+    lines_per_file = 10
+    patch = f"@@ -1,{lines_per_file} +1,{lines_per_file} @@\n" + "\n".join(
+        f" line{line}" for line in range(lines_per_file)
+    )
+    store = PRStore()
+    store.state.files_loading = LoadingState.LOADED
+    store.state.files = [
+        PRFile(filename=f"file{index}.py", status="modified", patch=patch)
+        for index in range(10)
+    ]
+    store.state.file_diffs = {
+        file.filename: parse_patch(patch, file.filename) for file in store.state.files
+    }
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test(size=(100, 20)) as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.refresh_files()
+        await wait_until(lambda: file_changes.diff_view.current_file == "All files")
+        await pilot.pause()
+
+        diff_view = file_changes.diff_view
+        filename = "file5.py"
+        line_index = diff_view._first_line_index_for_file(filename)
+        assert line_index is not None
+        diff_view.jump_to_line_index(
+            line_index,
+            side="RIGHT",
+            viewport_offset=6,
+        )
+        await pilot.pause()
+        initial_scroll = int(diff_view.scroll_y)
+        assert initial_scroll > 0
+        assert diff_view.selected_file_header_path() is None
+
+        for _ in range(2):
+            assert await diff_view.toggle_current_file_fold()
+            await pilot.pause()
+            assert int(diff_view.scroll_y) == initial_scroll
+
+            assert await diff_view.toggle_current_file_fold()
+            await pilot.pause()
+            assert int(diff_view.scroll_y) == initial_scroll
 
 
 @pytest.mark.asyncio
