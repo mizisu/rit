@@ -1,5 +1,6 @@
 """Tests for collapsible markdown component."""
 
+import asyncio
 import base64
 from io import BytesIO
 
@@ -523,6 +524,62 @@ async def test_markdown_image_block_loads_image_from_in_memory_bytes() -> None:
 
         assert clicked is True
         assert isinstance(app.screen, ImageViewerScreen)
+
+
+@pytest.mark.asyncio
+async def test_markdown_image_block_limits_concurrent_loads() -> None:
+    png_bytes = _png_bytes(32, 18)
+    release = asyncio.Event()
+    started: list[str] = []
+    active = 0
+    max_active = 0
+
+    async def fetcher(url: str) -> bytes:
+        nonlocal active, max_active
+        started.append(url)
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            await release.wait()
+            return png_bytes
+        finally:
+            active -= 1
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            for index in range(10):
+                yield MarkdownImageBlock(
+                    MarkdownImageRef(
+                        alt=f"Image {index}",
+                        src=f"https://example.com/{index}.png",
+                    ),
+                    fetcher=fetcher,
+                )
+
+    app = TestApp()
+    async with app.run_test():
+        await wait_until(
+            lambda: (
+                len(started)
+                == markdown_images_module.MAX_CONCURRENT_MARKDOWN_IMAGE_LOADS
+            ),
+            timeout=1.0,
+        )
+        await asyncio.sleep(0.05)
+
+        assert (
+            len(started) == markdown_images_module.MAX_CONCURRENT_MARKDOWN_IMAGE_LOADS
+        )
+        assert max_active == markdown_images_module.MAX_CONCURRENT_MARKDOWN_IMAGE_LOADS
+
+        release.set()
+        await wait_until(
+            lambda: all(block._loaded for block in app.query(MarkdownImageBlock)),
+            timeout=2.0,
+        )
+
+        assert len(started) == 10
+        assert max_active == markdown_images_module.MAX_CONCURRENT_MARKDOWN_IMAGE_LOADS
 
 
 @pytest.mark.asyncio

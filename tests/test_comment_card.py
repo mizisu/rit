@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Static
@@ -8,30 +10,37 @@ from tests.conftest import wait_until
 
 
 @pytest.mark.asyncio
-async def test_comment_card_mounts_markdown_without_delayed_preview(
+async def test_comment_card_defers_markdown_until_body_delay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fail_timer(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("comment body should not use delayed preview swaps")
+    scheduled: list[tuple[float, Callable[[], None]]] = []
 
-    monkeypatch.setattr(CommentCard, "set_timer", fail_timer)
+    def capture_timer(
+        _self: CommentCard,
+        delay: float,
+        callback: Callable[[], None],
+    ) -> None:
+        scheduled.append((delay, callback))
+
+    monkeypatch.setattr(CommentCard, "set_timer", capture_timer)
 
     class TestApp(App[None]):
         def compose(self) -> ComposeResult:
             yield CommentCard(
                 "Header",
                 "# Body",
-                body_mount_delay=0.01,
+                body_mount_delay=0.25,
             )
 
     app = TestApp()
     async with app.run_test() as pilot:
         await pilot.pause(0)
 
-        await wait_until(lambda: len(app.query("MarkdownH1")) == 1, timeout=2.0)
+        assert len(app.query("MarkdownH1")) == 0
+        assert scheduled[0][0] == 0.25
 
-        assert len(app.query(".comment-body-preview")) == 0
-        assert len(app.query("MarkdownH1")) == 1
+        scheduled[0][1]()
+        await wait_until(lambda: len(app.query("MarkdownH1")) == 1, timeout=2.0)
 
 
 @pytest.mark.asyncio

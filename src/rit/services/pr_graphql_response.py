@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping
 
@@ -9,7 +10,6 @@ from rit.services.pr_graphql_queries import (
     pull_request_graphql_request,
 )
 from rit.state.models import PR
-
 
 __all__ = (
     "PullRequestGraphQLError",
@@ -38,7 +38,7 @@ class PullRequestNotFound(ValueError):
 def _mapping_value(data: object, key: str) -> object | None:
     if not isinstance(data, Mapping):
         return None
-    return getattr(data, "get")(key)
+    return data.get(key)
 
 
 def _required_mapping(value: object, *, pr_number: int) -> Mapping:
@@ -93,9 +93,7 @@ def parse_pull_request_graphql_data(
 
 def parse_pull_request_graphql_pr(data: object, *, pr_number: int) -> PR:
     """Parse a GitHub GraphQL PR response into a PR model."""
-    return PR.model_validate(
-        parse_pull_request_graphql_data(data, pr_number=pr_number)
-    )
+    return PR.model_validate(parse_pull_request_graphql_data(data, pr_number=pr_number))
 
 
 def parse_pull_request_graphql_pr_result(result: str, *, pr_number: int) -> PR:
@@ -145,14 +143,16 @@ async def fetch_pull_request_graphql_pr(
     runner: GitHubInputRunner,
 ) -> PR:
     """Fetch and parse one pull request GraphQL view."""
-    return parse_pull_request_graphql_pr_result(
-        await fetch_pull_request_graphql_result(
-            view=view,
-            owner=owner,
-            repo=repo,
-            pr_number=pr_number,
-            runner=runner,
-        ),
+    result = await fetch_pull_request_graphql_result(
+        view=view,
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        runner=runner,
+    )
+    return await asyncio.to_thread(
+        parse_pull_request_graphql_pr_result,
+        result,
         pr_number=pr_number,
     )
 

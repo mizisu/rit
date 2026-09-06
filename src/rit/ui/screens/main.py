@@ -15,6 +15,7 @@ from textual.worker import Worker, WorkerState
 from rit.app import RitApp
 from rit.state.models import (
     FileViewedState,
+    LoadingState,
     PendingReviewComment,
     PRComment,
     PRTeam,
@@ -200,6 +201,7 @@ class MainScreen(Screen[None]):
         self.store = PRStore(owner=owner, repo=repo, pr_number=pr_number)
         self.store.set_message_sink(self._post_store_message)
         self._pr_info_refresh_pending = False
+        self._files_load_requested = False
 
     def compose(self) -> ComposeResult:
         yield Header(
@@ -219,7 +221,15 @@ class MainScreen(Screen[None]):
         self.run_worker(self._load_data(), exclusive=True)
 
     async def _load_data(self) -> None:
-        await self.store.load_all()
+        await self.store.load_overview()
+
+    def _load_files_on_demand(self) -> None:
+        if self._files_load_requested:
+            return
+        if self.store.state.files_loading != LoadingState.IDLE:
+            return
+        self._files_load_requested = True
+        self.run_worker(self.store.load_files(), name="load-pr-files")
 
     def _post_store_message(self, message) -> None:
         if isinstance(message, PRStore.FileSelected):
@@ -260,6 +270,7 @@ class MainScreen(Screen[None]):
         if tab_id == "pr-info":
             self._refresh_pending_pr_info()
         elif tab_id == "files":
+            self._load_files_on_demand()
             if self.pr_info.cancel_comment_refresh():
                 self._pr_info_refresh_pending = True
             self.call_after_refresh(
@@ -926,15 +937,21 @@ class MainScreen(Screen[None]):
 
         scroll_y = diff_view.scroll_y
         if diff_view._showing_full_file:
+            view_revision = diff_view.view_revision
             content = await self.store.get_file_content(current_file)
+            if diff_view.view_revision != view_revision:
+                return
             if content is not None:
-                await diff_view.show_full_file_preview(
+                accepted = await diff_view.show_full_file_preview(
                     current_file,
                     content,
                     source_diff=diff,
                     restore_filename=diff_view._saved_filename or current_file,
                     restore_diff=diff_view._saved_diff or diff,
+                    expected_view_revision=view_revision,
                 )
+                if not accepted:
+                    return
             else:
                 await diff_view.show_diff(current_file, diff)
         else:

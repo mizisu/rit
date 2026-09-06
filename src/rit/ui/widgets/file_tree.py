@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
@@ -11,6 +12,7 @@ from textual.containers import Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import reactive, var
+from textual.timer import Timer
 from textual.widgets import Input, Static, Tree
 from textual.widgets.tree import TreeNode
 
@@ -23,6 +25,9 @@ if TYPE_CHECKING:
 
 __all__ = ("FileTree",)
 
+
+_SEARCH_DEBOUNCE_FILE_THRESHOLD = 500
+_SEARCH_DEBOUNCE_SECONDS = 0.05
 
 _FILE_STATUS_COLORS: dict[str, str] = {
     "added": "green",
@@ -158,6 +163,7 @@ class FileTree(Vertical):
         self._count_widget: Static | None = None
         self._search_widget: Input | None = None
         self._tree_widget: Tree[str] | None = None
+        self._search_filter_timer: Timer | None = None
 
     def compose(self) -> ComposeResult:
         count = Static("Files (0)", classes="tree-header", id="file-count")
@@ -219,7 +225,7 @@ class FileTree(Vertical):
             self._file_index_by_filename[filename] = index
         self.total_file_count = max(total_file_count, len(self._all_files))
 
-        self._apply_search_filter()
+        self._apply_search_filter(force=True)
 
     def select_file(self, filename: str, *, emit_message: bool = True) -> None:
         self.selected_file = filename
@@ -418,11 +424,31 @@ class FileTree(Vertical):
             return
         if not self._set_search_query(event.value.strip()):
             return
+        if len(self._all_files) < _SEARCH_DEBOUNCE_FILE_THRESHOLD:
+            self._cancel_search_filter_timer()
+            self._apply_search_filter()
+            return
+        self._cancel_search_filter_timer()
+        self._search_filter_timer = self.set_timer(
+            _SEARCH_DEBOUNCE_SECONDS,
+            self._apply_debounced_search_filter,
+        )
+
+    def _cancel_search_filter_timer(self) -> None:
+        if self._search_filter_timer is None:
+            return
+        self._search_filter_timer.stop()
+        self._search_filter_timer = None
+
+    def _apply_debounced_search_filter(self) -> None:
+        self._search_filter_timer = None
         self._apply_search_filter()
 
     @on(Input.Submitted, "#file-search")
     def on_search_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
+        self._cancel_search_filter_timer()
+        self._apply_search_filter()
 
         tree = self._tree()
         node = tree.cursor_node
@@ -457,11 +483,19 @@ class FileTree(Vertical):
             return
 
         contents_by_path, files_by_path = self._build_directory_contents(files)
+        pending_counts = (
+            Counter(
+                comment.path for comment in self.store.state.pending_review_comments
+            )
+            if self.store is not None
+            else {}
+        )
         self._render_directory_contents(
             tree.root,
             "",
             contents_by_path,
             files_by_path,
+            pending_counts,
         )
 
     def _build_directory_contents(
@@ -512,13 +546,18 @@ class FileTree(Vertical):
         directory_path: str,
         contents_by_path: dict[str, _DirectoryContents],
         files_by_path: dict[str, PRFile],
+        pending_counts: dict[str, int],
     ) -> None:
         for kind, path in contents_by_path[directory_path].entries:
             if kind == "file":
                 file = files_by_path[path]
                 show_path = "/" not in file.filename
                 node = parent.add_leaf(
-                    self._file_label(file, show_path=show_path),
+                    self._file_label(
+                        file,
+                        show_path=show_path,
+                        pending_count=pending_counts.get(file.filename, 0),
+                    ),
                     data=file.filename,
                 )
                 self._file_nodes[file.filename] = node
@@ -534,6 +573,7 @@ class FileTree(Vertical):
                 compacted_path,
                 contents_by_path,
                 files_by_path,
+                pending_counts,
             )
 
     def _compact_directory_path(
@@ -559,12 +599,12 @@ class FileTree(Vertical):
         name = self._directory_name_by_path.get(path)
         return name if name is not None else path.rsplit("/", 1)[-1]
 
-    def _apply_search_filter(self) -> None:
+    def _apply_search_filter(self, *, force: bool = False) -> None:
         tree_was_focused, cursor_file, cursor_line = self._focused_cursor_state()
 
         if self._search_query:
             query = self._search_query_lower
-            self._filtered_files = [
+            filtered_files = [
                 file
                 for file, search_name in zip(
                     self._all_files,
@@ -574,9 +614,19 @@ class FileTree(Vertical):
                 if query in search_name
             ]
         else:
-            self._filtered_files = self._all_files
+            filtered_files = self._all_files
 
-        self.file_count = len(self._filtered_files)
+        self.file_count = len(filtered_files)
+        if not force and len(filtered_files) == len(self._filtered_files) and all(
+            current is previous
+            for current, previous in zip(
+                filtered_files,
+                self._filtered_files,
+                strict=True,
+            )
+        ):
+            return
+        self._filtered_files = filtered_files
         self._render_files(self._filtered_files)
 
         if tree_was_focused:
@@ -624,6 +674,7 @@ class FileTree(Vertical):
             tree.move_cursor(node)
 
     def _close_search(self, *, clear_query: bool) -> None:
+        self._cancel_search_filter_timer()
         search = self._search_input()
         search.display = False
         self._search_open = False
@@ -656,7 +707,13 @@ class FileTree(Vertical):
         self._search_query_lower = query.lower()
         return True
 
-    def _file_label(self, file: PRFile, show_path: bool = True) -> Text:
+    def _file_label(
+        self,
+        file: PRFile,
+        show_path: bool = True,
+        *,
+        pending_count: int | None = None,
+    ) -> Text:
         filename = file.filename
         name = filename if show_path else self._basename_for_filename(filename)
         color = _FILE_STATUS_COLORS.get(file.status, "white")
@@ -678,7 +735,8 @@ class FileTree(Vertical):
         if file.comments:
             text.append(f" [{len(file.comments)}]", style="cyan")
 
-        pending_count = self._pending_comment_count(filename)
+        if pending_count is None:
+            pending_count = self._pending_comment_count(filename)
         if pending_count:
             text.append(f" [draft {pending_count}]", style="yellow")
 

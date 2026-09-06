@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import subprocess
+import asyncio
 from functools import cached_property
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -13,18 +13,16 @@ from textual.reactive import var
 from textual.signal import Signal
 from textual.widgets import Input, TextArea
 
+from rit.services.gh_cli import GhCliError, run_gh
 from rit.state.settings import Settings
-from rit.ui.terminal_graphics import configure_terminal_graphics
 from rit.ui.messages import Flash, SettingChanged
+from rit.ui.terminal_graphics import configure_terminal_graphics
 
 if TYPE_CHECKING:
     from rit.ui.screens.main import MainScreen
 
 
 __all__ = ("RitApp",)
-
-
-configure_terminal_graphics()
 
 
 class RitApp(App):
@@ -88,6 +86,10 @@ class RitApp(App):
     def on_mount(self) -> None:
         from rit.ui.screens.main import MainScreen
 
+        self.run_worker(
+            asyncio.to_thread(configure_terminal_graphics),
+            name="terminal-graphics-setup",
+        )
         self.theme = self.settings.theme
 
         main_screen = MainScreen(
@@ -112,29 +114,13 @@ class RitApp(App):
         if screen := self._get_main_screen():
             screen.prev_tab()
 
-    def action_open_pr(self) -> None:
+    async def action_open_pr(self) -> None:
+        command = ["pr", "view", str(self.pr_number), "--web"]
+        if self.owner and self.repo:
+            command.extend(("-R", f"{self.owner}/{self.repo}"))
         try:
-            if self.owner and self.repo:
-                subprocess.run(
-                    [
-                        "gh",
-                        "pr",
-                        "view",
-                        str(self.pr_number),
-                        "--web",
-                        "-R",
-                        f"{self.owner}/{self.repo}",
-                    ],
-                    check=True,
-                    capture_output=True,
-                )
-            else:
-                subprocess.run(
-                    ["gh", "pr", "view", str(self.pr_number), "--web"],
-                    check=True,
-                    capture_output=True,
-                )
-        except subprocess.CalledProcessError:
+            await run_gh(command)
+        except GhCliError:
             self.notify("Failed to open PR in browser", severity="error")
 
     def action_settings(self) -> None:

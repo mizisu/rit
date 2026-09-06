@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from textual.content import Content
 
+from rit.core.types import DiffLine
 from rit.ui.widgets.diff_search_matching import (
     append_search_matches_for_text_casefolded,
     search_match_style,
@@ -20,8 +22,11 @@ from rit.ui.widgets.diff_search_types import SearchSide
 from rit.ui.widgets.diff_types import DiffSearchMatch, RenderedRow
 
 __all__ = (
+    "SearchMatchesByLineSide",
     "apply_search_highlights",
+    "build_match_buckets",
     "build_matches",
+    "build_matches_from_rows",
     "next_match_index_from_cursor",
     "refresh_matches",
     "search_sides_for_row",
@@ -35,9 +40,7 @@ if TYPE_CHECKING:
 type SearchMatchIndexSource = tuple[int, int]
 type SearchMatchBucket = tuple[tuple[int, DiffSearchMatch], ...]
 type SearchMatchesByLineSide = dict[tuple[int, SearchSide], SearchMatchBucket]
-type _SearchMatchBucketBuilder = (
-    SearchMatchBucket | list[tuple[int, DiffSearchMatch]]
-)
+type _SearchMatchBucketBuilder = SearchMatchBucket | list[tuple[int, DiffSearchMatch]]
 
 
 def search_sides_for_row(
@@ -57,15 +60,40 @@ def search_sides_for_row(
 
 def build_matches(view: DiffView, query: str) -> list[DiffSearchMatch]:
     """Build search matches for the rows currently visible in the diff mode."""
+    return build_matches_from_rows(
+        view._all_lines,
+        view._rows_for_current_mode(),
+        query,
+    )
+
+
+def build_matches_from_rows(
+    lines: Sequence[DiffLine],
+    rows: Sequence[RenderedRow],
+    query: str,
+) -> list[DiffSearchMatch]:
+    """Build search matches from a stable row snapshot."""
     if not query:
         return []
 
     query = query.casefold()
     matches: list[DiffSearchMatch] = []
-    for row in view._rows_for_current_mode():
-        line = view._all_lines[row.line_index]
-        for side in search_sides_for_row(view, row):
-            text = view._get_line_text(line, side)
+    for row in rows:
+        line = lines[row.line_index]
+        sides = search_sides_for_line(
+            row_mode=row.mode,
+            row_side=row.side,
+            line_is_modified=line.is_modified,
+            line_is_deleted=line.is_deleted,
+            line_is_added=line.is_added,
+        )
+        for side in sides:
+            if side == "old":
+                text = line.old_content
+            elif side == "new" or line.has_new_side:
+                text = line.new_content
+            else:
+                text = line.old_content if line.has_old_side else ""
             append_search_matches_for_text_casefolded(
                 matches,
                 text=text,
@@ -129,6 +157,11 @@ def _search_match_index_source(
     return (id(matches), len(matches))
 
 
+def build_match_buckets(matches: list[DiffSearchMatch]) -> SearchMatchesByLineSide:
+    """Index matches by line and side for rendered-line highlighting."""
+    return _build_search_matches_by_line_side(matches)
+
+
 def _build_search_matches_by_line_side(
     matches: list[DiffSearchMatch],
 ) -> SearchMatchesByLineSide:
@@ -159,6 +192,7 @@ def _build_search_matches_by_line_side(
 
 def refresh_matches(view: DiffView) -> None:
     """Rebuild search matches and align the active match with the cursor."""
+    view._search_request_token += 1
     matches = build_matches(view, view._search_query) if view._search_query else []
     refresh = search_match_refresh(
         query=view._search_query,
@@ -169,6 +203,8 @@ def refresh_matches(view: DiffView) -> None:
     )
     view._search_matches = refresh.matches
     view._search_match_index = refresh.match_index
+    view._search_matches_by_line_side = {}
+    view._search_matches_by_line_side_source = None
 
 
 def sync_match_index_to_cursor(view: DiffView) -> None:

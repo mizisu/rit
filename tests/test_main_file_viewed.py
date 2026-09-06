@@ -74,7 +74,7 @@ async def test_toggle_targets_new_file_when_focus_moves_during_viewed_refresh(
     async def skip_initial_load(_store: PRStore) -> None:
         return None
 
-    monkeypatch.setattr(PRStore, "load_all", skip_initial_load)
+    monkeypatch.setattr(PRStore, "load_overview", skip_initial_load)
 
     patch = "@@ -1 +1 @@\n-old\n+new"
     files = [

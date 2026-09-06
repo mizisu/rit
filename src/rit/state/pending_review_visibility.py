@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from typing import Literal
 
 from rit.state.models import (
@@ -89,14 +89,23 @@ def visible_timeline_comments(
     reviews: Sequence[PRReview],
 ) -> list[PRComment]:
     """Return timeline comments with pending review drafts canonicalized."""
-    hidden_ids = tuple(hidden_review_ids)
+    hidden_ids = frozenset(hidden_review_ids)
+    draft_comment_ids = {
+        draft.review_comment_id for draft in drafts if draft.review_comment_id
+    }
+    submitted_review_ids = {
+        review.id
+        for review in reviews
+        if review.id > 0 and not _is_pending_review(review)
+    }
     visible: list[PRComment] = []
     for comment in comments:
         if _comment_is_hidden_pending_draft(
             comment,
             drafts=drafts,
+            draft_comment_ids=draft_comment_ids,
             hidden_review_ids=hidden_ids,
-            reviews=reviews,
+            submitted_review_ids=submitted_review_ids,
         ):
             continue
         visible.append(comment)
@@ -104,13 +113,17 @@ def visible_timeline_comments(
     if pending_review_id is None or pending_review_id <= 0 or not drafts:
         return visible
 
+    comments_by_id = {comment.id: comment for comment in comments}
+    hidden_comments = [
+        comment for comment in comments if comment.pull_request_review_id in hidden_ids
+    ]
     for index, draft in enumerate(drafts):
         if not draft.body:
             continue
         template = _timeline_template_for_draft(
             draft,
-            comments,
-            hidden_review_ids=hidden_ids,
+            comments_by_id,
+            hidden_comments,
         )
         visible.append(
             _timeline_comment_from_draft(
@@ -191,18 +204,15 @@ def _comment_is_hidden_pending_draft(
     comment: PRComment,
     *,
     drafts: Sequence[PendingReviewComment],
-    hidden_review_ids: Sequence[int],
-    reviews: Sequence[PRReview],
+    draft_comment_ids: Collection[int],
+    hidden_review_ids: Collection[int],
+    submitted_review_ids: Collection[int],
 ) -> bool:
     review_id = comment.pull_request_review_id
-    if review_id in hidden_review_ids:
+    if review_id in hidden_review_ids or comment.id in draft_comment_ids:
         return True
 
-    for draft in drafts:
-        if draft.review_comment_id and comment.id == draft.review_comment_id:
-            return True
-
-    if _is_known_submitted_review_id(reviews, review_id):
+    if review_id in submitted_review_ids:
         return False
     if review_id:
         return False
@@ -212,18 +222,15 @@ def _comment_is_hidden_pending_draft(
 
 def _timeline_template_for_draft(
     draft: PendingReviewComment,
-    comments: Sequence[PRComment],
-    *,
-    hidden_review_ids: Sequence[int],
+    comments_by_id: dict[int, PRComment],
+    hidden_comments: Sequence[PRComment],
 ) -> PRComment | None:
     if draft.review_comment_id:
-        for comment in comments:
-            if comment.id == draft.review_comment_id:
-                return comment
+        comment = comments_by_id.get(draft.review_comment_id)
+        if comment is not None:
+            return comment
 
-    for comment in comments:
-        if comment.pull_request_review_id not in hidden_review_ids:
-            continue
+    for comment in hidden_comments:
         if pending_draft_matches_review_comment(draft, comment):
             return comment
     return None

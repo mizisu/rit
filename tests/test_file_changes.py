@@ -1680,6 +1680,10 @@ async def test_bracket_file_navigation_preserves_centered_target_scroll() -> Non
         await wait_until(lambda: file_changes.diff_view.current_file == "All files")
 
         diff_view = file_changes.diff_view
+        await wait_until(
+            lambda: not diff_view._suspend_scroll_virtual_window_watch,
+            timeout=1.0,
+        )
         target_line = file_changes._combined_file_line_starts["two.py"]
         target_row = diff_view._row_for_line_and_pane(target_line, "new")
         assert target_row is not None

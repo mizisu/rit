@@ -1,5 +1,7 @@
+import asyncio
 import json
 
+from rit.services.github import GitHubService
 from rit.services.github_repo import (
     GitHubRepo,
     fetch_repo_view,
@@ -35,3 +37,21 @@ async def test_fetch_repo_view_runs_request_and_parses_repo() -> None:
 
     assert repo == GitHubRepo(owner="owner", name="repo")
     assert calls == [(["repo", "view", "--json", "owner,name"], None)]
+
+
+async def test_github_service_coalesces_concurrent_repo_detection(monkeypatch) -> None:
+    calls = 0
+    service = GitHubService()
+
+    async def runner(_args: list[str], *, input_text: str | None = None) -> str:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0)
+        return json.dumps({"owner": {"login": "owner"}, "name": "repo"})
+
+    monkeypatch.setattr(service, "_run_gh", runner)
+
+    repos = await asyncio.gather(*(service.get_repo() for _ in range(4)))
+
+    assert calls == 1
+    assert repos == [GitHubRepo(owner="owner", name="repo")] * 4

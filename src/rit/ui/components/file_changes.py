@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Literal
 
 from textual import getters, on
@@ -323,8 +324,11 @@ class FileChanges(Horizontal):
             if self._render_session.has_queued_combined_render():
                 continue
 
-            document = self._build_combined_document(signature)
-            if document is None:
+            document = await asyncio.to_thread(
+                self._build_combined_document,
+                signature,
+            )
+            if document is None or self._render_session.has_queued_combined_render():
                 continue
 
             self._render_session.record_combined_document(signature, document)
@@ -656,7 +660,7 @@ class FileChanges(Horizontal):
     ) -> None:
         event.stop()
         self.run_worker(
-            self._show_full_file_preview(event.filename),
+            self._show_full_file_preview(event.filename, event.view_revision),
             exclusive=True,
             name="file-full-preview",
         )
@@ -673,8 +677,16 @@ class FileChanges(Horizontal):
         self._render_session.set_showing_combined_files(True)
         self._sync_combined_selection_for_cursor()
 
-    async def _show_full_file_preview(self, filename: str) -> None:
+    async def _show_full_file_preview(
+        self,
+        filename: str,
+        view_revision: tuple[int, int],
+    ) -> None:
+        if self.diff_view.view_revision != view_revision:
+            return
         diff = await self.store.get_file_diff_async(filename)
+        if self.diff_view.view_revision != view_revision:
+            return
         if diff is None:
             self.post_message(
                 Flash("Failed to load file diff", style="error", duration=2.0)
@@ -682,6 +694,8 @@ class FileChanges(Horizontal):
             return
 
         content = await self.store.get_file_content(filename)
+        if self.diff_view.view_revision != view_revision:
+            return
         if content is None:
             self.post_message(
                 Flash("Failed to load file content", style="error", duration=2.0)
@@ -695,16 +709,19 @@ class FileChanges(Horizontal):
             current_diff=self.diff_view.current_diff,
         )
 
-        self._render_session.set_showing_combined_files(False)
-        self.store.state.selected_file = filename
-        self.file_tree.select_file(filename, emit_message=False)
-        await self.diff_view.show_full_file_preview(
+        accepted = await self.diff_view.show_full_file_preview(
             filename,
             content,
             source_diff=diff,
             restore_filename=restore_target.filename,
             restore_diff=restore_target.diff,
+            expected_view_revision=view_revision,
         )
+        if not accepted:
+            return
+        self._render_session.set_showing_combined_files(False)
+        self.store.state.selected_file = filename
+        self.file_tree.select_file(filename, emit_message=False)
 
     @on(DiffView.HunkNavigated)
     def on_diff_hunk_navigated(self, event: DiffView.HunkNavigated) -> None:

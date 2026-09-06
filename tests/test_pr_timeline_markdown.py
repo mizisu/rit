@@ -360,6 +360,57 @@ async def test_timeline_staggers_body_mount_delay_after_initial_items() -> None:
         assert delays[-1] > delays[INITIAL_TIMELINE_BODY_COUNT]
 
 
+@pytest.mark.asyncio
+async def test_timeline_staggers_body_mounts_within_review_thread() -> None:
+    store = PRStore()
+    store.state.reviews = [PRReview(id=10, state=ReviewState.COMMENTED)]
+    root = PRComment(
+        id=100,
+        body="Root",
+        path="app.py",
+        line=1,
+        pull_request_review_id=10,
+    )
+    store.state.comments = [
+        root,
+        *[
+            PRComment(
+                id=comment_id,
+                body=f"Reply {comment_id}",
+                path="app.py",
+                line=1,
+                in_reply_to_id=root.id,
+                pull_request_review_id=10,
+            )
+            for comment_id in range(101, 105)
+        ],
+    ]
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield PRTimeline(store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        timeline = app.query_one(PRTimeline)
+        await timeline._build_timeline_async()
+        await pilot.pause()
+
+        thread = app.query_one(ReviewThreadItem)
+        delays = [
+            card._body_mount_delay
+            for index in range(thread.comment_count)
+            if (card := thread.comment_card_at(index)) is not None
+        ]
+
+        assert (
+            delays[:INITIAL_TIMELINE_BODY_COUNT]
+            == [TIMELINE_BODY_MOUNT_DELAY] * INITIAL_TIMELINE_BODY_COUNT
+        )
+        assert delays[INITIAL_TIMELINE_BODY_COUNT] > TIMELINE_BODY_MOUNT_DELAY
+        assert delays[-1] > delays[INITIAL_TIMELINE_BODY_COUNT]
+
+
 def test_timeline_comment_markdown_waits_for_description_first_paint() -> None:
     assert TIMELINE_BODY_MOUNT_DELAY >= BODY_PREVIEW_RETIRE_DELAY
 

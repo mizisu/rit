@@ -2,7 +2,7 @@
 
 from rit.core.diff import parse_patch
 from rit.core.types import DiffHunk, DiffLine, FileDiff
-from rit.ui.widgets import diff_geometry
+from rit.ui.widgets import diff_geometry, diff_virtual
 from rit.ui.widgets.diff_geometry import (
     FILE_DIFF_HEADER_HEIGHT,
     ViewportGeometry,
@@ -87,6 +87,31 @@ def test_build_diff_geometry_accounts_for_large_file_headers() -> None:
     assert geometry.hunk_header_top_offsets == [0]
     assert geometry.line_top_offsets == [1, 2]
     assert geometry.virtual_content_height == 3
+
+
+def test_file_comment_geometry_uses_file_header_path_without_rescanning() -> None:
+    class View:
+        def __init__(self) -> None:
+            self._diff = FileDiff(
+                filename="all",
+                hunks=[
+                    DiffHunk(
+                        1,
+                        1,
+                        1,
+                        1,
+                        starts_file=True,
+                        file_path="src/app.py",
+                    )
+                ],
+            )
+            self._pending_file_comment_drafts_by_path: dict[str, list[object]] = {}
+            self._file_comment_threads_by_path: dict[str, list[object]] = {}
+
+        def _file_path_for_hunk(self, _hunk_index: int) -> str:
+            raise AssertionError("file header paths should not be rescanned")
+
+    assert diff_virtual._extra_heights_by_hunk(View()) == {}
 
 
 def test_build_diff_geometry_accounts_for_file_comment_annotations() -> None:

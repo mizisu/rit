@@ -3587,3 +3587,62 @@ def test_scroll_to_hunk_uses_direct_hunk_range_lookup(
     _cursor_mod._scroll_to_hunk(HunkJumpView(), 1)
 
     assert scrolled == [(20, 21)]
+
+
+@pytest.mark.asyncio
+async def test_show_diff_serializes_cancelled_background_planners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled planner must finish before another mutates shared lines."""
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    started = threading.Event()
+    release = threading.Event()
+    planner_lock = threading.Lock()
+    planner_calls = 0
+    active_planners = 0
+    max_active_planners = 0
+    original_build_diff_plan = _plan_mod.build_diff_plan
+
+    def blocking_build_diff_plan(*args, **kwargs):
+        nonlocal planner_calls, active_planners, max_active_planners
+        with planner_lock:
+            planner_calls += 1
+            call_number = planner_calls
+            active_planners += 1
+            max_active_planners = max(max_active_planners, active_planners)
+        try:
+            if call_number == 1:
+                started.set()
+                release.wait(timeout=2.0)
+            return original_build_diff_plan(*args, **kwargs)
+        finally:
+            with planner_lock:
+                active_planners -= 1
+
+    monkeypatch.setattr(_plan_mod, "build_diff_plan", blocking_build_diff_plan)
+    diff = parse_patch("@@ -1 +1 @@\n-old\n+new", "shared.py")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        first_render = asyncio.create_task(diff_view.show_diff("shared.py", diff))
+        assert await asyncio.to_thread(started.wait, 1.0)
+
+        first_render.cancel()
+        second_render = asyncio.create_task(diff_view.show_diff("shared.py", diff))
+        await pilot.pause()
+        await pilot.pause()
+
+        assert planner_calls == 1
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await first_render
+        await second_render
+
+        assert planner_calls == 2
+        assert max_active_planners == 1
+        assert diff_view.current_diff is diff

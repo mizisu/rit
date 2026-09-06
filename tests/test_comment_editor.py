@@ -114,10 +114,11 @@ async def test_inline_comment_editor_posts_with_post_now_button() -> None:
 async def test_main_screen_omits_shortcut_footer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_load_all(_store: PRStore) -> None:
+    async def skip_load(_store: PRStore) -> None:
         return None
 
-    monkeypatch.setattr(PRStore, "load_all", fake_load_all)
+    monkeypatch.setattr(PRStore, "load_overview", skip_load)
+    monkeypatch.setattr(PRStore, "load_files", skip_load)
     app = RitApp(owner="test", repo="repo", pr_number=123)
 
     async with app.run_test():
@@ -128,10 +129,11 @@ async def test_main_screen_omits_shortcut_footer(
 async def test_comment_editor_owns_tab_while_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def fake_load_all(_store: PRStore) -> None:
+    async def skip_load(_store: PRStore) -> None:
         return None
 
-    monkeypatch.setattr(PRStore, "load_all", fake_load_all)
+    monkeypatch.setattr(PRStore, "load_overview", skip_load)
+    monkeypatch.setattr(PRStore, "load_files", skip_load)
     app = RitApp(owner="test", repo="repo", pr_number=123)
     source_diff = parse_patch("@@ -1 +1 @@\n-old\n+new", "preview.py")
 

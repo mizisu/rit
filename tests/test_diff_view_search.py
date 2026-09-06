@@ -1,12 +1,14 @@
 """Tests for DiffView in-diff search navigation."""
 
+import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Input
-import pytest
 
 from rit.core.diff import parse_patch
+from rit.ui.widgets import diff_search_commands
 from rit.ui.widgets import diff_view as diff_view_module
 from rit.ui.widgets.diff_view import DiffView
+from tests.conftest import wait_until
 
 
 @pytest.mark.asyncio
@@ -147,9 +149,7 @@ async def test_search_n_navigation_brings_bottom_match_into_view() -> None:
         line_bottom = diff_view._line_bottom_offsets[line_index]
         scroll_y = int(diff_view.scroll_y)
         viewport_height = diff_view.scrollable_content_region.height
-        assert (
-            scroll_y <= line_top and line_bottom <= scroll_y + viewport_height
-        ), (
+        assert scroll_y <= line_top and line_bottom <= scroll_y + viewport_height, (
             f"line_top={line_top} line_bottom={line_bottom} "
             f"scroll_y={scroll_y} viewport_h={viewport_height} "
             f"match line={line_index}"
@@ -228,6 +228,44 @@ beta"""
         await pilot.pause()
 
         assert calls == [(diff_view, "  alpha  ")]
+
+
+@pytest.mark.asyncio
+async def test_large_search_builds_match_index_in_worker_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch = "@@ -1,2 +1,2 @@\n alpha\n beta"
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        diff_view = app.query_one(DiffView)
+        await diff_view.show_diff("test.py", parse_patch(patch, "test.py"))
+        await pilot.pause()
+
+        calls: list[str] = []
+        original_to_thread = diff_search_commands.asyncio.to_thread
+
+        async def tracked_to_thread(function, /, *args, **kwargs):
+            calls.append(function.__name__)
+            return await original_to_thread(function, *args, **kwargs)
+
+        monkeypatch.setattr(diff_search_commands, "_ASYNC_SEARCH_ROW_THRESHOLD", 1)
+        monkeypatch.setattr(diff_search_commands, "_SEARCH_DEBOUNCE_SECONDS", 0)
+        monkeypatch.setattr(
+            diff_search_commands.asyncio,
+            "to_thread",
+            tracked_to_thread,
+        )
+
+        search_input = diff_view.query_one("#diff-search-input", Input)
+        search_input.value = "alpha"
+        await wait_until(lambda: diff_view._search_query == "alpha")
+
+        assert calls == ["_build_search_index"]
 
 
 @pytest.mark.asyncio

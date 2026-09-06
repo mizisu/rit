@@ -21,7 +21,6 @@ from rit.state.discussion_projection import (
     replace_review_comment,
     update_thread_resolution,
 )
-from rit.state.discussion_signature import discussion_render_signature
 from rit.state.file_collection import (
     apply_file_view_state,
     apply_file_view_states,
@@ -227,11 +226,18 @@ class PRStore:
         if self._message_sink is not None:
             self._message_sink(message)
 
-    async def load_all(self) -> None:
-        """Load PR metadata and files concurrently for early diff rendering."""
+    async def load_overview(self) -> None:
+        """Load PR summary and discussion without fetching file patches."""
         await asyncio.gather(
             self.load_pr_summary(),
             self.load_pr_discussion(),
+            return_exceptions=True,
+        )
+
+    async def load_all(self) -> None:
+        """Load PR metadata and files concurrently."""
+        await asyncio.gather(
+            self.load_overview(),
             self.load_files(),
             return_exceptions=True,
         )
@@ -254,54 +260,21 @@ class PRStore:
 
     async def load_pr_discussion(self) -> None:
         pending_review_version = self._pending_review_local_version
-        full_discussion_task = asyncio.create_task(
-            self._service.get_pr_discussion(self.pr_number)
-        )
         try:
-            fast_loaded = await self._load_fast_pr_discussion()
-            previous_signature = (
-                discussion_render_signature(self._state.pr)
-                if fast_loaded and self._state.pr is not None
-                else None
-            )
-            discussion = await full_discussion_task
+            discussion = await self._service.get_pr_discussion(self.pr_number)
             pr = self._merge_pr_discussion(discussion)
             self._apply_discussion_state(pr)
+            self._post_discussion_messages(pr)
             await self._load_pending_review(
                 pr,
                 loaded_at_version=pending_review_version,
             )
-            if (
-                previous_signature is not None
-                and previous_signature == discussion_render_signature(pr)
-            ):
-                self._post_discussion_metadata_messages(pr)
-            else:
-                self._post_discussion_messages(pr)
+            self._post_discussion_metadata_messages(pr)
         except RuntimeError as e:
-            if not full_discussion_task.done():
-                full_discussion_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await full_discussion_task
             self._state.error = str(e)
             self._post_message(
                 self.ErrorOccurred(error=str(e), source="load_pr_discussion")
             )
-
-    async def _load_fast_pr_discussion(self) -> bool:
-        get_fast_discussion = getattr(self._service, "get_pr_discussion_fast", None)
-        if get_fast_discussion is None:
-            return False
-
-        try:
-            discussion = await get_fast_discussion(self.pr_number)
-        except RuntimeError:
-            return False
-
-        pr = self._merge_pr_discussion(discussion)
-        self._apply_discussion_state(pr)
-        self._post_discussion_messages(pr)
-        return True
 
     def _post_discussion_messages(self, pr: PR) -> None:
         self._post_message(self.PRDiscussionLoaded(pr=pr))

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 
 from rich.text import Text
@@ -55,6 +55,7 @@ class ReviewThreadCard(Vertical):
         preview_max_chars: int = 120,
         markdown_base_url: str | None = None,
         body_mount_delay: float = 0.0,
+        body_mount_delays: Sequence[float] | None = None,
         id: str | None = None,
         classes: str | None = None,
     ) -> None:
@@ -68,8 +69,13 @@ class ReviewThreadCard(Vertical):
         self._preview_max_chars = preview_max_chars
         self._markdown_base_url = markdown_base_url
         self._body_mount_delay = body_mount_delay
+        self._body_mount_delays = body_mount_delays
         self._comment_cards = [
-            self._build_comment_box(comment, is_reply=index > 0)
+            self._build_comment_box(
+                comment,
+                index=index,
+                is_reply=index > 0,
+            )
             for index, comment in enumerate(self._comments)
         ]
 
@@ -98,8 +104,17 @@ class ReviewThreadCard(Vertical):
             return None
         return self._comment_cards[index]
 
-    def _build_comment_box(self, comment: PRComment, *, is_reply: bool) -> CommentCard:
+    def _build_comment_box(
+        self,
+        comment: PRComment,
+        *,
+        index: int,
+        is_reply: bool,
+    ) -> CommentCard:
         box_class = self._reply_class if is_reply else self._root_class
+        body_mount_delay = self._body_mount_delay
+        if self._body_mount_delays is not None and index < len(self._body_mount_delays):
+            body_mount_delay = self._body_mount_delays[index]
 
         return CommentCard(
             self._format_comment_meta(comment, is_reply=is_reply),
@@ -108,7 +123,7 @@ class ReviewThreadCard(Vertical):
             preview_max_lines=self._preview_max_lines,
             preview_max_chars=self._preview_max_chars,
             markdown_base_url=self._markdown_base_url,
-            body_mount_delay=self._body_mount_delay,
+            body_mount_delay=body_mount_delay,
             classes=box_class,
         )
 
@@ -310,6 +325,7 @@ class ReviewThreadItem(Collapsible):
         collapsed: bool = False,
         markdown_base_url: str | None = None,
         body_mount_delay: float = 0.0,
+        body_mount_delays: Sequence[float] | None = None,
         classes: str | None = None,
         id: str | None = None,
     ) -> None:
@@ -336,6 +352,7 @@ class ReviewThreadItem(Collapsible):
             show_diff_hunk=show_diff_hunk,
             markdown_base_url=markdown_base_url,
             body_mount_delay=body_mount_delay,
+            body_mount_delays=body_mount_delays,
         )
         children.append(self._review_thread_card)
 

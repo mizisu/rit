@@ -20,8 +20,10 @@ class FastThenSlowDiscussionService:
     def __init__(self) -> None:
         self.full_requested = asyncio.Event()
         self.allow_full = asyncio.Event()
+        self.fast_requested = False
 
     async def get_pr_discussion_fast(self, pr_number: int) -> PRDiscussion:
+        self.fast_requested = True
         return PRDiscussion(
             body="",
             reviews=[
@@ -53,18 +55,6 @@ class FastThenSlowDiscussionService:
             issue_comments=[],
             review_threads=[],
         )
-
-
-class ConcurrentDiscussionService(FastThenSlowDiscussionService):
-    def __init__(self) -> None:
-        super().__init__()
-        self.fast_started = asyncio.Event()
-        self.allow_fast = asyncio.Event()
-
-    async def get_pr_discussion_fast(self, pr_number: int) -> PRDiscussion:
-        self.fast_started.set()
-        await self.allow_fast.wait()
-        return await super().get_pr_discussion_fast(pr_number)
 
 
 class MetadataOnlyFullDiscussionService:
@@ -134,42 +124,27 @@ class MetadataOnlyFullDiscussionService:
 
 
 @pytest.mark.asyncio
-async def test_load_pr_discussion_posts_fast_discussion_before_full_metadata() -> None:
+async def test_load_pr_discussion_uses_one_full_request() -> None:
     store = PRStore(pr_number=123)
     service = FastThenSlowDiscussionService()
     store._service = service  # type: ignore[assignment]
-    discussion_loaded = asyncio.Event()
-
-    def sink(message) -> None:
-        if isinstance(message, PRStore.PRDiscussionLoaded):
-            discussion_loaded.set()
-
-    store.set_message_sink(sink)
+    messages = []
+    store.set_message_sink(messages.append)
 
     task = asyncio.create_task(store.load_pr_discussion())
-    try:
-        await asyncio.wait_for(service.full_requested.wait(), timeout=1)
-        await asyncio.wait_for(discussion_loaded.wait(), timeout=0.1)
-    finally:
-        service.allow_full.set()
-        await task
+    await asyncio.wait_for(service.full_requested.wait(), timeout=1)
+    assert service.fast_requested is False
+    assert not any(
+        isinstance(message, PRStore.PRDiscussionLoaded) for message in messages
+    )
 
+    service.allow_full.set()
+    await task
 
-@pytest.mark.asyncio
-async def test_load_pr_discussion_starts_full_metadata_while_fast_loading() -> None:
-    store = PRStore(pr_number=123)
-    service = ConcurrentDiscussionService()
-    store._service = service  # type: ignore[assignment]
-    store.set_message_sink(lambda _message: None)
-
-    task = asyncio.create_task(store.load_pr_discussion())
-    try:
-        await asyncio.wait_for(service.fast_started.wait(), timeout=1)
-        await asyncio.wait_for(service.full_requested.wait(), timeout=0.1)
-    finally:
-        service.allow_fast.set()
-        service.allow_full.set()
-        await task
+    assert (
+        sum(isinstance(message, PRStore.PRDiscussionLoaded) for message in messages)
+        == 1
+    )
 
 
 @pytest.mark.asyncio

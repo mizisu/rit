@@ -1,6 +1,8 @@
 """Tests for FileTree slash-search behavior."""
 
+import asyncio
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from textual.app import App, ComposeResult
@@ -91,7 +93,9 @@ def test_review_tree_binding_cleanup_removes_space_and_enter_keys() -> None:
 
 def test_review_tree_binding_cleanup_ignores_unknown_private_shape() -> None:
     file_tree_module._remove_review_tree_default_bindings(object())
-    file_tree_module._remove_review_tree_default_bindings(type("Bindings", (), {"keys": []})())
+    file_tree_module._remove_review_tree_default_bindings(
+        type("Bindings", (), {"keys": []})()
+    )
 
 
 def test_tree_actions_reuse_cached_tree_without_query(
@@ -146,6 +150,35 @@ def test_empty_file_search_reuses_all_files_without_copy(
 
     assert file_tree._filtered_files is sample_files
     assert rendered == [sample_files]
+    assert file_tree.file_count == len(sample_files)
+
+
+def test_file_search_skips_tree_rebuild_when_results_are_unchanged(
+    sample_files: list[PRFile],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    file_tree = FileTree()
+    file_tree._all_files = sample_files
+    file_tree._filtered_files = sample_files
+    file_tree._file_search_names = [file.filename.lower() for file in sample_files]
+    file_tree._search_query = "/"
+    file_tree._search_query_lower = "/"
+
+    monkeypatch.setattr(
+        file_tree,
+        "_focused_cursor_state",
+        lambda: (False, None, None),
+    )
+    monkeypatch.setattr(
+        file_tree,
+        "_render_files",
+        lambda _files: (_ for _ in ()).throw(
+            AssertionError("unchanged search results should keep the existing tree")
+        ),
+    )
+
+    file_tree._apply_search_filter()
+
     assert file_tree.file_count == len(sample_files)
 
 
@@ -236,6 +269,40 @@ def test_search_input_change_skips_filter_when_normalized_query_is_unchanged(
     assert file_tree._search_query == "app"
 
 
+@pytest.mark.asyncio
+async def test_large_file_search_debounces_filter_rebuilds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FileTree()
+
+    app = TestApp()
+    async with app.run_test():
+        file_tree = app.query_one(FileTree)
+        file_tree._all_files = [
+            PRFile(filename=f"src/file_{index}.py") for index in range(500)
+        ]
+        file_tree._search_open = True
+        calls: list[str] = []
+        monkeypatch.setattr(
+            file_tree,
+            "_apply_search_filter",
+            lambda: calls.append(file_tree._search_query),
+        )
+
+        file_tree.on_search_input_changed(
+            cast(Input.Changed, SimpleNamespace(value="src"))
+        )
+        file_tree.on_search_input_changed(
+            cast(Input.Changed, SimpleNamespace(value="file_4"))
+        )
+
+        assert calls == []
+        await asyncio.sleep(0.08)
+        assert calls == ["file_4"]
+
+
 def test_directory_contents_reuses_cached_path_parts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -244,7 +311,9 @@ def test_directory_contents_reuses_cached_path_parts(
 
         def split(self, sep: str | None = None, maxsplit: int = -1) -> list[str]:
             if self.fail_split:
-                raise AssertionError("file tree rendering should reuse cached path parts")
+                raise AssertionError(
+                    "file tree rendering should reuse cached path parts"
+                )
             return super().split(sep, maxsplit)
 
     class FakeFile:
@@ -468,7 +537,11 @@ def test_refresh_files_builds_filename_caches_in_one_pass(
 
     files = [FakeFile("src/app.py"), FakeFile("tests/test_app.py")]
     file_tree = FileTree()
-    monkeypatch.setattr(file_tree, "_apply_search_filter", lambda: None)
+    monkeypatch.setattr(
+        file_tree,
+        "_apply_search_filter",
+        lambda **_kwargs: None,
+    )
 
     file_tree.refresh_files(files)  # type: ignore[arg-type]
 
@@ -492,7 +565,11 @@ def test_refresh_files_reuses_list_input_without_copying(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     file_tree = FileTree()
-    monkeypatch.setattr(file_tree, "_apply_search_filter", lambda: None)
+    monkeypatch.setattr(
+        file_tree,
+        "_apply_search_filter",
+        lambda **_kwargs: None,
+    )
     monkeypatch.setattr(
         file_tree_module,
         "list",

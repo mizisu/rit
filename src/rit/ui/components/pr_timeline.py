@@ -1,7 +1,7 @@
 """PR Timeline: description, comments, reviews, and thread navigation."""
 
 import asyncio
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
@@ -47,7 +47,6 @@ if TYPE_CHECKING:
 __all__ = (
     "INITIAL_TIMELINE_BODY_COUNT",
     "TIMELINE_BODY_MOUNT_DELAY",
-    "TIMELINE_BODY_MOUNT_MAX_DELAY",
     "PRTimeline",
 )
 
@@ -55,8 +54,7 @@ __all__ = (
 MOUNT_BATCH_SIZE = 8
 QUEUED_REFRESH_DELAY = 0.05
 TIMELINE_BODY_MOUNT_DELAY = 0.85
-TIMELINE_BODY_MOUNT_STAGGER_DELAY = 0.08
-TIMELINE_BODY_MOUNT_MAX_DELAY = 1.65
+TIMELINE_BODY_MOUNT_STAGGER_DELAY = 0.01
 INITIAL_TIMELINE_BODY_COUNT = 3
 _REVIEW_STATE_LABELS: dict[ReviewState, str] = {
     ReviewState.APPROVED: "[#a6da95]approved[/]",
@@ -194,6 +192,7 @@ class PRTimeline(Vertical):
         self._description_card: CommentCard | None = None
         self._comments_container: Vertical | None = None
         self._issue_comment_editor: InlineCommentEditor | None = None
+        self._body_mount_index = 0
 
     def compose(self) -> ComposeResult:
         yield CommentCard(
@@ -334,7 +333,13 @@ class PRTimeline(Vertical):
 
     async def _build_timeline_async(self) -> None:
         state = self.store.state
-        render_signature = self._current_timeline_render_signature()
+        reviews = self.store.visible_timeline_reviews()
+        comments = self.store.visible_timeline_comments()
+        render_signature = _timeline_render_signature(
+            issue_comments=state.issue_comments,
+            reviews=reviews,
+            comments=comments,
+        )
 
         container = self._comments_container_widget()
 
@@ -347,34 +352,34 @@ class PRTimeline(Vertical):
 
             timeline_items = build_timeline_items(
                 issue_comments=state.issue_comments,
-                reviews=self.store.visible_timeline_reviews(),
-                comments=self.store.visible_timeline_comments(),
+                reviews=reviews,
+                comments=comments,
             )
 
             if not timeline_items:
                 self._timeline_render_signature = render_signature
                 return
 
+            self._body_mount_index = 0
             for i, item in enumerate(timeline_items):
-                body_mount_delay = self._body_mount_delay_for_index(i)
                 if item.kind == "issue_comment" and item.issue_comment is not None:
                     self._mount_issue_comment(
                         container,
                         item.issue_comment,
-                        body_mount_delay=body_mount_delay,
+                        body_mount_delay=None,
                     )
                 elif item.kind == "review" and item.review is not None:
                     self._mount_review_with_threads(
                         container,
                         item.review,
                         item.threads,
-                        body_mount_delay=body_mount_delay,
+                        body_mount_delay=None,
                     )
                 elif item.kind == "thread" and item.thread is not None:
                     self._mount_comment_thread(
                         container,
                         item.thread,
-                        body_mount_delay=body_mount_delay,
+                        body_mount_delay=None,
                     )
 
                 if i == 0 or (i + 1) % MOUNT_BATCH_SIZE == 0:
@@ -391,20 +396,24 @@ class PRTimeline(Vertical):
             + (index - INITIAL_TIMELINE_BODY_COUNT + 1)
             * TIMELINE_BODY_MOUNT_STAGGER_DELAY
         )
-        return min(
-            TIMELINE_BODY_MOUNT_MAX_DELAY,
-            staggered_delay,
-        )
+        return staggered_delay
+
+    def _next_body_mount_delay(self) -> float:
+        delay = self._body_mount_delay_for_index(self._body_mount_index)
+        self._body_mount_index += 1
+        return delay
 
     def _mount_issue_comment(
         self,
         container: Vertical,
         comment: PRIssueComment,
         *,
-        body_mount_delay: float = TIMELINE_BODY_MOUNT_DELAY,
+        body_mount_delay: float | None = TIMELINE_BODY_MOUNT_DELAY,
     ) -> None:
         if not _has_body(comment.body):
             return
+        if body_mount_delay is None:
+            body_mount_delay = self._next_body_mount_delay()
 
         time_str = self._format_time(comment.created_at)
         user_name = comment.user.login if comment.user else "unknown"
@@ -425,11 +434,13 @@ class PRTimeline(Vertical):
         container: Vertical,
         review: PRReview,
         *,
-        body_mount_delay: float = TIMELINE_BODY_MOUNT_DELAY,
+        body_mount_delay: float | None = TIMELINE_BODY_MOUNT_DELAY,
         body_is_known_present: bool = False,
     ) -> None:
         if not body_is_known_present and not _has_body(review.body):
             return
+        if body_mount_delay is None:
+            body_mount_delay = self._next_body_mount_delay()
 
         time_str = self._format_time(review_timeline_time(review, []))
         state_display = _review_state_display(review.state)
@@ -453,7 +464,7 @@ class PRTimeline(Vertical):
         review: PRReview,
         threads: list[CommentThread],
         *,
-        body_mount_delay: float = TIMELINE_BODY_MOUNT_DELAY,
+        body_mount_delay: float | None = TIMELINE_BODY_MOUNT_DELAY,
     ) -> None:
         if review.state == ReviewState.PENDING and threads:
             self._mount_pending_review_summary(
@@ -491,8 +502,10 @@ class PRTimeline(Vertical):
         review: PRReview,
         threads: list[CommentThread],
         *,
-        body_mount_delay: float = TIMELINE_BODY_MOUNT_DELAY,
+        body_mount_delay: float | None = TIMELINE_BODY_MOUNT_DELAY,
     ) -> None:
+        if body_mount_delay is None:
+            body_mount_delay = self._next_body_mount_delay()
         card = CommentCard(
             self._pending_review_summary_header(review, threads),
             review.body,
@@ -521,11 +534,22 @@ class PRTimeline(Vertical):
         container: Vertical,
         thread: CommentThread,
         *,
-        body_mount_delay: float = TIMELINE_BODY_MOUNT_DELAY,
+        body_mount_delay: float | None = TIMELINE_BODY_MOUNT_DELAY,
     ) -> None:
+        body_mount_delays: tuple[float, ...] | None = None
+        if body_mount_delay is None:
+            body_mount_delays = tuple(
+                self._next_body_mount_delay() for _comment in thread.all_comments
+            )
+            body_mount_delay = (
+                body_mount_delays[0]
+                if body_mount_delays
+                else self._next_body_mount_delay()
+            )
         item = self._build_comment_thread_item(
             thread,
             body_mount_delay=body_mount_delay,
+            body_mount_delays=body_mount_delays,
         )
         container.mount(item)
         self._register_navigable_item(item)
@@ -579,6 +603,7 @@ class PRTimeline(Vertical):
         thread: CommentThread,
         *,
         body_mount_delay: float = TIMELINE_BODY_MOUNT_DELAY,
+        body_mount_delays: Sequence[float] | None = None,
     ) -> ReviewThreadItem:
         root = thread.root_comment
 
@@ -612,6 +637,7 @@ class PRTimeline(Vertical):
             classes=collapsible_classes,
             markdown_base_url=self._markdown_base_url(),
             body_mount_delay=body_mount_delay,
+            body_mount_delays=body_mount_delays,
         )
 
         self._thread_widget_info[collapsible] = (thread_id, root.id, is_resolved)

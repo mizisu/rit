@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from collections.abc import Set as AbstractSet
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -71,6 +71,22 @@ __all__ = (
 _RENDER_REQUEST_CONTEXT: ContextVar[int | None] = ContextVar(
     "diff_view_render_request", default=None
 )
+
+
+async def _finish_to_thread_on_cancel[**P, R](
+    function: Callable[P, R],
+    /,
+    *args: P.args,
+    **kwargs: P.kwargs,
+) -> R:
+    task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        await asyncio.gather(task, return_exceptions=True)
+        raise
+
+
 _DIFF_MODE_LABELS: dict[str, str] = {
     "auto": "Auto",
     "split": "Split",
@@ -147,6 +163,7 @@ class DiffView(VerticalScroll):
     @dataclass
     class FullFilePreviewRequested(Message):
         filename: str
+        view_revision: tuple[int, int]
 
     @dataclass
     class FullFilePreviewRestored(Message):
@@ -195,8 +212,10 @@ class DiffView(VerticalScroll):
         self._row_lookup_split = {}
         self._rows_unified_ready = False
         self._rows_split_ready = False
+        self._diff_plan_lock = asyncio.Lock()
 
         self._search_query: str = ""
+        self._search_request_token: int = 0
         self._search_matches: list[DiffSearchMatch] = []
         self._search_match_index: int = -1
         self._search_matches_by_line_side: dict[
@@ -374,8 +393,10 @@ class DiffView(VerticalScroll):
         )
 
     def on_resize(self) -> None:
+        was_split = self.split
         _render._update_split_state(self)
-        _search.refresh_matches(self)
+        if was_split != self.split:
+            _search.refresh_matches(self)
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
@@ -1142,9 +1163,7 @@ class DiffView(VerticalScroll):
         target_file = self._current_fold_target()
         preserve_header_position = self.selected_file_header_path() == target_file
         viewport_offset = (
-            None
-            if preserve_header_position
-            else self._current_cursor_viewport_offset()
+            None if preserve_header_position else self._current_cursor_viewport_offset()
         )
         navigation_revision = self._file_navigation_revision
         with self.app.batch_update():
@@ -1817,25 +1836,124 @@ class DiffView(VerticalScroll):
     # show_diff — main public entry point
     # ------------------------------------------------------------------
 
+    async def _build_render_plan(
+        self,
+        diff: FileDiff,
+        *,
+        showing_full_file: bool,
+        file: PRFile | None,
+        request_token: int,
+    ) -> tuple[_plan.DiffPlan, _plan.RenderedRowsPlan, bool] | None:
+        plan = await _finish_to_thread_on_cancel(
+            _plan.build_diff_plan,
+            diff,
+            include_rendered_rows=False,
+        )
+        if not self._is_current_render_request(request_token):
+            return None
+
+        while True:
+            layout_mode = self.mode
+            layout_width = self.size.width
+            planned_split = layout_mode == "split" or (
+                layout_mode == "auto"
+                and layout_width >= self.LAYOUT.auto_split_min_width
+            )
+            if planned_split and _layout.should_force_unified_for_file(
+                showing_full_file=showing_full_file,
+                file=file,
+                diff=diff,
+            ):
+                planned_split = False
+            rendered_rows = await _finish_to_thread_on_cancel(
+                _plan.build_rendered_rows_from_lines,
+                plan.all_lines,
+                plan.hunk_index_by_line,
+                split=planned_split,
+            )
+            if not self._is_current_render_request(request_token):
+                return None
+            if layout_mode == self.mode and layout_width == self.size.width:
+                return plan, rendered_rows, planned_split
+
     async def show_diff(
         self,
         filename: str,
         diff: FileDiff,
         *,
         preserve_full_file_state: bool = False,
+        _expected_navigation_revision: int | None = None,
+        _show_full_file: bool | None = None,
     ) -> None:
         selected_header_path = self.selected_file_header_path()
         self._render_request_token += 1
         request_token = self._render_request_token
         self._suspend_split_state_rerender = True
         self._suspend_scroll_virtual_window_watch = True
+        plan_lock_acquired = False
         try:
+            await self._diff_plan_lock.acquire()
+            plan_lock_acquired = True
+            if not self._is_current_render_request(request_token):
+                return
+            if (
+                _expected_navigation_revision is not None
+                and self._file_navigation_revision != _expected_navigation_revision
+            ):
+                return
             is_new_file = filename != self.current_file
+            if _show_full_file is not None:
+                showing_full_file = _show_full_file
+            elif preserve_full_file_state:
+                showing_full_file = self._showing_full_file
+            else:
+                showing_full_file = False
+            target_file: PRFile | None = None
+            if self.store:
+                state = self.store.state
+                files_by_filename = getattr(state, "files_by_filename", None)
+                target_file = (
+                    files_by_filename.get(filename)
+                    if files_by_filename is not None
+                    else None
+                )
+                if target_file is None:
+                    target_file = next(
+                        (file for file in state.files if file.filename == filename),
+                        None,
+                    )
+
+            if showing_full_file:
+                render_diff = diff
+                folded_file_paths = frozenset()
+            else:
+                render_diff, folded_file_paths = _folding.build_viewed_file_fold_diff(
+                    diff,
+                    is_collapsed=self._should_collapse_file,
+                )
+
+            render_plan = await self._build_render_plan(
+                render_diff,
+                showing_full_file=showing_full_file,
+                file=target_file,
+                request_token=request_token,
+            )
+            if render_plan is None:
+                return
+            plan, rendered_rows, planned_split = render_plan
+            if (
+                _expected_navigation_revision is not None
+                and self._file_navigation_revision != _expected_navigation_revision
+            ):
+                return
+
             if not preserve_full_file_state:
                 self._showing_full_file = False
                 self._saved_diff = None
                 self._saved_filename = None
                 self._saved_restore_position = None
+            elif _show_full_file is not None:
+                self._showing_full_file = _show_full_file
             if is_new_file:
                 self._inline_comment_editor_line_index = None
                 self._inline_comment_editor_target = None
@@ -1923,26 +2041,11 @@ class DiffView(VerticalScroll):
             self.cursor_column = 0
             self._comment_cursor_index = 0
 
-            if self.store:
-                state = self.store.state
-                files_by_filename = getattr(state, "files_by_filename", None)
-                self._file = (
-                    files_by_filename.get(filename)
-                    if files_by_filename is not None
-                    else None
-                )
-                if self._file is None:
-                    self._file = next(
-                        (f for f in state.files if f.filename == filename),
-                        None,
-                    )
-            else:
-                self._file = None
-
-            diff = self._render_diff_for_source(diff)
+            self._file = target_file
+            self._folded_file_paths = folded_file_paths
+            diff = render_diff
             self._diff = diff
 
-            plan = _plan.build_diff_plan(diff, include_rendered_rows=False)
             self._all_lines = plan.all_lines
             self._diff_file_paths = plan.file_paths
             self._file_change_stats = plan.file_change_stats
@@ -1981,6 +2084,14 @@ class DiffView(VerticalScroll):
             ) = plan.code_widths
             self._old_line_number_width_value = plan.old_line_number_width
             self._new_line_number_width_value = plan.new_line_number_width
+            if planned_split:
+                self._rows_split = rendered_rows.rows_split
+                self._row_lookup_split = rendered_rows.row_lookup_split
+                self._rows_split_ready = True
+            else:
+                self._rows_unified = rendered_rows.rows_unified
+                self._row_lookup_unified = rendered_rows.row_lookup_unified
+                self._rows_unified_ready = True
 
             _comments.build_comment_map(self)
             _render._update_split_state(self)
@@ -1998,8 +2109,11 @@ class DiffView(VerticalScroll):
 
             await self._run_render_diff_for_request(request_token)
         finally:
-            self._suspend_split_state_rerender = False
-            self._suspend_scroll_virtual_window_watch = False
+            if plan_lock_acquired:
+                self._diff_plan_lock.release()
+            if self._is_current_render_request(request_token):
+                self._suspend_split_state_rerender = False
+                self._suspend_scroll_virtual_window_watch = False
 
     async def prepare(self) -> None:
         if self._diff:
@@ -2047,6 +2161,14 @@ class DiffView(VerticalScroll):
     # Full-file toggle
     # ------------------------------------------------------------------
 
+    @property
+    def view_revision(self) -> tuple[int, int]:
+        """Return the current render and navigation revision."""
+        return self._render_request_token, self._file_navigation_revision
+
+    def _is_current_view_revision(self, revision: tuple[int, int]) -> bool:
+        return self.view_revision == revision
+
     def action_toggle_full_file(self) -> None:
         action = _full_preview.choose_full_file_preview_action(
             current_file=self.current_file,
@@ -2060,7 +2182,9 @@ class DiffView(VerticalScroll):
             self._restore_diff_view()
             return
         if action.kind == "request_file" and action.filename is not None:
-            self.post_message(self.FullFilePreviewRequested(action.filename))
+            self.post_message(
+                self.FullFilePreviewRequested(action.filename, self.view_revision)
+            )
             return
         self.run_worker(
             self._load_and_show_full_file(),
@@ -2078,18 +2202,23 @@ class DiffView(VerticalScroll):
         )
 
     async def _load_and_show_full_file(self) -> None:
-        if self.current_file is None or self.store is None:
+        filename = self.current_file
+        if filename is None or self.store is None:
             return
-        content = await self.store.get_file_content(self.current_file)
+        view_revision = self.view_revision
+        content = await self.store.get_file_content(filename)
+        if not self._is_current_view_revision(view_revision):
+            return
         if content is None:
             self.post_message(
                 Flash("Failed to load file content", style="error", duration=2.0)
             )
             return
         await self.show_full_file_preview(
-            self.current_file,
+            filename,
             content,
             source_diff=self._source_diff or self._diff,
+            expected_view_revision=view_revision,
         )
 
     async def show_full_file_preview(
@@ -2100,27 +2229,44 @@ class DiffView(VerticalScroll):
         source_diff: FileDiff | None = None,
         restore_filename: str | None = None,
         restore_diff: FileDiff | None = None,
-    ) -> None:
-        self._saved_filename = restore_filename or self.current_file
-        self._saved_diff = restore_diff or self._source_diff or self._diff
-        self._saved_restore_position = self._full_file_restore_position()
+        expected_view_revision: tuple[int, int] | None = None,
+    ) -> bool:
+        view_revision = expected_view_revision or self.view_revision
         anchor_line_no = self._full_file_preview_anchor_line_no(
             filename,
             source_diff,
         )
-        full_diff = _full_preview.build_full_file_diff(
+        full_diff = await asyncio.to_thread(
+            _full_preview.build_full_file_diff,
             filename,
             content,
             source_diff=source_diff,
         )
-        self._showing_full_file = True
+        if not self._is_current_view_revision(view_revision):
+            return False
+
+        saved_filename = restore_filename or self.current_file
+        saved_diff = restore_diff or self._source_diff or self._diff
+        saved_restore_position = self._full_file_restore_position()
+        preview_render_token = self._render_request_token + 1
         await self.show_diff(
             filename,
             full_diff,
             preserve_full_file_state=True,
+            _expected_navigation_revision=view_revision[1],
+            _show_full_file=True,
         )
+        if (
+            self._render_request_token != preview_render_token
+            or self._diff is not full_diff
+        ):
+            return False
+        self._saved_filename = saved_filename
+        self._saved_diff = saved_diff
+        self._saved_restore_position = saved_restore_position
         self._jump_to_full_file_preview_anchor(anchor_line_no)
         self.post_message(Flash("Full file preview", style="success", duration=1.5))
+        return True
 
     def _full_file_preview_anchor_line_no(
         self,

@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from rit.services import gh_cli
@@ -20,8 +22,7 @@ def test_gh_failure_message_prefers_stderr_text() -> None:
 
 def test_gh_failure_message_falls_back_to_joined_args() -> None:
     assert (
-        gh_failure_message(["api", "graphql"], "")
-        == "gh command failed: api graphql"
+        gh_failure_message(["api", "graphql"], "") == "gh command failed: api graphql"
     )
 
 
@@ -42,3 +43,42 @@ async def test_run_gh_wraps_missing_cli_as_gh_error(monkeypatch) -> None:
         await run_gh(["api"])
 
     assert str(exc_info.value) == gh_missing_cli_message()
+
+
+@pytest.mark.asyncio
+async def test_run_gh_terminates_process_when_cancelled(monkeypatch) -> None:
+    started = asyncio.Event()
+    terminated = False
+
+    class Process:
+        returncode: int | None = None
+
+        async def communicate(self, _input: bytes | None) -> tuple[bytes, bytes]:
+            started.set()
+            await asyncio.Event().wait()
+            return b"", b""
+
+        def terminate(self) -> None:
+            nonlocal terminated
+            terminated = True
+
+        def kill(self) -> None:
+            raise AssertionError("terminated process should exit without kill")
+
+        async def wait(self) -> int:
+            self.returncode = -15
+            return self.returncode
+
+    async def create_process(*_args: object, **_kwargs: object) -> Process:
+        return Process()
+
+    monkeypatch.setattr(gh_cli.asyncio, "create_subprocess_exec", create_process)
+
+    task = asyncio.create_task(run_gh(["api"]))
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert terminated is True

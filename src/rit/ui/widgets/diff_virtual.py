@@ -165,7 +165,7 @@ def _extra_heights_by_hunk(view) -> dict[int, int]:
     for hunk_index, hunk in enumerate(view._diff.hunks):
         if not hunk.starts_file:
             continue
-        path = view._file_path_for_hunk(hunk_index)
+        path = hunk.file_path or view._file_path_for_hunk(hunk_index)
         if path is None:
             continue
 

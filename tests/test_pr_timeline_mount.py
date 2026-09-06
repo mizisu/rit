@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 from textual.app import App, ComposeResult
@@ -7,6 +7,7 @@ from textual.geometry import Region
 from textual.message_pump import NoActiveAppError
 from textual.widget import Widget
 
+import rit.ui.components.pr_timeline as pr_timeline_module
 from rit.state.models import (
     PR,
     PRIssueComment,
@@ -16,11 +17,10 @@ from rit.state.models import (
     ReviewThreadInfo,
 )
 from rit.state.store import PRStore
-import rit.ui.components.pr_timeline as pr_timeline_module
 from rit.ui.components.pr_timeline import (
     INITIAL_TIMELINE_BODY_COUNT,
-    PRTimeline,
     TIMELINE_BODY_MOUNT_DELAY,
+    PRTimeline,
 )
 
 
@@ -232,7 +232,9 @@ def test_timeline_refresh_thread_metadata_does_not_copy_thread_items(
         def items(self):
             return NoListItems(super().items())
 
-    timeline._thread_widget_info = NoListThreadInfo({widget: ("old-thread", 100, False)})
+    timeline._thread_widget_info = NoListThreadInfo(
+        {widget: ("old-thread", 100, False)}
+    )
 
     def get_thread_info(root_comment_id: int) -> ReviewThreadInfo:
         assert root_comment_id == 100
@@ -412,15 +414,15 @@ async def test_timeline_collect_navigable_items_uses_mounted_order_cache(
             id=1,
             body="First",
             user=PRUser(login="alice"),
-            created_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 4, 21, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 21, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 21, tzinfo=UTC),
         ),
         PRIssueComment(
             id=2,
             body="Second",
             user=PRUser(login="bob"),
-            created_at=datetime(2026, 4, 22, tzinfo=timezone.utc),
-            updated_at=datetime(2026, 4, 22, tzinfo=timezone.utc),
+            created_at=datetime(2026, 4, 22, tzinfo=UTC),
+            updated_at=datetime(2026, 4, 22, tzinfo=UTC),
         ),
     ]
 
@@ -498,19 +500,16 @@ def test_timeline_select_first_visible_item_reraises_unexpected_region_errors() 
         timeline.select_first_visible_item()
 
 
-def test_timeline_body_mount_delay_is_capped_for_large_discussions() -> None:
+def test_timeline_body_mount_delay_keeps_staggering_large_discussions() -> None:
     timeline = PRTimeline(PRStore())
 
-    assert hasattr(pr_timeline_module, "TIMELINE_BODY_MOUNT_MAX_DELAY")
-    max_delay = pr_timeline_module.TIMELINE_BODY_MOUNT_MAX_DELAY
+    first_delayed = timeline._body_mount_delay_for_index(INITIAL_TIMELINE_BODY_COUNT)
+    later_delayed = timeline._body_mount_delay_for_index(
+        INITIAL_TIMELINE_BODY_COUNT + 200
+    )
 
-    assert timeline._body_mount_delay_for_index(INITIAL_TIMELINE_BODY_COUNT) > (
-        TIMELINE_BODY_MOUNT_DELAY
-    )
-    assert (
-        timeline._body_mount_delay_for_index(INITIAL_TIMELINE_BODY_COUNT + 200)
-        == max_delay
-    )
+    assert first_delayed > TIMELINE_BODY_MOUNT_DELAY
+    assert later_delayed > first_delayed
 
 
 @pytest.mark.asyncio

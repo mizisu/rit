@@ -18,6 +18,7 @@ from json import dumps as json_dumps
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote_to_bytes, urljoin, urlparse
 from urllib.request import Request, urlopen
+from weakref import WeakKeyDictionary
 
 from PIL import Image as PILImage
 from PIL import UnidentifiedImageError
@@ -59,6 +60,10 @@ __all__ = (
 
 MAX_IMAGE_BYTES = 10 * 1024 * 1024
 IMAGE_FETCH_TIMEOUT_SECONDS = 10
+MAX_CONCURRENT_MARKDOWN_IMAGE_LOADS = 4
+_IMAGE_LOAD_SEMAPHORES: WeakKeyDictionary[object, asyncio.Semaphore] = (
+    WeakKeyDictionary()
+)
 MAX_INLINE_IMAGE_WIDTH_CELLS = 112
 MAX_INLINE_IMAGE_HEIGHT_CELLS = 36
 IMAGE_BLOCK_HORIZONTAL_PADDING_CELLS = 2
@@ -68,6 +73,14 @@ IMAGE_TABLE_CELL_HORIZONTAL_PADDING_CELLS = 2
 
 ImageFetcher = Callable[[str], Awaitable[bytes]]
 AvailableWidthProvider = Callable[[], int | None]
+
+
+def _image_load_semaphore(app: object) -> asyncio.Semaphore:
+    semaphore = _IMAGE_LOAD_SEMAPHORES.get(app)
+    if semaphore is None:
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_MARKDOWN_IMAGE_LOADS)
+        _IMAGE_LOAD_SEMAPHORES[app] = semaphore
+    return semaphore
 
 
 @dataclass(frozen=True)
@@ -215,34 +228,29 @@ class ImageViewerScreen(ModalScreen[None]):
             yield Vertical(id="image-viewer-body")
 
     def on_mount(self) -> None:
-        configure_terminal_graphics()
-        if status_message := terminal_graphics_status_message():
-            self.query_one("#image-viewer-status", Static).update(status_message)
-            return
-        if self._image is not None:
-            self.call_after_refresh(self._display_loaded_image)
-            return
         self.run_worker(self._load_image(), name=f"image-viewer-{id(self)}")
 
     async def _load_image(self) -> None:
         try:
-            if self._fetcher is None:
-                data = await fetch_image_bytes_async(
-                    self._image_ref.src,
-                    github_context=self._image_ref.github_context,
-                )
-            else:
-                data = await self._fetcher(self._image_ref.src)
-            self._image = await asyncio.to_thread(_decode_image, data)
+            await asyncio.to_thread(configure_terminal_graphics)
+            if status_message := terminal_graphics_status_message():
+                self.query_one("#image-viewer-status", Static).update(status_message)
+                return
+            if self._image is None:
+                if self._fetcher is None:
+                    data = await fetch_image_bytes_async(
+                        self._image_ref.src,
+                        github_context=self._image_ref.github_context,
+                    )
+                else:
+                    data = await self._fetcher(self._image_ref.src)
+                self._image = await asyncio.to_thread(_decode_image, data)
         except Exception as error:
             self.query_one("#image-viewer-status", Static).update(
                 escape(_format_image_error(error))
             )
             return
         await self._display_image()
-
-    def _display_loaded_image(self) -> None:
-        self.run_worker(self._display_image(), name=f"image-viewer-display-{id(self)}")
 
     async def _display_image(self) -> None:
         if self._image is None:
@@ -383,11 +391,6 @@ class MarkdownImageBlock(Vertical):
         if not _is_fetchable_image_source(self.image.src):
             self._show_status("Unsupported image source.")
             return
-        configure_terminal_graphics()
-        if status_message := terminal_graphics_status_message():
-            self._show_status(status_message)
-            return
-
         self._loading = True
         self._show_status("Loading preview…")
         self.run_worker(
@@ -398,14 +401,20 @@ class MarkdownImageBlock(Vertical):
 
     async def _load_image(self) -> None:
         try:
-            if self._fetcher is None:
-                data = await fetch_image_bytes_async(
-                    self.image.src,
-                    github_context=self.image.github_context,
-                )
-            else:
-                data = await self._fetcher(self.image.src)
-            pil_image = await asyncio.to_thread(_decode_image, data)
+            async with _image_load_semaphore(self.app):
+                await asyncio.to_thread(configure_terminal_graphics)
+                if status_message := terminal_graphics_status_message():
+                    self._loading = False
+                    self._show_status(status_message)
+                    return
+                if self._fetcher is None:
+                    data = await fetch_image_bytes_async(
+                        self.image.src,
+                        github_context=self.image.github_context,
+                    )
+                else:
+                    data = await self._fetcher(self.image.src)
+                pil_image = await asyncio.to_thread(_decode_image, data)
             self._pil_image = pil_image
         except Exception as error:
             self._loading = False
@@ -840,10 +849,8 @@ def _is_table_row(line: str) -> bool:
 
 def _split_table_cells(line: str) -> list[str]:
     value = line.strip()
-    if value.startswith("|"):
-        value = value[1:]
-    if value.endswith("|"):
-        value = value[:-1]
+    value = value.removeprefix("|")
+    value = value.removesuffix("|")
 
     cells: list[str] = []
     current: list[str] = []

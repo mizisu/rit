@@ -1,6 +1,7 @@
 """Tests for the main rit application."""
 
 import asyncio
+import threading
 from typing import cast
 
 import pytest
@@ -26,10 +27,11 @@ from tests.conftest import wait_until
 
 
 def _stub_initial_loads(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_load_all(_self) -> None:
+    async def skip_load(_self) -> None:
         return None
 
-    monkeypatch.setattr("rit.state.store.PRStore.load_all", fake_load_all)
+    monkeypatch.setattr("rit.state.store.PRStore.load_overview", skip_load)
+    monkeypatch.setattr("rit.state.store.PRStore.load_files", skip_load)
 
 
 def _simple_diff(
@@ -172,6 +174,33 @@ class TestRitApp:
 
             assert isinstance(app.screen, MainScreen)
 
+    async def test_terminal_graphics_setup_does_not_block_app_mount(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _stub_initial_loads(monkeypatch)
+        started = threading.Event()
+        release = threading.Event()
+
+        def configure_terminal_graphics() -> None:
+            started.set()
+            release.wait(timeout=2.0)
+
+        monkeypatch.setattr(
+            "rit.app.configure_terminal_graphics",
+            configure_terminal_graphics,
+        )
+        app = RitApp(owner="test", repo="repo", pr_number=123)
+
+        async with app.run_test():
+            try:
+                assert await asyncio.to_thread(started.wait, 1.0)
+
+                from rit.ui.screens.main import MainScreen
+
+                assert isinstance(app.screen, MainScreen)
+            finally:
+                release.set()
+
     async def test_settings_action_opens_current_settings_screen(
         self,
         app: RitApp,
@@ -254,31 +283,55 @@ class TestRitApp:
         """Pressing o on PR Info should use the global browser-open action."""
 
         _stub_initial_loads(monkeypatch)
-        calls: list[tuple[list[str], dict[str, object]]] = []
+        calls: list[list[str]] = []
 
-        def fake_run(args: list[str], **kwargs: object) -> None:
-            calls.append((args, kwargs))
+        async def fake_run(args: list[str], *, input_text: str | None = None) -> str:
+            calls.append(args)
+            return ""
 
-        monkeypatch.setattr("rit.app.subprocess.run", fake_run)
+        monkeypatch.setattr("rit.app.run_gh", fake_run)
 
         async with app.run_test() as pilot:
             await pilot.press("o")
             await pilot.pause()
 
         assert calls == [
-            (
-                [
-                    "gh",
-                    "pr",
-                    "view",
-                    "123",
-                    "--web",
-                    "-R",
-                    "test/repo",
-                ],
-                {"check": True, "capture_output": True},
-            )
+            [
+                "pr",
+                "view",
+                "123",
+                "--web",
+                "-R",
+                "test/repo",
+            ]
         ]
+
+    async def test_file_loading_starts_only_after_files_tab_is_opened(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        overview_started = asyncio.Event()
+        files_started = asyncio.Event()
+
+        async def load_overview(_store) -> None:
+            overview_started.set()
+
+        async def load_files(_store) -> None:
+            files_started.set()
+
+        monkeypatch.setattr("rit.state.store.PRStore.load_overview", load_overview)
+        monkeypatch.setattr("rit.state.store.PRStore.load_files", load_files)
+        app = RitApp(owner="test", repo="repo", pr_number=123)
+
+        async with app.run_test() as pilot:
+            await asyncio.wait_for(overview_started.wait(), timeout=1)
+            await pilot.pause()
+
+            assert files_started.is_set() is False
+
+            from rit.ui.screens.main import MainScreen
+
+            cast(MainScreen, app.screen).switch_tab(1)
+            await asyncio.wait_for(files_started.wait(), timeout=1)
 
     async def test_files_tab_defers_pr_info_discussion_render_until_pr_info_tab(
         self, app: RitApp, monkeypatch: pytest.MonkeyPatch
@@ -391,9 +444,9 @@ class TestRitApp:
             store.state.pr = PR(
                 number=123,
                 title="Staged PR",
-                baseRefName="main",
-                headRefName="feature",
-                changedFiles=2,
+                base_ref="main",
+                head_ref="feature",
+                changed_files=2,
             )
             store.state.files_total_count = 2
             store._post_message(store.PRLoaded(pr=store.state.pr))
@@ -430,7 +483,14 @@ class TestRitApp:
                 "viewed states are already included with changed files"
             )
 
-        monkeypatch.setattr("rit.state.store.PRStore.load_all", fake_load_all)
+        monkeypatch.setattr(
+            "rit.state.store.PRStore.load_overview",
+            fake_load_all,
+        )
+        monkeypatch.setattr(
+            "rit.state.store.PRStore.load_files",
+            lambda _store: asyncio.sleep(0),
+        )
         monkeypatch.setattr(
             "rit.state.store.PRStore.load_file_view_states",
             unexpected_load_file_view_states,

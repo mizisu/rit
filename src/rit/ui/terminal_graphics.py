@@ -7,6 +7,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from functools import lru_cache
+from threading import Lock
 
 from textual_image._terminal import TerminalError
 from textual_image.renderable import tgp
@@ -24,6 +25,7 @@ _TMUX_PASSTHROUGH_PREFIX = "\x1bPtmux;"
 _TMUX_PASSTHROUGH_SUFFIX = "\x1b\\"
 _ORIGINAL_SEND_TGP_MESSAGE = tgp._send_tgp_message
 _PATCHED = False
+_CONFIGURE_LOCK = Lock()
 
 
 @dataclass(frozen=True)
@@ -41,9 +43,10 @@ class TerminalGraphicsTransport:
 
 def configure_terminal_graphics() -> TerminalGraphicsTransport:
     """Configure Kitty TGP output for the current terminal environment."""
-    transport = detect_terminal_graphics_transport()
-    _patch_tgp_sender(use_tmux_passthrough=transport.passthrough_enabled)
-    return transport
+    with _CONFIGURE_LOCK:
+        transport = detect_terminal_graphics_transport()
+        _patch_tgp_sender(use_tmux_passthrough=transport.passthrough_enabled)
+        return transport
 
 
 @lru_cache(maxsize=1)
@@ -80,12 +83,12 @@ def _patch_tgp_sender(*, use_tmux_passthrough: bool) -> None:
     global _PATCHED
     if use_tmux_passthrough:
         if not _PATCHED:
-            setattr(tgp, "_send_tgp_message", _send_tgp_message_via_tmux)
+            tgp._send_tgp_message = _send_tgp_message_via_tmux
             _PATCHED = True
         return
 
     if _PATCHED:
-        setattr(tgp, "_send_tgp_message", _ORIGINAL_SEND_TGP_MESSAGE)
+        tgp._send_tgp_message = _ORIGINAL_SEND_TGP_MESSAGE
         _PATCHED = False
 
 

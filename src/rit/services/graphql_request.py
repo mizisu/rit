@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping
 from typing import cast
@@ -42,7 +43,7 @@ async def run_graphql(
 ) -> Mapping[str, object]:
     """Run a GraphQL document and return its validated response object."""
     result = await run_input_request(graphql_request(query, variables), runner)
-    data = json.loads(result)
+    data = await asyncio.to_thread(json.loads, result)
     if not isinstance(data, Mapping):
         raise GraphQLRequestError("GitHub GraphQL response was not an object")
 

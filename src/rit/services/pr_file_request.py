@@ -195,7 +195,7 @@ def _parse_pr_file(value: object) -> PRFile:
     raw_viewed_state = data.get("viewerViewedState")
     try:
         viewed_state = FileViewedState(raw_viewed_state)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         viewed_state = FileViewedState.UNVIEWED
     return PRFile(
         filename=path,
@@ -234,7 +234,10 @@ async def _populate_file_patches(
             )
 
     await asyncio.gather(
-        *(populate_batch(files[index : index + 40]) for index in range(0, len(files), 40))
+        *(
+            populate_batch(files[index : index + 40])
+            for index in range(0, len(files), 40)
+        )
     )
 
 
@@ -265,9 +268,9 @@ async def _populate_file_patch_batch(
             fields.append(f"{name}: object(expression: ${variable}) {{ ...BlobText }}")
 
     query = f"""
-query({', '.join(variable_definitions)}) {{
+query({", ".join(variable_definitions)}) {{
   repository(owner: $owner, name: $repo) {{
-    {' '.join(fields)}
+    {" ".join(fields)}
   }}
 }}
 fragment BlobText on Blob {{
@@ -278,10 +281,21 @@ fragment BlobText on Blob {{
 """
     data = await run_graphql(query, variables, runner=runner)
     repository = mapping(mapping(data.get("data")).get("repository"))
-    for index, file in enumerate(files):
-        old_blob = mapping(repository.get(f"base{index}"))
-        new_blob = mapping(repository.get(f"head{index}"))
-        file.patch = _build_file_patch(file, old_blob=old_blob, new_blob=new_blob)
+    patches = await asyncio.to_thread(_build_file_patches, files, repository)
+    for file, patch in zip(files, patches, strict=True):
+        file.patch = patch
+
+
+def _build_file_patches(files: list[PRFile], repository: object) -> list[str]:
+    blobs = mapping(repository)
+    return [
+        _build_file_patch(
+            file,
+            old_blob=mapping(blobs.get(f"base{index}")),
+            new_blob=mapping(blobs.get(f"head{index}")),
+        )
+        for index, file in enumerate(files)
+    ]
 
 
 def _build_file_patch(
@@ -300,10 +314,7 @@ def _build_file_patch(
         header += "deleted file mode 100644\n"
 
     if old.get("isBinary") is True or new.get("isBinary") is True:
-        return (
-            header
-            + f"Binary files a/{old_path} and b/{file.filename} differ"
-        )
+        return header + f"Binary files a/{old_path} and b/{file.filename} differ"
     if old.get("isTruncated") is True or new.get("isTruncated") is True:
         return header
 

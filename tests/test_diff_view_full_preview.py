@@ -1,5 +1,7 @@
 """Tests for full-file preview rendering."""
 
+import asyncio
+import threading
 from typing import cast
 
 import pytest
@@ -8,6 +10,7 @@ from textual.widgets import Static
 
 from rit.core.diff import parse_patch
 from rit.state.store import PRStore
+from rit.ui.widgets import diff_full_file_preview as full_preview_module
 from rit.ui.widgets.diff_full_file_preview import build_full_file_diff
 from rit.ui.widgets.diff_view import DiffView
 
@@ -304,4 +307,47 @@ async def test_show_diff_same_file_exits_full_file_preview_state() -> None:
         await diff_view.show_diff("preview.py", source_diff)
         await pilot.pause()
 
+        assert diff_view._showing_full_file is False
+
+
+@pytest.mark.asyncio
+async def test_full_file_preview_discards_result_after_newer_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_diff = parse_patch("@@ -1 +1 @@\n-old\n+new", "preview.py")
+    newer_diff = parse_patch("@@ -1 +1 @@\n-before\n+after", "newer.py")
+    started = threading.Event()
+    release = threading.Event()
+    original_build = full_preview_module.build_full_file_diff
+
+    def blocking_build(*args, **kwargs):
+        started.set()
+        release.wait(timeout=2.0)
+        return original_build(*args, **kwargs)
+
+    monkeypatch.setattr(full_preview_module, "build_full_file_diff", blocking_build)
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test():
+        diff_view = app.query_one(DiffView)
+        await diff_view.show_diff("preview.py", source_diff)
+        preview = asyncio.create_task(
+            diff_view.show_full_file_preview(
+                "preview.py",
+                _content(3),
+                source_diff=source_diff,
+            )
+        )
+        assert await asyncio.to_thread(started.wait, 1.0)
+
+        await diff_view.show_diff("newer.py", newer_diff)
+        release.set()
+
+        assert await preview is False
+        assert diff_view.current_file == "newer.py"
+        assert diff_view.current_diff is newer_diff
         assert diff_view._showing_full_file is False

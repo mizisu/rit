@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -133,6 +134,7 @@ class GitHubService:
         self._owner = owner
         self._repo = repo
         self._detected_repo: GitHubRepo | None = None
+        self._repo_lock = asyncio.Lock()
 
     async def get_repo(self) -> GitHubRepo:
         if self._owner and self._repo:
@@ -141,8 +143,10 @@ class GitHubService:
         if self._detected_repo:
             return self._detected_repo
 
-        self._detected_repo = await fetch_repo_view(self._run_gh)
-        return self._detected_repo
+        async with self._repo_lock:
+            if self._detected_repo is None:
+                self._detected_repo = await fetch_repo_view(self._run_gh)
+            return self._detected_repo
 
     async def get_pr_all(self, pr_number: int) -> PR:
         """Fetch all PR data in a single GraphQL request."""

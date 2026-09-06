@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 from collections.abc import Sequence
+from contextlib import suppress
 
 __all__ = (
     "GhCliError",
@@ -45,14 +46,31 @@ async def run_gh(args: Sequence[str], *, input_text: str | None = None) -> str:
     except FileNotFoundError as error:
         raise GhCliError(gh_missing_cli_message()) from error
 
-    stdout, stderr = await proc.communicate(
-        input_text.encode() if input_text is not None else None
-    )
+    try:
+        stdout, stderr = await proc.communicate(
+            input_text.encode() if input_text is not None else None
+        )
+    except asyncio.CancelledError:
+        await _terminate_process(proc)
+        raise
 
     if proc.returncode != 0:
         raise GhCliError(gh_failure_message(args, stderr.decode()))
 
     return stdout.decode()
+
+
+async def _terminate_process(proc: asyncio.subprocess.Process) -> None:
+    if proc.returncode is not None:
+        return
+    with suppress(ProcessLookupError):
+        proc.terminate()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=1)
+    except TimeoutError:
+        with suppress(ProcessLookupError):
+            proc.kill()
+        await proc.wait()
 
 
 def run_gh_sync(args: Sequence[str]) -> str:

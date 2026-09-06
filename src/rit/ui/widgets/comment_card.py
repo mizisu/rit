@@ -276,7 +276,15 @@ class CommentCard(Vertical):
     def _schedule_body_mount(self) -> None:
         self._body_mount_generation += 1
         generation = self._body_mount_generation
-        self.call_after_refresh(lambda: self._mount_body(generation))
+        mount_body = lambda: self._mount_body(generation)
+        if (
+            self._body_mount_delay > 0
+            and not self.has_class("timeline-loading")
+            and not _is_plain_body(self._body)
+        ):
+            self.set_timer(self._body_mount_delay, mount_body)
+        else:
+            self.call_after_refresh(mount_body)
 
     def _show_plain_body(self) -> None:
         body = self._body.strip()
