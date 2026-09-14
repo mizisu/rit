@@ -6,15 +6,15 @@ from dataclasses import dataclass
 from textual import on
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
-from textual.widgets import Button, Markdown, Collapsible, Static
+from textual.widgets import Button, Collapsible, Markdown, Static
 
 from rit.ui.markdown_images import ImageFetcher, mount_markdown_image_parts
 from rit.ui.messages import Flash
 
 __all__ = (
+    "LAZY_LOAD_THRESHOLD",
     "CopyableCodeBlock",
     "DetailsBlock",
-    "LAZY_LOAD_THRESHOLD",
     "LazyCollapsible",
     "MarkdownCodePart",
     "MarkdownPart",
@@ -25,8 +25,8 @@ __all__ = (
 )
 
 
-# Threshold for lazy loading large content (in characters)
-LAZY_LOAD_THRESHOLD = 2000
+# Collapsed details load only when expanded unless a caller opts into a threshold.
+LAZY_LOAD_THRESHOLD = 0
 
 
 @dataclass

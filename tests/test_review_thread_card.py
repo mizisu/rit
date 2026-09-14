@@ -469,4 +469,10 @@ Nested content
         await pilot.pause()
 
         collapsibles = app.query(Collapsible)
-        assert len(collapsibles) >= 2
+        assert len(collapsibles) == 1
+
+        collapsibles.first().collapsed = False
+        await pilot.pause()
+        await pilot.pause()
+
+        assert len(app.query(Collapsible)) >= 2

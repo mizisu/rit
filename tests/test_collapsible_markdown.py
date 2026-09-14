@@ -9,6 +9,7 @@ from PIL import Image as PILImage
 from textual.app import App, ComposeResult
 from textual.containers import Vertical
 from textual.css.query import NoMatches
+from textual.widgets import Collapsible
 
 import rit.ui.markdown_images as markdown_images_module
 from rit.ui.collapsible_markdown import (
@@ -724,7 +725,7 @@ async def test_image_viewer_closes_with_enter() -> None:
 
 
 @pytest.mark.asyncio
-async def test_eager_details_with_code_block_waits_for_inner_container_mount() -> None:
+async def test_collapsed_details_loads_code_block_only_after_expansion() -> None:
     body = """<details>
 <summary>Patch</summary>
 
@@ -748,7 +749,11 @@ async def test_eager_details_with_code_block_waits_for_inner_container_mount() -
         await pilot.pause()
         await pilot.pause()
 
-        assert app.query_one(CopyableCodeBlock) is not None
+        assert len(app.query(CopyableCodeBlock)) == 0
+
+        details = app.query_one(Collapsible)
+        details.collapsed = False
+        await wait_until(lambda: len(app.query(CopyableCodeBlock)) == 1)
 
 
 @pytest.mark.asyncio
