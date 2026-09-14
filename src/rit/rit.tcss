@@ -1,6 +1,5 @@
 /* rit - Global Styles */
 
-/* === Diff Styles === */
 .diff-added {
     background: $success 15%;
     color: $success;
@@ -38,12 +37,10 @@ DiffView .line-prefix.-cursor {
     color: $text;
 }
 
-/* === Global Styles === */
 Screen {
     background: $background;
 }
 
-/* === TabbedContent === */
 TabbedContent {
     height: 1fr;
 }
@@ -82,7 +79,6 @@ Tab:hover {
     color: $foreground;
 }
 
-/* === Footer === */
 Footer {
     background: $surface;
 }
@@ -101,7 +97,6 @@ FooterKey > .footer-key--key {
     color: $foreground;
 }
 
-/* === Scrollbars === */
 * {
     scrollbar-background: $surface;
     scrollbar-color: $text-disabled;
@@ -109,12 +104,10 @@ FooterKey > .footer-key--key {
     scrollbar-color-active: $primary;
 }
 
-/* === Static Text === */
 Static {
     color: $foreground;
 }
 
-/* === Markdown === */
 Markdown {
     margin: 0 1;
 }
@@ -131,7 +124,6 @@ MarkdownH2 {
     margin: 1 0;
 }
 
-/* === Notification Toast === */
 Toast {
     background: $surface;
     border: solid $primary;
