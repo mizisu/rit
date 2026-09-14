@@ -4,6 +4,7 @@ import asyncio
 import difflib
 from dataclasses import dataclass
 
+from rit.core.diff import parse_multi_file_patch
 from rit.services.gh_request import GitHubInputRunner
 from rit.services.graphql_request import connection_nodes, mapping, run_graphql
 from rit.state.models import FileViewedState, PRFile
@@ -144,6 +145,7 @@ async def fetch_pr_files(
         owner,
         repo,
         files,
+        pr_number=pr_number,
         base_ref_oid=base_ref_oid,
         head_ref_oid=head_ref_oid,
         runner=runner,
@@ -216,10 +218,41 @@ async def _populate_file_patches(
     repo: str,
     files: list[PRFile],
     *,
+    pr_number: int,
     base_ref_oid: str,
     head_ref_oid: str,
     runner: GitHubInputRunner,
 ) -> None:
+    files_with_old_paths = [
+        file for file in files if file.status in {"renamed", "copied"}
+    ]
+    if files_with_old_paths:
+        # GraphQL omits rename/copy source paths; use GitHub's canonical patch.
+        raw_diff = await runner(
+            [
+                "pr",
+                "diff",
+                str(pr_number),
+                "--repo",
+                f"{owner}/{repo}",
+                "--color",
+                "never",
+            ]
+        )
+        parsed_files = await asyncio.to_thread(
+            parse_multi_file_patch, raw_diff, refine="never"
+        )
+        patches_by_filename = {parsed.diff.filename: parsed for parsed in parsed_files}
+        for file in files_with_old_paths:
+            parsed = patches_by_filename.get(file.filename)
+            if parsed is None or not parsed.diff.old_filename:
+                raise RuntimeError(
+                    f"GitHub diff did not include the source path for {file.filename!r}"
+                )
+            file.previous_filename = parsed.diff.old_filename
+            file.patch = parsed.patch
+        files = [file for file in files if file.status not in {"renamed", "copied"}]
+
     semaphore = asyncio.Semaphore(4)
 
     async def populate_batch(batch: list[PRFile]) -> None:
