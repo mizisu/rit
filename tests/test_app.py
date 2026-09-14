@@ -5,7 +5,7 @@ import threading
 from typing import cast
 
 import pytest
-from textual.widgets import Static, TextArea
+from textual.widgets import Button, Static, TextArea
 
 from rit.app import RitApp
 from rit.cli import parse_pr_reference
@@ -13,6 +13,7 @@ from rit.core.diff import parse_patch
 from rit.core.types import FileDiff
 from rit.state.models import (
     PR,
+    FileViewedState,
     LoadingState,
     NodeList,
     PendingReviewComment,
@@ -161,6 +162,107 @@ class TestRitApp:
             await pilot.pause()
 
             assert calls == ["Loaded body"]
+
+    async def test_header_branches_are_shared_across_tabs_and_reuse_copy_picker(
+        self, app: RitApp, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from rit.state.store import PRStore
+        from rit.ui.screens.branch_picker import BranchPickerScreen
+        from rit.ui.screens.main import MainScreen
+        from rit.ui.widgets.branch_info import BranchInfo
+        from rit.ui.widgets.resize_handle import ResizeHandle
+
+        copied: list[str] = []
+        monkeypatch.setattr("rit.app.pyperclip.copy", copied.append)
+
+        async with app.run_test(size=(120, 30)) as pilot:
+            screen = cast(MainScreen, app.screen)
+            screen.switch_tab(1)
+            files = screen.file_changes
+            branches = screen.header.query_one(BranchInfo)
+            assert branches.display is False
+            assert len(screen.query(BranchInfo)) == 1
+
+            pr = PR(number=123, base_ref="main", head_ref="feature/review")
+            screen.store.state.pr = pr
+            screen.store.state.files_loading = LoadingState.LOADING
+            screen.on_pr_loaded(PRStore.PRLoaded(pr=pr))
+            await pilot.pause()
+
+            label = screen.header.query_one("#branch-info", Static)
+            copy_button = screen.header.query_one("#copy-branch", Button)
+            assert _static_text(label) == "main ← feature/review"
+            assert copy_button.tooltip == "Copy branch"
+            assert copy_button.region.height == 1
+            assert "\U000f018f" in copy_button.render_line(0).text
+            branch_segment = next(iter(label.render_line(0)))
+            assert branch_segment.text == "main"
+            assert branch_segment.style is not None
+            assert branch_segment.style.color is not None
+            assert branch_segment.style.color.name == "#8aadf4"
+            title = screen.header.query_one("#header-title")
+            assert branches.region.y == title.region.bottom
+            assert branches.region.x == title.region.x
+            assert branches.region.height == 1
+            assert branches.region.bottom <= screen.tabbed_content.region.y
+            assert files.file_tree.region.y == files.region.y
+            assert files.diff_view.region.y == files.region.y
+            assert files.diff_view.region.bottom == files.region.bottom
+            assert copy_button.region.x == label.region.right + 1
+            branch_region = branches.region
+
+            await pilot.click("#copy-branch")
+            await wait_until(lambda: isinstance(app.screen, BranchPickerScreen))
+            await pilot.press("j", "enter")
+            await wait_until(lambda: copied == ["main"])
+            assert app.screen is screen
+
+            screen.switch_tab(0)
+            await pilot.pause()
+            assert branches.region == branch_region
+            assert not screen.pr_info.query(BranchInfo)
+            assert not files.query(BranchInfo)
+            copy_button.focus()
+            await pilot.press("enter")
+            await wait_until(lambda: isinstance(app.screen, BranchPickerScreen))
+            await pilot.press("enter")
+            await wait_until(lambda: copied == ["main", "feature/review"])
+
+            screen.switch_tab(1)
+            await pilot.press("ctrl+b")
+            await wait_until(lambda: isinstance(app.screen, BranchPickerScreen))
+            await pilot.press("escape")
+            assert app.screen is screen
+
+            pr.base_ref = "develop"
+            screen.on_pr_loaded(PRStore.PRLoaded(pr=pr))
+            screen.store.state.files_loading = LoadingState.ERROR
+            files.refresh_files()
+            await pilot.pause()
+            assert _static_text(label) == "develop ← feature/review"
+            assert branches.display is True
+
+            patch = "@@ -1,40 +1,40 @@\n" + "\n".join(
+                f" line_{index}" for index in range(40)
+            )
+            await files.diff_view.show_diff("one.py", parse_patch(patch, "one.py"))
+            await pilot.pause()
+            files.diff_view.scroll_end(animate=False)
+            await pilot.pause()
+            assert files.diff_view.scroll_y > 0
+            assert branches.region == branch_region
+
+            files.on_resize_handle_drag(ResizeHandle.Drag(delta_x=2))
+            await pilot.pause()
+            assert files.ghost_handle.region.y == files.resize_handle.region.y
+            files.on_resize_handle_drag_end(ResizeHandle.DragEnd())
+            files.toggle_file_tree()
+            await pilot.resize_terminal(80, 24)
+            await pilot.pause()
+            assert branches.region.width == screen.header.content_region.width
+            assert files.diff_view.region.x == files.region.x
+            assert files.diff_view.region.y == files.region.y
+            assert copy_button.region.right <= branches.content_region.right
 
     async def test_app_starts(self, app: RitApp) -> None:
         """Test that the app starts without errors."""
@@ -598,6 +700,74 @@ class TestRitApp:
                 )
 
             assert diff_view.inline_comment_target() == ("preview.py", 3, "RIGHT")
+
+    async def test_file_picker_expands_folded_target_without_changing_viewed_state(
+        self,
+        app: RitApp,
+    ) -> None:
+        from rit.ui.screens.file_picker import FilePickerScreen
+        from rit.ui.screens.main import MainScreen
+
+        patch = "@@ -1,3 +1,3 @@\n first\n second\n third"
+        async with app.run_test() as pilot:
+            screen = cast(MainScreen, app.screen)
+            store = screen.store
+            store.state.files_loading = LoadingState.LOADED
+            store.state.files = [
+                PRFile(
+                    filename=filename,
+                    patch=patch,
+                    viewer_viewed_state=FileViewedState.VIEWED,
+                )
+                for filename in ("one.py", "two.py", "three.py")
+            ]
+            store.state.file_diffs = {
+                file.filename: parse_patch(patch, file.filename)
+                for file in store.state.files
+            }
+            screen.switch_tab(1)
+            screen.file_changes.refresh_files()
+            view = screen.file_changes.diff_view
+            await wait_until(
+                lambda: view._folded_file_paths == set(store.state.file_diffs)
+            )
+            view.focus()
+
+            await pilot.press("ctrl+o")
+            assert isinstance(app.screen, FilePickerScreen)
+            await pilot.press("t", "w", "o", "enter")
+            await wait_until(
+                lambda: (
+                    app.screen is screen
+                    and not view._fold_worker_active
+                    and "two.py" not in view._folded_file_paths
+                )
+            )
+
+            assert view._folded_file_paths == {"one.py", "three.py"}
+            assert view.file_for_line_index(view.cursor_line) == "two.py"
+            assert not view._all_lines[view.cursor_line].is_folded_file_placeholder
+            assert view.selected_file_header_path() is None
+            assert view.has_focus
+            assert screen.file_changes.file_tree.selected_file == "two.py"
+            assert all(
+                file.viewer_viewed_state == FileViewedState.VIEWED
+                for file in store.state.files
+            )
+
+            store.state.files[1].viewer_viewed_state = FileViewedState.UNVIEWED
+            assert await view.toggle_current_file_fold()
+            screen.file_changes.open_file("two.py", focus_diff=True)
+            await wait_until(
+                lambda: (
+                    not view._fold_worker_active
+                    and "two.py" not in view._folded_file_paths
+                )
+            )
+            assert "two.py" not in view._manually_folded_files
+            assert store.state.files[1].viewer_viewed_state == FileViewedState.UNVIEWED
+            assert view.selected_file_header_path() is None
+            assert view.file_for_line_index(view.cursor_line) == "two.py"
 
     async def test_file_comment_ctrl_s_queues_pending_review(
         self,

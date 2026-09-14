@@ -113,6 +113,11 @@ class FileDiff:
     is_binary: bool = False
     is_fully_refined: bool = True
     show_hunk_headers: bool = True
+    planning_revision: int = field(default=0, repr=False, compare=False)
+
+    def mark_planning_changed(self) -> None:
+        """Invalidate prepared render plans before changing planning inputs."""
+        self.planning_revision += 1
 
     @property
     def change_counts(self) -> tuple[int, int]:

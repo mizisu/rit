@@ -851,6 +851,72 @@ class TestDiffViewVisualMode:
             assert diff_view.cursor_column == len("hello ")
 
     @pytest.mark.asyncio
+    async def test_braces_move_by_paragraph_with_counts_and_visual_selection(
+        self,
+    ) -> None:
+        lines = ["alpha", "beta", "", "", "gamma", "   ", "delta", "", "omega"]
+        patch = "@@ -1,9 +1,9 @@\n" + "\n".join(f" {line}" for line in lines)
+
+        class TestApp(App):
+            def compose(self) -> ComposeResult:
+                yield DiffView(mode="unified")
+
+        app = TestApp()
+        async with app.run_test() as pilot:
+            view = app.query_one(DiffView)
+            for mode in ("unified", "split"):
+                view.mode = mode
+                await view.show_diff("test.py", parse_patch(patch, "test.py"))
+                view.focus()
+                for start, next_line, prev_line in (
+                    (0, 2, 0),
+                    (1, 2, 0),
+                    (2, 7, 0),
+                    (3, 7, 0),
+                    (4, 7, 3),
+                    (5, 7, 3),
+                    (6, 7, 3),
+                    (7, 8, 3),
+                    (8, 8, 7),
+                ):
+                    view._move_cursor(line=start, column=0)
+                    await pilot.press("}")
+                    assert view.cursor_line == next_line
+                    assert view.cursor_column == (4 if next_line == 8 else 0)
+                    view._move_cursor(line=start, column=0)
+                    await pilot.press("{")
+                    assert view.cursor_line == prev_line
+                    assert view.cursor_column == 0
+                    assert view._comment_cursor_index == 0
+
+                view._move_cursor(line=0, column=0)
+                await pilot.press("v", "2", "}")
+                assert view.visual_mode
+                assert view.visual_anchor_line == 0
+                assert view.cursor_line == 7
+                assert view._cursor_ui.pending_count == ""
+                await pilot.press("2", "{")
+                assert view.cursor_line == 0
+                await pilot.press("escape")
+
+                hunks = "@@ -1 +1 @@\n alpha\n@@ -20 +20 @@\n omega"
+                await view.show_diff("test.py", parse_patch(hunks, "test.py"))
+                await pilot.press("}")
+                assert (view.cursor_line, view.cursor_column) == (1, 0)
+                await pilot.press("{")
+                assert (view.cursor_line, view.cursor_column) == (0, 0)
+
+            view.mode = "split"
+            for pane, patch in (
+                ("new", "@@ -1,2 +1 @@\n alpha\n-deleted"),
+                ("old", "@@ -1 +1,2 @@\n alpha\n+added"),
+            ):
+                await view.show_diff("test.py", parse_patch(patch, "test.py"))
+                view._move_cursor(line=0, column=2, pane=pane)
+                await pilot.press("}")
+                assert (view.cursor_line, view.cursor_column) == (0, 4)
+
+    @pytest.mark.asyncio
     async def test_next_word_skips_whitespace_only_rows(self) -> None:
         """`w` should skip whitespace-only rows when searching for a word."""
 

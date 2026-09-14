@@ -42,6 +42,7 @@ class PendingLocationJump:
     line: int
     side: Literal["LEFT", "RIGHT"]
     focus_diff: bool
+    render_revision: int | None = None
 
 
 @dataclass(frozen=True)
@@ -151,13 +152,25 @@ class FilesRenderSession:
         side: Literal["LEFT", "RIGHT"],
         *,
         focus_diff: bool,
+        render_revision: int | None = None,
     ) -> None:
         self._pending_location_jump = PendingLocationJump(
             filename=filename,
             line=line,
             side=side,
             focus_diff=focus_diff,
+            render_revision=render_revision,
         )
+
+    def discard_pending_location_jump(self, render_revision: int) -> None:
+        """Discard a location owned by a superseded file render."""
+        pending = self._pending_location_jump
+        if pending is not None and pending.render_revision == render_revision:
+            self._pending_location_jump = None
+
+    def clear_pending_location_jump(self) -> None:
+        """Discard a pending location superseded by direct navigation."""
+        self._pending_location_jump = None
 
     def take_pending_location_jump(
         self,

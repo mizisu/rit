@@ -66,8 +66,6 @@ DiffView .hunk-header.preview-hunk-boundary {
     outline-left: thick #f5bde6;
 }
 
-/* ===== Line Structure: Horizontal(line-prefix, code-content) ===== */
-
 DiffView Horizontal.diff-line {
     height: 1;
     width: auto;
@@ -149,8 +147,6 @@ DiffView .diff-comment-empty-pane {
     height: 1;
 }
 
-/* ===== Cursor & Visual Mode Styles (Vim-style) ===== */
-
 DiffView.-visual {
 }
 
@@ -216,6 +212,7 @@ DiffView .line-prefix.-placeholder {
 
 DiffView .-virtual-buffer {
     text-align: center;
+    margin: 0;
 }
 
 DiffView .diff-block {

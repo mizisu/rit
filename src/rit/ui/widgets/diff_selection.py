@@ -101,9 +101,7 @@ def _copy_yank_to_clipboard(view: DiffView, yank: _selection_text.VisualYank) ->
     try:
         view._copy_to_clipboard(yank.text)
     except Exception as e:
-        view.post_message(
-            Flash(f"Failed to copy: {str(e)}", style="error", duration=3.0)
-        )
+        view.post_message(Flash(f"Failed to copy: {e!s}", style="error", duration=3.0))
         return
 
     view.post_message(Flash(yank.success_message, style="success", duration=2.0))
@@ -157,11 +155,6 @@ def _exit_visual(view: DiffView) -> None:
         _search._refresh_search_display(view)
 
 
-# ---------------------------------------------------------------------------
-# Selection spec computation
-# ---------------------------------------------------------------------------
-
-
 def _compute_selection_spec_for_line(
     view: DiffView,
     line_idx: int,
@@ -195,11 +188,6 @@ def _compute_visible_selection_specs(
         rendered_end=rendered_end,
         line_is_rendered=view._is_line_rendered,
     )
-
-
-# ---------------------------------------------------------------------------
-# Selection highlighting
-# ---------------------------------------------------------------------------
 
 
 def _update_selection_highlighting(
@@ -286,10 +274,7 @@ def _clear_line_selection(view: DiffView, line_idx: int) -> None:
             has_cursor = view._diff_line_cursor_active(
                 line_idx
             ) and view._widget_matches_cursor_side(line, widget)
-            if has_cursor:
-                widget.add_class("-cursor")
-            else:
-                widget.remove_class("-cursor")
+            view._update_placeholder_cursor(widget, line, has_cursor)
             continue
 
         widget.remove_class("-selected")
@@ -334,10 +319,7 @@ def _apply_line_selection(
             has_cursor = view._diff_line_cursor_active(
                 line_idx
             ) and view._widget_matches_cursor_side(line, widget)
-            if has_cursor:
-                widget.add_class("-cursor")
-            else:
-                widget.remove_class("-cursor")
+            view._update_placeholder_cursor(widget, line, has_cursor)
             continue
 
         actual_end = end_col if end_col is not None else len(text) - 1

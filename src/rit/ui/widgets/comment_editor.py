@@ -7,7 +7,9 @@ from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import HorizontalGroup, Vertical
+from textual.geometry import Region
 from textual.message import Message
+from textual.strip import Strip
 from textual.widget import Widget
 from textual.widgets import Button, OptionList, Static, TextArea
 
@@ -22,6 +24,15 @@ __all__ = (
     "InlineCommentEditor",
     "SubmitMode",
 )
+
+
+class _CommentTextArea(TextArea):
+    """Avoid styling removed editors retained in Textual's hit-test cache."""
+
+    def render_lines(self, crop: Region) -> list[Strip]:
+        if not self.is_attached:
+            return []
+        return super().render_lines(crop)
 
 
 class InlineCommentEditor(Vertical):
@@ -124,7 +135,7 @@ class InlineCommentEditor(Vertical):
                 classes="comment-editor-context",
                 markup=False,
             )
-        yield TextArea(
+        yield _CommentTextArea(
             id="comment-editor-body",
             classes="comment-editor-body",
             soft_wrap=True,

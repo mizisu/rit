@@ -154,6 +154,48 @@ def test_pending_location_jump_waits_for_matching_render_target() -> None:
     assert session.take_pending_location_jump(COMBINED_DIFF_FILENAME) is None
 
 
+def test_superseded_render_discards_only_its_location_jump() -> None:
+    session = FilesRenderSession()
+    session.queue_location_jump(
+        "one.py",
+        4,
+        "RIGHT",
+        focus_diff=False,
+        render_revision=1,
+    )
+    session.queue_location_jump(
+        "one.py",
+        8,
+        "LEFT",
+        focus_diff=True,
+        render_revision=2,
+    )
+
+    session.discard_pending_location_jump(1)
+    assert session.take_pending_location_jump("one.py") == PendingLocationJump(
+        filename="one.py",
+        line=8,
+        side="LEFT",
+        focus_diff=True,
+        render_revision=2,
+    )
+
+
+def test_direct_navigation_clears_pending_location_jump() -> None:
+    session = FilesRenderSession()
+    session.queue_location_jump(
+        "one.py",
+        4,
+        "RIGHT",
+        focus_diff=False,
+        render_revision=1,
+    )
+
+    session.clear_pending_location_jump()
+
+    assert session.take_pending_location_jump("one.py") is None
+
+
 def test_full_file_preview_restore_target_defaults_to_selected_file() -> None:
     session = FilesRenderSession()
     file_diff = FileDiff(filename="one.py")

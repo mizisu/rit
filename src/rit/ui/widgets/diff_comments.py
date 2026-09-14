@@ -69,10 +69,6 @@ __all__ = (
 )
 
 
-# ---------------------------------------------------------------------------
-# Height estimation for virtual layout
-# ---------------------------------------------------------------------------
-
 COLLAPSED_PENDING_DRAFT_HEIGHT = 1
 COLLAPSED_THREAD_HEIGHT = 1
 COMMENT_HEIGHT_ESTIMATE = 3  # header + ~2 body lines
@@ -87,11 +83,6 @@ def estimate_thread_height(thread: ReviewThread) -> int:
     if n == 0:
         return COLLAPSED_THREAD_HEIGHT
     return 2 + n * COMMENT_HEIGHT_ESTIMATE
-
-
-# ---------------------------------------------------------------------------
-# State management
-# ---------------------------------------------------------------------------
 
 
 def clear_state(view: DiffView) -> None:
@@ -606,11 +597,6 @@ def _line_number_for_side(
     return line.new_line_no if line.new_line_no is not None else line.old_line_no
 
 
-# ---------------------------------------------------------------------------
-# Mounting comment widgets into the diff DOM
-# ---------------------------------------------------------------------------
-
-
 def mount_side_aware_widget(
     view: DiffView,
     container: VerticalScroll,
@@ -878,11 +864,6 @@ def _spacer(width: int, classes: str) -> Static:
     spacer = Static("", classes=classes)
     spacer.styles.width = max(0, width)
     return spacer
-
-
-# ---------------------------------------------------------------------------
-# Cursor-based visual highlight
-# ---------------------------------------------------------------------------
 
 
 def comment_widgets_in_order(view: DiffView, line_index: int) -> list[Widget]:
@@ -1460,11 +1441,6 @@ def try_toggle_current(view: DiffView) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# Navigation: jump between comment lines (with cross-file support)
-# ---------------------------------------------------------------------------
-
-
 def next_comment(view: DiffView) -> None:
     indices = view._comment_line_indices
     if not indices:
@@ -1523,11 +1499,6 @@ def _jump_to_comment_line(view: DiffView, line_index: int) -> None:
             pane=target_pane,
             update_active_pane=target_pane is not None,
         )
-
-
-# ---------------------------------------------------------------------------
-# Resolve / unresolve
-# ---------------------------------------------------------------------------
 
 
 async def toggle_resolve(view: DiffView) -> None:
@@ -1589,11 +1560,6 @@ def _update_thread_widget_resolved(
             break
 
     _virtual._rebuild_virtual_layout(view)
-
-
-# ---------------------------------------------------------------------------
-# Build inline thread widget (shared ReviewThreadItem with cursor-line CSS)
-# ---------------------------------------------------------------------------
 
 
 def estimate_pending_draft_height(draft: PendingReviewComment) -> int:

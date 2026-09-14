@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 from functools import partial
-from typing import TYPE_CHECKING
 
 from textual._context import NoActiveAppError
 
@@ -16,10 +15,6 @@ from rit.core.syntax_highlighting import prewarm_highlighter
 from rit.core.types import DiffLine, FileDiff
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_virtual as _virtual
-
-if TYPE_CHECKING:
-    pass
-
 
 __all__ = ()
 
@@ -175,7 +170,7 @@ async def _highlight_diff_async(
 
 
 def _should_use_windowed_highlight_strategy(view) -> bool:
-    return view._virt.active or len(view._all_lines) >= view.BLOCK_RENDER_LINE_THRESHOLD
+    return _blocks._should_use_block_renderer(view)
 
 
 def _use_windowed_highlight_strategy(view, diff: FileDiff | None = None) -> bool:
@@ -222,7 +217,8 @@ def _current_highlight_window(view) -> tuple[int, int]:
         window_start = max(0, visible_start - buffer)
         window_end = min(last_line_index, visible_end + buffer)
         return (
-            window_start // _HIGHLIGHT_WINDOW_CHUNK_LINES
+            window_start
+            // _HIGHLIGHT_WINDOW_CHUNK_LINES
             * _HIGHLIGHT_WINDOW_CHUNK_LINES,
             min(
                 last_line_index,

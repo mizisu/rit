@@ -263,11 +263,6 @@ class SplitBlockLineStaticData:
     right_style: str
 
 
-# ---------------------------------------------------------------------------
-# Grouped state containers for DiffView
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class HighlightState:
     """Syntax highlight cache and async worker coordination."""

@@ -226,7 +226,7 @@ def _maybe_update_virtual_window_from_viewport(view) -> None:
 
 def _configure_virtual_window(view) -> None:
     total_lines = len(view._all_lines)
-    view._virt.active = total_lines > view.VIRTUALIZE_LINE_THRESHOLD
+    view._virt.active = view._render_policy_line_count > view.VIRTUALIZE_LINE_THRESHOLD
     view._virt.render_pending = False
 
     if total_lines == 0:
@@ -901,7 +901,11 @@ def _complete_cursor_driven_virtual_render(view, request_token: int) -> None:
 async def _run_virtual_window_render_for_request(view, request_token: int) -> None:
     token = _RENDER_REQUEST_CONTEXT.set(request_token)
     try:
-        await _render_virtual_window_and_finalize(view)
+        async with view.batch():
+            if not view._is_current_render_request(request_token):
+                return
+            view._capture_comment_editors()
+            await _render_virtual_window_and_finalize(view)
     finally:
         _RENDER_REQUEST_CONTEXT.reset(token)
 
@@ -924,6 +928,8 @@ async def _render_virtual_window_and_finalize(view) -> None:
             )
         else:
             await view._render_diff()
+        await view._await_content_mounts()
+        view._restore_comment_editors()
     except Exception:
         if view._is_current_render_request(request_token):
             view._virt.render_pending = False

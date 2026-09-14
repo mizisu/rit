@@ -113,6 +113,8 @@ def build_rendered_rows_from_lines(
     hunk_index_by_line: Sequence[int],
     *,
     split: bool | None = None,
+    line_offset: int | None = None,
+    row_offset: int = 0,
 ) -> RenderedRowsPlan:
     rows_unified: list[RenderedRow] = []
     rows_split: list[RenderedRow] = []
@@ -131,6 +133,8 @@ def build_rendered_rows_from_lines(
             row_lookup_unified=row_lookup_unified,
             row_lookup_split=row_lookup_split,
             split=split,
+            line_index=None if line_offset is None else line_offset + offset,
+            row_offset=row_offset,
         )
 
     return RenderedRowsPlan(
@@ -150,38 +154,42 @@ def _append_rendered_rows_for_line(
     row_lookup_unified: dict[tuple[int, Literal["old", "new", "auto"]], int],
     row_lookup_split: dict[int, int],
     split: bool | None,
+    line_index: int | None = None,
+    row_offset: int = 0,
 ) -> None:
+    if line_index is None:
+        line_index = line.line_index
     shared_kind = (
         _row_kind_for_line(line) if not line.is_modified or split is not False else None
     )
     if split is not True and line.is_modified:
         old_row = RenderedRow(
             mode="unified",
-            row_index=len(rows_unified),
-            line_index=line.line_index,
+            row_index=row_offset + len(rows_unified),
+            line_index=line_index,
             hunk_index=hunk_index,
             kind=_row_kind_for_line(line, modified_side="old"),
             side="old",
-            anchor_id=f"line-{line.line_index}-old",
+            anchor_id=f"line-{line_index}-old",
             old_line_no=line.old_line_no,
             new_line_no=line.new_line_no,
         )
         rows_unified.append(old_row)
-        row_lookup_unified[(line.line_index, "old")] = old_row.row_index
+        row_lookup_unified[(line_index, "old")] = old_row.row_index
 
         new_row = RenderedRow(
             mode="unified",
-            row_index=len(rows_unified),
-            line_index=line.line_index,
+            row_index=row_offset + len(rows_unified),
+            line_index=line_index,
             hunk_index=hunk_index,
             kind=_row_kind_for_line(line, modified_side="new"),
             side="new",
-            anchor_id=f"line-{line.line_index}-new",
+            anchor_id=f"line-{line_index}-new",
             old_line_no=line.old_line_no,
             new_line_no=line.new_line_no,
         )
         rows_unified.append(new_row)
-        row_lookup_unified[(line.line_index, "new")] = new_row.row_index
+        row_lookup_unified[(line_index, "new")] = new_row.row_index
     elif split is not True:
         side: Literal["old", "new", "auto"]
         if line.is_deleted:
@@ -193,38 +201,39 @@ def _append_rendered_rows_for_line(
 
         row = RenderedRow(
             mode="unified",
-            row_index=len(rows_unified),
-            line_index=line.line_index,
+            row_index=row_offset + len(rows_unified),
+            line_index=line_index,
             hunk_index=hunk_index,
             kind=shared_kind if shared_kind is not None else _row_kind_for_line(line),
             side=side,
-            anchor_id=f"line-{line.line_index}",
+            anchor_id=f"line-{line_index}",
             old_line_no=line.old_line_no,
             new_line_no=line.new_line_no,
         )
         rows_unified.append(row)
-        row_lookup_unified[(line.line_index, side)] = row.row_index
+        row_lookup_unified[(line_index, side)] = row.row_index
 
     if split is not False:
         split_row = RenderedRow(
             mode="split",
-            row_index=len(rows_split),
-            line_index=line.line_index,
+            row_index=row_offset + len(rows_split),
+            line_index=line_index,
             hunk_index=hunk_index,
             kind=shared_kind if shared_kind is not None else _row_kind_for_line(line),
             side="auto",
-            anchor_id=f"line-{line.line_index}",
+            anchor_id=f"line-{line_index}",
             old_line_no=line.old_line_no,
             new_line_no=line.new_line_no,
         )
         rows_split.append(split_row)
-        row_lookup_split[line.line_index] = split_row.row_index
+        row_lookup_split[line_index] = split_row.row_index
 
 
 def build_diff_plan(
     diff: FileDiff,
     *,
     include_rendered_rows: bool = True,
+    assign_line_metadata: bool = True,
 ) -> DiffPlan:
     all_lines: list[DiffLine] = []
     file_paths: set[str] = {diff.filename}
@@ -258,11 +267,12 @@ def build_diff_plan(
             file_change_counts.setdefault(hunk.file_path, [0, 0])
         hunk_start = line_index
         for line in hunk.lines:
-            if line.file_path is None:
-                line.file_path = active_file
+            if assign_line_metadata:
+                if line.file_path is None:
+                    line.file_path = active_file
+                line.line_index = line_index
             line_path = line.file_path or active_file
             file_paths.add(line_path)
-            line.line_index = line_index
             if include_rendered_rows:
                 _append_rendered_rows_for_line(
                     line=line,
@@ -272,6 +282,7 @@ def build_diff_plan(
                     row_lookup_unified=row_lookup_unified,
                     row_lookup_split=row_lookup_split,
                     split=None,
+                    line_index=line_index,
                 )
             all_lines.append(line)
             hunk_index_by_line.append(hunk_index)

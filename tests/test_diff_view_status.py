@@ -15,6 +15,7 @@ from textual.widgets import Static
 from rit.core.diff import parse_patch
 from rit.core.types import DiffLine, FileDiff
 from rit.state.models import PRFile
+from rit.ui.components.combined_diff import build_combined_diff_document
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_render as _render
 from rit.ui.widgets import diff_view as _diff_view
@@ -25,6 +26,10 @@ from rit.ui.widgets.diff_visual import MISSING_SIDE_HATCH_STYLE, MISSING_SIDE_ST
 def _as_plain(widget: Static) -> str:
     content = getattr(widget, "content", "")
     return str(getattr(content, "plain", content))
+
+
+def _has_cursor_cell(widget: Static) -> bool:
+    return any(segment.style and segment.style.reverse for segment in widget.render_line(0))
 
 
 def test_cycle_diff_mode_uses_shared_mode_label_mapping(
@@ -590,6 +595,7 @@ async def test_split_cursor_movement_preserves_selected_pane_across_missing_side
         assert diff_view.cursor_column == 0
         assert added_old_code.has_class("-cursor")
         assert not added_new_code.has_class("-cursor")
+        assert _has_cursor_cell(added_old_code)
 
         await pilot.press("v")
         await pilot.pause()
@@ -610,6 +616,61 @@ async def test_split_cursor_movement_preserves_selected_pane_across_missing_side
         assert diff_view.cursor_column == 3
         assert modified_old_code.has_class("-cursor")
         assert not modified_new_code.has_class("-cursor")
+        assert not _has_cursor_cell(added_old_code)
+
+        await pilot.press("v", "k")
+        await pilot.pause()
+        assert _has_cursor_cell(added_old_code)
+        await pilot.press("j")
+        await pilot.pause()
+        assert not _has_cursor_cell(added_old_code)
+
+
+@pytest.mark.asyncio
+async def test_combined_single_sided_files_keep_cursor_visible() -> None:
+    files = [
+        PRFile(filename="added.py", status="added", patch="@@ -0,0 +1 @@\n+added"),
+        PRFile(
+            filename="deleted.py", status="removed", patch="@@ -1 +0,0 @@\n-deleted"
+        ),
+    ]
+    document = build_combined_diff_document(
+        files,
+        {file.filename: parse_patch(file.patch or "", file.filename) for file in files},
+    )
+    assert document is not None
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="split", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        view = app.query_one(DiffView)
+        await view.show_diff(document.diff.filename, document.diff)
+        view.focus()
+        await pilot.pause()
+        assert view.split is True
+
+        def assert_cursor(text: str) -> None:
+            container = view._get_line_container(view.cursor_line)
+            assert container is not None
+            code = container.query_one(".code-content", Static)
+            content = code._render()
+            assert isinstance(content, Content)
+            assert content.plain == text
+            assert _has_cursor_cell(code)
+            assert view._get_cursor_text() == text
+
+        assert_cursor("added")
+        for filename in ("deleted.py", "added.py"):
+            view.jump_to_line_index(document.file_line_starts[filename], side="RIGHT")
+            await pilot.pause()
+            assert_cursor(filename.removesuffix(".py"))
+            for pane in ("old", "new"):
+                view.active_pane = pane
+                await pilot.pause()
+                assert_cursor(filename.removesuffix(".py"))
 
 
 @pytest.mark.asyncio

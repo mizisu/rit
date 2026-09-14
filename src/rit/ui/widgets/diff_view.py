@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Collection
 from collections.abc import Set as AbstractSet
+from contextlib import nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +17,7 @@ from textual.content import Content
 from textual.message import Message
 from textual.reactive import reactive, var
 from textual.widget import AwaitMount, Widget
-from textual.widgets import Input, Static, TextArea
+from textual.widgets import Input, Static
 
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.state.models import (
@@ -31,6 +32,7 @@ from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets import diff_cursor as _cursor
 from rit.ui.widgets import diff_cursor_side as _cursor_side
 from rit.ui.widgets import diff_cursor_update as _cursor_update
+from rit.ui.widgets import diff_fold_state as _fold_state
 from rit.ui.widgets import diff_folding as _folding
 from rit.ui.widgets import diff_full_file_preview as _full_preview
 from rit.ui.widgets import diff_highlight as _hl
@@ -44,6 +46,7 @@ from rit.ui.widgets import diff_virtual as _virtual
 from rit.ui.widgets import diff_visual_mode as _visual_mode
 from rit.ui.widgets.comment_card import CommentCard
 from rit.ui.widgets.comment_editor import InlineCommentEditor
+from rit.ui.widgets.diff_plan_cache import DiffPlanCache, publish_line_metadata
 from rit.ui.widgets.diff_types import (
     DEFAULT_DIFF_LAYOUT,
     CursorUIState,
@@ -139,8 +142,8 @@ class DiffView(VerticalScroll):
         Binding("n", "next_search_match", "Next Match", show=False),
         Binding("N", "prev_search_match", "Prev Match", show=False),
         Binding("$", "end_of_line", "End of Line", show=False),
-        Binding("}", "next_comment", "Next Comment", show=False),
-        Binding("{", "prev_comment", "Prev Comment", show=False),
+        Binding("}", "next_paragraph", "Paragraphs", key_display="{/}"),
+        Binding("{", "prev_paragraph", "Prev Paragraph", show=False),
         Binding("r", "toggle_resolve", "Resolve", show=False),
         Binding("|", "cycle_diff_mode", "Mode", show=False),
         Binding("z", "center_cursor", "Center", show=False),
@@ -213,6 +216,13 @@ class DiffView(VerticalScroll):
         self._rows_unified_ready = False
         self._rows_split_ready = False
         self._diff_plan_lock = asyncio.Lock()
+        self._diff_plan_cache: DiffPlanCache | None = None
+        self._fold_refresh_lock = asyncio.Lock()
+        self._fold_worker_active = False
+        self._requested_source: FileDiff | None = None
+        self._committing_render_token: int | None = None
+        self._inline_editor_state: _fold_state.EditorState | None = None
+        self._file_editor_state: _fold_state.EditorState | None = None
 
         self._search_query: str = ""
         self._search_request_token: int = 0
@@ -260,6 +270,7 @@ class DiffView(VerticalScroll):
         self._virt = VirtualState()
         self._render_request_token: int = 0
         self._source_diff: FileDiff | None = None
+        self._source_line_count: int = 0
         self._folded_file_paths: frozenset[str] = frozenset()
         self._manually_folded_files: set[str] = set()
         self._expanded_viewed_files: set[str] = set()
@@ -360,11 +371,9 @@ class DiffView(VerticalScroll):
             region = region.shrink(self._content_widget.dock_gutter)
         return region
 
-    # ------------------------------------------------------------------
-    # Watchers
-    # ------------------------------------------------------------------
-
     def watch_mode(self, new_mode: Literal["split", "unified", "auto"]) -> None:
+        if self._suspend_split_state_rerender:
+            return
         _render._update_split_state(self)
         _search.refresh_matches(self)
 
@@ -393,6 +402,8 @@ class DiffView(VerticalScroll):
         )
 
     def on_resize(self) -> None:
+        if self._suspend_split_state_rerender:
+            return
         was_split = self.split
         _render._update_split_state(self)
         if was_split != self.split:
@@ -594,11 +605,7 @@ class DiffView(VerticalScroll):
                 _selection._exit_visual_mode(self)
             self._set_file_header_selection(int(suffix))
             self.focus(scroll_visible=False)
-            self.run_worker(
-                self.toggle_current_file_fold(),
-                exclusive=True,
-                name="diff-toggle-file-fold",
-            )
+            self._request_toggle_file_fold()
             event.stop()
             return
 
@@ -698,16 +705,27 @@ class DiffView(VerticalScroll):
         )
         return line_index, pane, column
 
-    # ------------------------------------------------------------------
-    # Key handling
-    # ------------------------------------------------------------------
-
     _COUNT_MOTION_KEYS = frozenset(
-        {"h", "j", "k", "l", "left", "right", "up", "down", "w", "b", "$", "G"}
+        {
+            "h",
+            "j",
+            "k",
+            "l",
+            "left",
+            "right",
+            "up",
+            "down",
+            "w",
+            "b",
+            "$",
+            "G",
+            "{",
+            "}",
+        }
     )
 
     def on_key(self, event: events.Key) -> None:
-        if self._text_entry_has_focus():
+        if not self.has_focus:
             if event.key == "escape" and self._search_input_has_focus():
                 self._close_search(clear_query=True)
                 event.stop()
@@ -725,7 +743,10 @@ class DiffView(VerticalScroll):
             event.prevent_default()
             return
 
-        if event.key not in self._COUNT_MOTION_KEYS:
+        if (
+            event.key not in self._COUNT_MOTION_KEYS
+            and event.character not in self._COUNT_MOTION_KEYS
+        ):
             self._cursor_ui.pending_count = ""
 
         if event.key == "enter":
@@ -734,22 +755,15 @@ class DiffView(VerticalScroll):
                 event.prevent_default()
                 return
             if self._can_toggle_current_file_fold():
-                self.run_worker(
-                    self.toggle_current_file_fold(),
-                    exclusive=True,
-                    name="diff-toggle-file-fold",
-                )
+                self._request_toggle_file_fold()
                 event.stop()
                 event.prevent_default()
                 return
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if self._text_entry_has_focus():
+        if not self.has_focus:
             return False
         return super().check_action(action, parameters)
-
-    def _text_entry_has_focus(self) -> bool:
-        return isinstance(self.screen.focused, (Input, TextArea))
 
     def _search_input_has_focus(self) -> bool:
         inp = self._search_input_widget
@@ -757,10 +771,6 @@ class DiffView(VerticalScroll):
 
     def _close_search(self, *, clear_query: bool) -> None:
         _search.close_search(self, clear_query=clear_query)
-
-    # ------------------------------------------------------------------
-    # Search handlers
-    # ------------------------------------------------------------------
 
     def action_start_search(self) -> None:
         _search.start_search(self)
@@ -781,10 +791,6 @@ class DiffView(VerticalScroll):
     def action_prev_search_match(self) -> None:
         _search.jump_match(self, -1)
 
-    # ------------------------------------------------------------------
-    # Comment handlers (delegate to _comments)
-    # ------------------------------------------------------------------
-
     def action_next_comment(self) -> None:
         _comments.next_comment(self)
 
@@ -797,10 +803,6 @@ class DiffView(VerticalScroll):
             exclusive=False,
             name="diff-toggle-resolve",
         )
-
-    # ------------------------------------------------------------------
-    # Shared utility methods (used across modules)
-    # ------------------------------------------------------------------
 
     def _current_line(self) -> DiffLine | None:
         if not self._all_lines or not (0 <= self.cursor_line < len(self._all_lines)):
@@ -840,9 +842,15 @@ class DiffView(VerticalScroll):
         line: DiffLine,
         pane: Literal["old", "new"] | None = None,
     ) -> Literal["old", "new", "auto"]:
+        split = self.split
+        hunk_index = self._get_hunk_index_for_line(line.line_index)
+        if self._diff is not None and hunk_index is not None:
+            split = split and not _layout.should_force_unified_for_hunk(
+                self._diff.hunks[hunk_index]
+            )
         return _cursor_side.cursor_side_for_line(
             line,
-            split=self.split,
+            split=split,
             cursor_pane=self.cursor_pane if pane is None else pane,
         )
 
@@ -955,6 +963,17 @@ class DiffView(VerticalScroll):
 
     def _is_file_folded(self, filename: str) -> bool:
         return filename in self._folded_file_paths
+
+    def expand_file(self, filename: str) -> None:
+        """Reveal an explicitly opened file without changing its viewed state."""
+        if not self._should_collapse_file(filename):
+            return
+        self._manually_folded_files.discard(filename)
+        if self._file_viewed_state(filename) == FileViewedState.VIEWED:
+            self._expanded_viewed_files.add(filename)
+        if self.selected_file_header_path() == filename:
+            self._set_file_header_selection(None)
+        self.refresh_viewed_folds()
 
     def collapse_viewed_file(self, filename: str) -> None:
         """Clear a manual expansion so a viewed file folds on refresh."""
@@ -1104,83 +1123,88 @@ class DiffView(VerticalScroll):
         if not preserve_header_position and viewport_offset is None:
             _cursor._scroll_to_file_header(self, hunk_index)
 
-    async def toggle_current_file_fold(self) -> bool:
+    def _toggle_file_fold_intent(self) -> bool:
         filename = self._current_fold_target()
-        if filename is None:
+        if filename is None or self.current_diff is None:
             return False
-        header_selected = self.selected_file_header_path() == filename
-        viewport_offset = (
-            None if header_selected else self._current_cursor_viewport_offset()
-        )
-
-        if filename in self._folded_file_paths:
+        if self._should_collapse_file(filename):
             self._manually_folded_files.discard(filename)
             if self._file_viewed_state(filename) == FileViewedState.VIEWED:
                 self._expanded_viewed_files.add(filename)
         else:
             self._manually_folded_files.add(filename)
             self._expanded_viewed_files.discard(filename)
-
-        source = self._source_diff or self._diff
-        current_file = self.current_file
-        if source is None or current_file is None:
-            return False
-
-        with self.app.batch_update():
-            await self.show_diff(current_file, source, preserve_full_file_state=True)
-            await self._await_content_mounts()
-            self._restore_file_fold_target(
-                filename,
-                preserve_header_position=header_selected,
-                viewport_offset=viewport_offset,
-            )
         return True
 
-    def refresh_viewed_folds(self) -> None:
-        """Refresh folded bodies after the optimistic viewed-state repaint."""
-        source = self._source_diff or self._diff
-        current_file = self.current_file
-        if source is None or current_file is None or not self.is_mounted:
-            return
+    def _request_toggle_file_fold(self) -> None:
+        if self._toggle_file_fold_intent():
+            self._queue_fold_refresh("diff-toggle-file-fold")
 
-        if self._showing_full_file:
-            next_folded_files = frozenset()
-        else:
-            _, next_folded_files = _folding.build_viewed_file_fold_diff(
-                source,
-                is_collapsed=self._should_collapse_file,
-            )
-        if next_folded_files == self._folded_file_paths:
-            return
+    async def toggle_current_file_fold(self) -> bool:
+        """Toggle desired state and reconcile the latest visible projection."""
+        if not self._toggle_file_fold_intent():
+            return False
+        source, filename = self.current_diff, self.current_file
+        if source is None or filename is None:
+            return False
+        await self._refresh_viewed_folds(source, filename)
+        return True
 
-        self.run_worker(
-            self._refresh_viewed_folds(source, current_file),
-            exclusive=True,
-            name="diff-viewed-fold-refresh",
+    def _fold_projection(
+        self, source: FileDiff, *, full_file: bool
+    ) -> tuple[FileDiff, frozenset[str]]:
+        if full_file:
+            return source, frozenset()
+        return _folding.build_viewed_file_fold_diff(
+            source, is_collapsed=self._should_collapse_file
         )
+
+    def refresh_viewed_folds(self) -> None:
+        """Reconcile folded bodies with the latest optimistic viewed state."""
+        self._queue_fold_refresh("diff-viewed-fold-refresh")
+
+    def _queue_fold_refresh(self, name: str) -> None:
+        source, filename = self.current_diff, self.current_file
+        if (
+            source is None
+            or filename is None
+            or not self.is_mounted
+            or self._fold_worker_active
+        ):
+            return
+        self._fold_worker_active = True
+        self.run_worker(
+            self._drain_fold_refresh(source, filename),
+            group="diff-fold",
+            exclusive=False,
+            name=name,
+        )
+
+    async def _drain_fold_refresh(self, source: FileDiff, filename: str) -> None:
+        try:
+            await self._refresh_viewed_folds(source, filename)
+        finally:
+            self._fold_worker_active = False
 
     async def _refresh_viewed_folds(self, source: FileDiff, current_file: str) -> None:
-        target_file = self._current_fold_target()
-        preserve_header_position = self.selected_file_header_path() == target_file
-        viewport_offset = (
-            None if preserve_header_position else self._current_cursor_viewport_offset()
-        )
-        navigation_revision = self._file_navigation_revision
-        with self.app.batch_update():
-            await self.show_diff(current_file, source, preserve_full_file_state=True)
-            await self._await_content_mounts()
-
-            if self._file_navigation_revision != navigation_revision:
-                target_file = self._last_navigated_file
-                preserve_header_position = False
-                viewport_offset = None
-            if target_file is None:
-                return
-            self._restore_file_fold_target(
-                target_file,
-                preserve_header_position=preserve_header_position,
-                viewport_offset=viewport_offset,
-            )
+        async with self._fold_refresh_lock:
+            while self.current_diff is source and self.current_file == current_file:
+                if self._requested_source is not source:
+                    return
+                _, desired = self._fold_projection(
+                    source, full_file=self._showing_full_file
+                )
+                if desired == self._folded_file_paths:
+                    return
+                request_token = self._render_request_token + 1
+                await self.show_diff(
+                    current_file,
+                    source,
+                    preserve_full_file_state=True,
+                    _fold_refresh=True,
+                )
+                if self._render_request_token != request_token:
+                    return
 
     def line_index_for_location(
         self,
@@ -1398,6 +1422,8 @@ class DiffView(VerticalScroll):
         ):
             self._file_comment_editor_widget.open()
         else:
+            self._file_editor_state = None
+            self._file_comment_editor_widget = None
             await self._render_diff()
             self.call_after_refresh(self._focus_file_comment_editor)
         return True
@@ -1566,6 +1592,9 @@ class DiffView(VerticalScroll):
             start_line=self._inline_comment_editor_start_line,
             start_side=self._inline_comment_editor_start_side,
         )
+        self._inline_editor_state = None
+        self._inline_comment_editor_widget = None
+        self._inline_comment_editor_layout_widget = None
         _virtual._rebuild_virtual_layout(self)
         await self._render_diff()
         self.call_after_refresh(self._focus_inline_comment_editor)
@@ -1578,6 +1607,8 @@ class DiffView(VerticalScroll):
         ):
             return
 
+        if self.is_mounted:
+            self.screen.set_focus(self, scroll_visible=False)
         self._inline_comment_editor_line_index = None
         self._inline_comment_editor_target = None
         self._inline_comment_editor_widget = None
@@ -1663,6 +1694,17 @@ class DiffView(VerticalScroll):
             return "new"
         return "auto"
 
+    def _update_placeholder_cursor(
+        self, widget: Static, line: DiffLine, has_cursor: bool
+    ) -> None:
+        side = self._get_line_side_for_widget(line, widget)
+        if side == "auto":
+            return
+        widget.update(
+            _render._split_placeholder_content(self, side=side, has_cursor=has_cursor)
+        )
+        widget.set_class(has_cursor, "-cursor")
+
     def _widget_matches_cursor_side(self, line: DiffLine, widget: Static) -> bool:
         cursor_side = self._cursor_side_for_line(line)
         widget_side = self._get_line_side_for_widget(line, widget)
@@ -1680,10 +1722,6 @@ class DiffView(VerticalScroll):
 
     def _row_vertical_bounds(self, row: RenderedRow) -> tuple[int, int] | None:
         return _cursor._row_vertical_bounds(self, row)
-
-    # ------------------------------------------------------------------
-    # Widget registry
-    # ------------------------------------------------------------------
 
     def _get_line_container(self, line_idx: int):
         if not self._is_line_rendered(line_idx):
@@ -1792,9 +1830,10 @@ class DiffView(VerticalScroll):
                 return widget
         return None
 
-    # ------------------------------------------------------------------
-    # Render orchestration
-    # ------------------------------------------------------------------
+    @property
+    def _render_policy_line_count(self) -> int:
+        """Keep render eligibility stable when folding shrinks the projection."""
+        return max(self._source_line_count, len(self._all_lines))
 
     async def _remount_grouped_visible_window(
         self,
@@ -1818,7 +1857,10 @@ class DiffView(VerticalScroll):
         )
 
     def _is_current_render_request(self, request_token: int) -> bool:
-        return request_token == self._render_request_token
+        return (
+            request_token == self._render_request_token
+            or request_token == self._committing_render_token
+        )
 
     def _finalize_render_state_if_current(self, request_token: int) -> None:
         if not self._is_current_render_request(request_token):
@@ -1832,10 +1874,6 @@ class DiffView(VerticalScroll):
         finally:
             _RENDER_REQUEST_CONTEXT.reset(token)
 
-    # ------------------------------------------------------------------
-    # show_diff — main public entry point
-    # ------------------------------------------------------------------
-
     async def _build_render_plan(
         self,
         diff: FileDiff,
@@ -1844,11 +1882,11 @@ class DiffView(VerticalScroll):
         file: PRFile | None,
         request_token: int,
     ) -> tuple[_plan.DiffPlan, _plan.RenderedRowsPlan, bool] | None:
-        plan = await _finish_to_thread_on_cancel(
-            _plan.build_diff_plan,
-            diff,
-            include_rendered_rows=False,
-        )
+        cache = self._diff_plan_cache
+        if cache is None:
+            cache = self._diff_plan_cache = DiffPlanCache(diff)
+        projection = await _finish_to_thread_on_cancel(cache.prepare, diff)
+        plan = projection.plan
         if not self._is_current_render_request(request_token):
             return None
 
@@ -1866,9 +1904,7 @@ class DiffView(VerticalScroll):
             ):
                 planned_split = False
             rendered_rows = await _finish_to_thread_on_cancel(
-                _plan.build_rendered_rows_from_lines,
-                plan.all_lines,
-                plan.hunk_index_by_line,
+                projection.build_rows,
                 split=planned_split,
             )
             if not self._is_current_render_request(request_token):
@@ -1884,69 +1920,195 @@ class DiffView(VerticalScroll):
         preserve_full_file_state: bool = False,
         _expected_navigation_revision: int | None = None,
         _show_full_file: bool | None = None,
+        _fold_refresh: bool = False,
     ) -> None:
-        selected_header_path = self.selected_file_header_path()
+        """Prepare outside repaint batches and publish the current projection."""
+        if _fold_refresh:
+            if self.current_diff is not diff or self._requested_source is not diff:
+                return
+        else:
+            self._requested_source = diff
         self._render_request_token += 1
         request_token = self._render_request_token
-        self._suspend_split_state_rerender = True
-        self._suspend_scroll_virtual_window_watch = True
-        plan_lock_acquired = False
+        cache: DiffPlanCache | None = None
         try:
-            await self._diff_plan_lock.acquire()
-            plan_lock_acquired = True
-            if not self._is_current_render_request(request_token):
-                return
-            if (
-                _expected_navigation_revision is not None
-                and self._file_navigation_revision != _expected_navigation_revision
-            ):
-                return
-            is_new_file = filename != self.current_file
-            if _show_full_file is not None:
-                showing_full_file = _show_full_file
-            elif preserve_full_file_state:
-                showing_full_file = self._showing_full_file
-            else:
-                showing_full_file = False
-            target_file: PRFile | None = None
-            if self.store:
-                state = self.store.state
-                files_by_filename = getattr(state, "files_by_filename", None)
-                target_file = (
-                    files_by_filename.get(filename)
-                    if files_by_filename is not None
-                    else None
+            async with self._diff_plan_lock:
+                if request_token != self._render_request_token:
+                    return
+                if (
+                    self._diff_plan_cache is None
+                    or self._diff_plan_cache.source is not diff
+                ):
+                    self._diff_plan_cache = DiffPlanCache(diff)
+                cache = self._diff_plan_cache
+                showing_full_file = (
+                    _show_full_file
+                    if _show_full_file is not None
+                    else self._showing_full_file
+                    if preserve_full_file_state
+                    else False
                 )
-                if target_file is None:
+                files_by_filename = (
+                    getattr(self.store.state, "files_by_filename", {})
+                    if self.store
+                    else {}
+                )
+                target_file = files_by_filename.get(filename)
+                if self.store and target_file is None:
                     target_file = next(
-                        (file for file in state.files if file.filename == filename),
+                        (
+                            file
+                            for file in self.store.state.files
+                            if file.filename == filename
+                        ),
                         None,
                     )
+                while request_token == self._render_request_token:
+                    if (
+                        _expected_navigation_revision is not None
+                        and self._file_navigation_revision
+                        != _expected_navigation_revision
+                    ):
+                        return
+                    render_diff, folded_files = self._fold_projection(
+                        diff, full_file=showing_full_file
+                    )
+                    render_plan = await self._build_render_plan(
+                        render_diff,
+                        showing_full_file=showing_full_file,
+                        file=target_file,
+                        request_token=request_token,
+                    )
+                    if render_plan is None:
+                        return
+                    commit = asyncio.create_task(
+                        self._commit_prepared_diff(
+                            filename,
+                            diff,
+                            render_diff,
+                            folded_files,
+                            render_plan,
+                            request_token=request_token,
+                            layout=(self.mode, self.size.width),
+                            showing_full_file=showing_full_file,
+                            target_file=target_file,
+                            preserve_full_file_state=preserve_full_file_state,
+                            show_full_file=_show_full_file,
+                            fold_refresh=_fold_refresh,
+                            navigation_revision=_expected_navigation_revision,
+                        )
+                    )
+                    try:
+                        committed = await asyncio.shield(commit)
+                    except asyncio.CancelledError:
+                        await asyncio.gather(commit, return_exceptions=True)
+                        raise
+                    if committed:
+                        return
+        except asyncio.CancelledError:
+            if cache is not None and self._diff_plan_cache is cache:
+                self._diff_plan_cache = None
+            raise
+        finally:
+            if request_token == self._render_request_token:
+                self._requested_source = self.current_diff
 
-            if showing_full_file:
-                render_diff = diff
-                folded_file_paths = frozenset()
-            else:
-                render_diff, folded_file_paths = _folding.build_viewed_file_fold_diff(
-                    diff,
-                    is_collapsed=self._should_collapse_file,
-                )
-
-            render_plan = await self._build_render_plan(
-                render_diff,
-                showing_full_file=showing_full_file,
-                file=target_file,
-                request_token=request_token,
-            )
-            if render_plan is None:
-                return
-            plan, rendered_rows, planned_split = render_plan
+    async def _commit_prepared_diff(
+        self,
+        filename: str,
+        source: FileDiff,
+        render_diff: FileDiff,
+        folded_files: frozenset[str],
+        render_plan: tuple[_plan.DiffPlan, _plan.RenderedRowsPlan, bool],
+        *,
+        request_token: int,
+        layout: tuple[str, int],
+        showing_full_file: bool,
+        target_file: PRFile | None,
+        preserve_full_file_state: bool,
+        show_full_file: bool | None,
+        fold_refresh: bool,
+        navigation_revision: int | None,
+    ) -> bool:
+        async with self.batch() if self.is_mounted else self.lock:
+            if request_token != self._render_request_token:
+                return False
             if (
-                _expected_navigation_revision is not None
-                and self._file_navigation_revision != _expected_navigation_revision
+                navigation_revision is not None
+                and self._file_navigation_revision != navigation_revision
             ):
-                return
+                return False
+            _, desired = self._fold_projection(source, full_file=showing_full_file)
+            if layout != (self.mode, self.size.width) or desired != folded_files:
+                return False
+            cache = self._diff_plan_cache
+            if (
+                cache is None
+                or cache.source is not source
+                or not cache.source_structure_matches()
+            ):
+                return False
+            state = _fold_state.FoldState.capture(self) if fold_refresh else None
+            allow_retained_prefix = fold_refresh and not cache.has_source_changes
+            if cache.has_source_changes:
+                self._hl_state.request_token += 1
+                self._hl_state.cache.clear()
+                cache.has_source_changes = False
+            self._committing_render_token = request_token
+            self._suspend_split_state_rerender = True
+            self._suspend_scroll_virtual_window_watch = True
+            try:
+                await self._apply_render_plan(
+                    filename,
+                    source,
+                    render_diff,
+                    folded_files,
+                    render_plan,
+                    request_token=request_token,
+                    target_file=target_file,
+                    preserve_full_file_state=preserve_full_file_state,
+                    _show_full_file=show_full_file,
+                    fold_state=state,
+                    allow_retained_prefix=allow_retained_prefix,
+                )
+            finally:
+                self._committing_render_token = None
+                self._suspend_split_state_rerender = False
+                self._suspend_scroll_virtual_window_watch = False
+            return layout == (self.mode, self.size.width)
 
+    async def _apply_render_plan(
+        self,
+        filename: str,
+        diff: FileDiff,
+        render_diff: FileDiff,
+        folded_file_paths: frozenset[str],
+        render_plan: tuple[_plan.DiffPlan, _plan.RenderedRowsPlan, bool],
+        *,
+        request_token: int,
+        target_file: PRFile | None,
+        preserve_full_file_state: bool,
+        _show_full_file: bool | None,
+        fold_state: _fold_state.FoldState | None,
+        allow_retained_prefix: bool,
+    ) -> None:
+        with self.app.batch_update() if self.is_mounted else nullcontext():
+            is_new_file = filename != self.current_file
+            selected_header_path = self.selected_file_header_path()
+            plan, rendered_rows, planned_split = render_plan
+            retained_prefix = (
+                _render._capture_retained_render_prefix(
+                    self,
+                    source=diff,
+                    render_diff=render_diff,
+                    folded_file_paths=folded_file_paths,
+                    plan=plan,
+                    planned_split=planned_split,
+                )
+                if allow_retained_prefix
+                else None
+            )
+            publish_line_metadata(render_diff)
             if not preserve_full_file_state:
                 self._showing_full_file = False
                 self._saved_diff = None
@@ -1955,6 +2117,8 @@ class DiffView(VerticalScroll):
             elif _show_full_file is not None:
                 self._showing_full_file = _show_full_file
             if is_new_file:
+                self._inline_editor_state = None
+                self._file_editor_state = None
                 self._inline_comment_editor_line_index = None
                 self._inline_comment_editor_target = None
                 self._inline_comment_editor_widget = None
@@ -1974,6 +2138,7 @@ class DiffView(VerticalScroll):
 
             self.current_file = filename
             self._source_diff = diff
+            self._source_line_count = sum(len(hunk.lines) for hunk in diff.hunks)
             self._diff = diff
             self.current_hunk_index = 0
 
@@ -2093,11 +2258,31 @@ class DiffView(VerticalScroll):
                 self._row_lookup_unified = rendered_rows.row_lookup_unified
                 self._rows_unified_ready = True
 
+            if fold_state is not None:
+                fold_state.restore_model(self)
+            if self._inline_comment_editor_target is not None:
+                editor_line = self.line_index_for_location(
+                    *self._inline_comment_editor_target
+                )
+                self._inline_comment_editor_line_index = (
+                    editor_line
+                    if editor_line is not None
+                    and not self._all_lines[editor_line].is_folded_file_placeholder
+                    else None
+                )
             _comments.build_comment_map(self)
             _render._update_split_state(self)
             _render._ensure_rendered_rows_for_mode(self, split=self.split)
             _virtual._rebuild_virtual_layout(self)
+            if fold_state is not None:
+                fold_state.restore_scroll(self)
             _virtual._configure_virtual_window(self)
+            if fold_state is not None and self._virt.active:
+                viewport_line = fold_state.viewport.resolve(self)
+                if viewport_line is not None:
+                    _virtual._set_virtual_window_around(
+                        self, viewport_line + self.scrollable_content_region.height // 2
+                    )
 
             if _hl._has_highlighted_diff(self, diff):
                 _hl._highlight_diff_sync(self, diff)
@@ -2107,13 +2292,41 @@ class DiffView(VerticalScroll):
                 _hl._clear_highlighted_content(self, diff)
                 _hl._queue_highlight_diff(self, filename, diff)
 
-            await self._run_render_diff_for_request(request_token)
-        finally:
-            if plan_lock_acquired:
-                self._diff_plan_lock.release()
-            if self._is_current_render_request(request_token):
-                self._suspend_split_state_rerender = False
-                self._suspend_scroll_virtual_window_watch = False
+            navigation_revision = self._file_navigation_revision
+            used_retained_prefix = (
+                retained_prefix is not None
+                and await _render._render_diff_from_retained_prefix(
+                    self,
+                    retained_prefix,
+                    request_token=request_token,
+                )
+            )
+            if not used_retained_prefix:
+                await self._run_render_diff_for_request(request_token)
+            if (
+                fold_state is not None
+                and self._file_navigation_revision == navigation_revision
+            ):
+                # Mounts finish before layout; resolve anchors before the first paint.
+                self._reflow_fold_layout()
+                fold_state.restore_scroll(self, mounted=True)
+                self._reflow_fold_layout()
+
+    def _reflow_fold_layout(self) -> None:
+        """Settle retained container geometry while fold painting is paused."""
+        containers = [
+            widget for widget in (self._content_widget, self) if widget is not None
+        ]
+        # Flush deferred scrollbar layout without letting oscillation block input.
+        for _ in range(4):
+            offset = self.scroll_offset
+            for container in containers:
+                container._check_refresh()
+            self.screen._refresh_layout()
+            if self.scroll_offset == offset and not any(
+                container._layout_required for container in containers
+            ):
+                break
 
     async def prepare(self) -> None:
         if self._diff:
@@ -2136,9 +2349,7 @@ class DiffView(VerticalScroll):
         self._hl_state.request_token += 1
         self._hl_state.queued_window = None
         self._hl_state.queued_full = None
-        self._hl_state.cache = {
-            cache_key for cache_key in self._hl_state.cache if cache_key[0] != id(diff)
-        }
+        self._hl_state.cache.clear()
         _hl._clear_highlighted_content(self, diff)
 
         if not _hl._use_windowed_highlight_strategy(self, diff):
@@ -2156,10 +2367,6 @@ class DiffView(VerticalScroll):
             exclusive=True,
             name="diff-theme-rerender",
         )
-
-    # ------------------------------------------------------------------
-    # Full-file toggle
-    # ------------------------------------------------------------------
 
     @property
     def view_revision(self) -> tuple[int, int]:
@@ -2423,12 +2630,6 @@ class DiffView(VerticalScroll):
         label = _DIFF_MODE_LABELS[new_mode]
         self.post_message(Flash(f"Diff mode: {label}", style="success", duration=1.5))
 
-    # ==================================================================
-    # Wrapper methods — delegate to extracted modules
-    # ==================================================================
-
-    # --- Cursor / scroll / word motion (_cursor) ---
-
     def action_scroll_down(self) -> None:
         _cursor._scroll_down(self)
 
@@ -2477,6 +2678,12 @@ class DiffView(VerticalScroll):
     def action_end_word(self) -> None:
         _cursor._end_word(self)
 
+    def action_next_paragraph(self) -> None:
+        _cursor._paragraph(self, 1)
+
+    def action_prev_paragraph(self) -> None:
+        _cursor._paragraph(self, -1)
+
     def action_center_cursor(self) -> None:
         _cursor._center_cursor(self)
 
@@ -2497,8 +2704,6 @@ class DiffView(VerticalScroll):
 
     def _scroll_to_cursor_horizontal(self) -> None:
         _cursor._scroll_to_cursor_horizontal(self)
-
-    # --- Visual mode / selection (_selection) ---
 
     def action_toggle_visual(self) -> None:
         _selection._toggle_visual(self)
@@ -2538,16 +2743,61 @@ class DiffView(VerticalScroll):
     def _build_code_content_with_selection(self, *args, **kwargs) -> Content:
         return _selection._build_code_content_with_selection(self, *args, **kwargs)
 
-    # --- Rendering (_render) ---
-
     def _update_split_state(self) -> None:
         _render._update_split_state(self)
 
     def _rebuild_rendered_rows(self) -> None:
         _render._rebuild_rendered_rows(self)
 
+    def _capture_comment_editors(self) -> None:
+        if self._inline_comment_editor_target is None:
+            self._inline_editor_state = None
+        elif (
+            self._inline_comment_editor_widget is not None
+            and self._inline_comment_editor_widget.is_mounted
+        ):
+            self._inline_editor_state = _fold_state.EditorState.capture(
+                self, self._inline_comment_editor_widget, self._inline_editor_state
+            )
+        if self._file_comment_editor_target is None:
+            self._file_editor_state = None
+        elif (
+            self._file_comment_editor_widget is not None
+            and self._file_comment_editor_widget.is_mounted
+        ):
+            self._file_editor_state = _fold_state.EditorState.capture(
+                self, self._file_comment_editor_widget, self._file_editor_state
+            )
+        if any(
+            state is not None and state.focus_id is not None
+            for state in (self._inline_editor_state, self._file_editor_state)
+        ):
+            # Unmounting a focused editor otherwise scrolls an ancestor to its origin.
+            self.screen.set_focus(self, scroll_visible=False)
+
+    def _restore_comment_editors(self) -> None:
+        for state, editor in (
+            (self._inline_editor_state, self._inline_comment_editor_widget),
+            (self._file_editor_state, self._file_comment_editor_widget),
+        ):
+            if state is None:
+                continue
+            if editor is not None and editor.is_mounted:
+                state.restore(self, editor)
+            else:
+                state.focus_id = None
+
     async def _render_diff(self) -> None:
-        await _render._render_diff(self)
+        async with self.batch():
+            request_token = _RENDER_REQUEST_CONTEXT.get()
+            if request_token is not None and not self._is_current_render_request(
+                request_token
+            ):
+                return
+            self._capture_comment_editors()
+            await _render._render_diff(self)
+            await self._await_content_mounts()
+            self._restore_comment_editors()
 
     def _create_file_header_widget(self, *args, **kwargs):
         return _render._create_file_header_widget(self, *args, **kwargs)

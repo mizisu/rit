@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping, Sequence
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from rich.text import Text
@@ -27,6 +28,7 @@ from rit.ui.widgets import diff_prefix as _prefix
 from rit.ui.widgets import diff_search as _search
 from rit.ui.widgets import diff_styles as _styles
 from rit.ui.widgets import diff_virtual as _virtual
+from rit.ui.widgets.diff_types import SplitDiffBlock
 from rit.ui.widgets.diff_visual import (
     MISSING_SIDE_HATCH_STYLE,
     SyncedCodeScroll,
@@ -46,11 +48,6 @@ def _get_render_request_context() -> ContextVar[int | None]:
     from rit.ui.widgets.diff_view import _RENDER_REQUEST_CONTEXT
 
     return _RENDER_REQUEST_CONTEXT
-
-
-# ---------------------------------------------------------------------------
-# Split / layout state
-# ---------------------------------------------------------------------------
 
 
 def _should_force_unified_for_current_file(view: DiffView) -> bool:
@@ -120,11 +117,6 @@ def _update_split_state(view: DiffView) -> None:
         )
 
 
-# ---------------------------------------------------------------------------
-# Row building
-# ---------------------------------------------------------------------------
-
-
 def _rebuild_rendered_rows(view: DiffView) -> None:
     rows = _rendered_rows_for_mode(view)
     view._rows_unified = rows.rows_unified
@@ -165,11 +157,6 @@ def _rendered_rows_for_mode(
             split=split,
         )
     return _plan.build_rendered_rows(view._diff, split=split)
-
-
-# ---------------------------------------------------------------------------
-# Layout metrics
-# ---------------------------------------------------------------------------
 
 
 def _comparison_heavy_ratio(view: DiffView) -> float:
@@ -258,9 +245,283 @@ def _should_render_hunk_header(
     )
 
 
-# ---------------------------------------------------------------------------
-# Render orchestration
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class RetainedRenderPrefix:
+    """Mounted split blocks before a changed fold boundary."""
+
+    boundary_hunk: int
+    prefix_children: tuple[Widget, ...]
+    suffix_children: tuple[Widget, ...]
+    split_scroll_widgets_by_line: dict[int, tuple[Widget, ...]]
+    split_blocks_by_line: dict[int, SplitDiffBlock]
+    line_widgets_by_index: dict[int, Widget]
+    file_header_widgets: dict[int, Widget]
+    hunk_header_widgets: dict[int, Widget]
+
+
+def _clear_mounted_render_state(view: DiffView) -> None:
+    view._code_widgets_by_line = {}
+    view._split_scroll_widgets_by_line = {}
+    view._unified_blocks_by_line = {}
+    view._split_blocks_by_line = {}
+    view._line_widgets_by_index = {}
+    view._comment_widgets_by_line = {}
+    view._comment_layout_widgets_by_line = {}
+    view._pending_comment_widgets_by_line = {}
+    view._pending_comment_layout_widgets_by_line = {}
+    view._pending_file_comment_widgets_by_hunk = {}
+    view._file_comment_widgets_by_hunk = {}
+    view._file_comment_annotation_widgets_by_hunk = {}
+    view._inline_comment_editor_widget = None
+    view._inline_comment_editor_layout_widget = None
+    view._file_comment_editor_widget = None
+    view._file_comment_editor_mounted_hunk_index = None
+    view._row_anchor_widgets = {}
+    view._file_header_widgets = {}
+    view._hunk_header_widgets = {}
+    view._virt.top_buffer = None
+    view._virt.bottom_buffer = None
+    view._center_padding_widget = None
+    view._center_padding_height = 0
+    view._cursor_ui.suspend_pane_watch = False
+    view._visual_selection_specs = {}
+
+
+def _hunk_paths(diff: FileDiff) -> list[str]:
+    active_path = diff.filename
+    paths: list[str] = []
+    for hunk in diff.hunks:
+        if hunk.starts_file and hunk.file_path:
+            active_path = hunk.file_path
+        paths.append(hunk.file_path or active_path)
+    return paths
+
+
+def _same_retained_prefix_line(old: DiffLine, new: DiffLine) -> bool:
+    return old is new or (
+        _folding.is_folded_placeholder_line(old)
+        and _folding.is_folded_placeholder_line(new)
+        and old.file_path == new.file_path
+    )
+
+
+def _has_annotations_for_paths(view: DiffView, paths: frozenset[str]) -> bool:
+    if (
+        view._inline_comment_editor_target is not None
+        or view._file_comment_editor_target is not None
+        or view._collapsed_pending_drafts
+    ):
+        return True
+    store = view.store
+    if store is None:
+        return False
+    state = store.state
+    return any(
+        getattr(annotation, "path", None) in paths
+        for annotation in (
+            *state.review_threads,
+            *state.pending_review_comments,
+        )
+    )
+
+
+def _capture_retained_render_prefix(
+    view: DiffView,
+    *,
+    source: FileDiff,
+    render_diff: FileDiff,
+    folded_file_paths: frozenset[str],
+    plan: _plan.DiffPlan,
+    planned_split: bool,
+) -> RetainedRenderPrefix | None:
+    """Capture an index-stable prefix for a split fold suffix rebuild."""
+    current = view._diff
+    content = view._content_widget
+    changed_paths = view._folded_file_paths ^ folded_file_paths
+    if (
+        current is None
+        or content is None
+        or view._source_diff is not source
+        or view._showing_full_file
+        or view._virt.active
+        or not view.split
+        or not planned_split
+        or not changed_paths
+        or view.visual_mode
+        or view._search_query
+        or _has_annotations_for_paths(view, frozenset(_hunk_paths(source)))
+        or plan.code_widths
+        != (
+            view._unified_code_width,
+            view._split_old_code_width,
+            view._split_new_code_width,
+        )
+        or plan.old_line_number_width != view._old_line_number_width_value
+        or plan.new_line_number_width != view._new_line_number_width_value
+    ):
+        return None
+
+    old_paths = _hunk_paths(current)
+    new_paths = _hunk_paths(render_diff)
+    old_boundary = next(
+        (index for index, path in enumerate(old_paths) if path in changed_paths), None
+    )
+    new_boundary = next(
+        (index for index, path in enumerate(new_paths) if path in changed_paths), None
+    )
+    if (
+        old_boundary is None
+        or old_boundary != new_boundary
+        or old_boundary == 0
+        or old_boundary >= len(view._hunk_start_line_indices)
+        or old_boundary >= len(plan.hunk_start_line_indices)
+        or not current.hunks[old_boundary].starts_file
+        or not render_diff.hunks[old_boundary].starts_file
+    ):
+        return None
+
+    for old_hunk, new_hunk in zip(
+        current.hunks[:old_boundary],
+        render_diff.hunks[:old_boundary],
+        strict=True,
+    ):
+        if old_hunk is new_hunk:
+            continue
+        if not (
+            len(old_hunk.lines) == len(new_hunk.lines) == 1
+            and _same_retained_prefix_line(old_hunk.lines[0], new_hunk.lines[0])
+        ):
+            return None
+
+    old_line_boundary = view._hunk_start_line_indices[old_boundary]
+    new_line_boundary = plan.hunk_start_line_indices[old_boundary]
+    if old_line_boundary != new_line_boundary or not all(
+        _same_retained_prefix_line(old, new)
+        for old, new in zip(
+            view._all_lines[:old_line_boundary],
+            plan.all_lines[:new_line_boundary],
+            strict=True,
+        )
+    ):
+        return None
+
+    boundary_widget = view._file_header_widgets.get(old_boundary)
+    if boundary_widget is None or boundary_widget.parent is not content:
+        return None
+    children = tuple(content.children)
+    try:
+        child_boundary = children.index(boundary_widget)
+    except ValueError:
+        return None
+    if child_boundary == 0:
+        return None
+
+    line_widgets = {
+        index: widget
+        for index, widget in view._line_widgets_by_index.items()
+        if index < old_line_boundary
+    }
+    for index, line in enumerate(view._all_lines[:old_line_boundary]):
+        if _folding.is_folded_placeholder_line(line):
+            continue
+        widget = line_widgets.get(index)
+        if not isinstance(widget, SplitDiffBlock) or widget.parent is not content:
+            return None
+        if any(line_index >= old_line_boundary for line_index in widget.line_indices):
+            return None
+
+    split_blocks = {
+        index: block
+        for index, block in view._split_blocks_by_line.items()
+        if index < old_line_boundary
+    }
+    split_scroll = {
+        index: widgets
+        for index, widgets in view._split_scroll_widgets_by_line.items()
+        if index < old_line_boundary
+    }
+    file_headers = {
+        index: widget
+        for index, widget in view._file_header_widgets.items()
+        if index < old_boundary
+    }
+    hunk_headers = {
+        index: widget
+        for index, widget in view._hunk_header_widgets.items()
+        if index < old_boundary
+    }
+    prefix_children = children[:child_boundary]
+    known_children = {
+        *file_headers.values(),
+        *hunk_headers.values(),
+        *line_widgets.values(),
+    }
+    if (
+        set(prefix_children) != known_children
+        or view._code_widgets_by_line
+        or view._row_anchor_widgets
+        or view._unified_blocks_by_line
+    ):
+        return None
+
+    return RetainedRenderPrefix(
+        boundary_hunk=old_boundary,
+        prefix_children=prefix_children,
+        suffix_children=children[child_boundary:],
+        split_scroll_widgets_by_line=split_scroll,
+        split_blocks_by_line=split_blocks,
+        line_widgets_by_index=line_widgets,
+        file_header_widgets=file_headers,
+        hunk_header_widgets=hunk_headers,
+    )
+
+
+async def _render_diff_from_retained_prefix(
+    view: DiffView,
+    retained: RetainedRenderPrefix,
+    *,
+    request_token: int,
+) -> bool:
+    """Keep the stable prefix and rebuild only the changed fold suffix."""
+    content = view._content_widget
+    if (
+        content is None
+        or tuple(content.children)
+        != retained.prefix_children + retained.suffix_children
+        or not view._is_current_render_request(request_token)
+    ):
+        return False
+
+    with view.app.batch_update():
+        await content.remove_children(retained.suffix_children)
+        if not view._is_current_render_request(request_token):
+            return False
+
+        _clear_mounted_render_state(view)
+        view._split_blocks_by_line = dict(retained.split_blocks_by_line)
+        view._line_widgets_by_index = dict(retained.line_widgets_by_index)
+        view._split_scroll_widgets_by_line = dict(retained.split_scroll_widgets_by_line)
+        view._file_header_widgets = dict(retained.file_header_widgets)
+        view._hunk_header_widgets = dict(retained.hunk_header_widgets)
+
+        if view._diff is None:
+            return False
+        for hunk_index in range(retained.boundary_hunk, len(view._diff.hunks)):
+            _render_hunk(
+                view,
+                content,
+                view._diff.hunks[hunk_index],
+                hunk_index=hunk_index,
+                show_header=True,
+            )
+        view._virt.rendered_start = 0
+        view._virt.rendered_end = len(view._all_lines) - 1
+
+    await view._await_content_mounts()
+    view.call_after_refresh(
+        lambda: view._finalize_render_state_if_current(request_token)
+    )
+    return True
 
 
 async def _render_diff(view: DiffView) -> None:
@@ -279,30 +540,7 @@ async def _render_diff(view: DiffView) -> None:
         ):
             return
 
-        view._code_widgets_by_line = {}
-        view._unified_blocks_by_line = {}
-        view._split_blocks_by_line = {}
-        view._line_widgets_by_index = {}
-        view._comment_widgets_by_line = {}
-        view._comment_layout_widgets_by_line = {}
-        view._pending_comment_widgets_by_line = {}
-        view._pending_comment_layout_widgets_by_line = {}
-        view._pending_file_comment_widgets_by_hunk = {}
-        view._file_comment_widgets_by_hunk = {}
-        view._file_comment_annotation_widgets_by_hunk = {}
-        view._inline_comment_editor_widget = None
-        view._inline_comment_editor_layout_widget = None
-        view._file_comment_editor_widget = None
-        view._file_comment_editor_mounted_hunk_index = None
-        view._row_anchor_widgets = {}
-        view._file_header_widgets = {}
-        view._hunk_header_widgets = {}
-        view._virt.top_buffer = None
-        view._virt.bottom_buffer = None
-        view._center_padding_widget = None
-        view._center_padding_height = 0
-        view._cursor_ui.suspend_pane_watch = False
-        view._visual_selection_specs = {}
+        _clear_mounted_render_state(view)
 
         if not view._diff or not view._diff.hunks:
             new_content.mount(Static("No changes in this file", classes="placeholder"))
@@ -669,6 +907,7 @@ def _split_placeholder_content(
     view: DiffView,
     *,
     side: Literal["old", "new"],
+    has_cursor: bool = False,
 ) -> Content:
     side_width = (
         view._split_old_code_width if side == "old" else view._split_new_code_width
@@ -677,10 +916,16 @@ def _split_placeholder_content(
         side_code_width=side_width,
         viewport_width=view.size.width,
     )
-    return Content.styled(
+    content = Content.styled(
         missing_side_hatch_text(width),
         MISSING_SIDE_HATCH_STYLE,
     )
+    if has_cursor:
+        content = content.stylize(
+            _blocks._cursor_block_line_style(MISSING_SIDE_HATCH_STYLE)
+        )
+        content = content.stylize("$text reverse", 0, 1)
+    return content
 
 
 def _build_unified_prefix_content(view: DiffView, line: DiffLine) -> Content:
@@ -726,11 +971,6 @@ def _split_line_style(
         line,
         side=side,
     )
-
-
-# ---------------------------------------------------------------------------
-# Mount helpers
-# ---------------------------------------------------------------------------
 
 
 def _code_widths_for_layout(view: DiffView) -> tuple[int, int, int]:
@@ -1060,11 +1300,6 @@ def _finalize_render_state(view: DiffView) -> None:
             view.post_message(view.CrossFileComment(direction=direction))
 
 
-# ---------------------------------------------------------------------------
-# Line rendering — unified
-# ---------------------------------------------------------------------------
-
-
 def _unified_code_classes(
     line: DiffLine,
     *,
@@ -1143,11 +1378,6 @@ def _render_line_unified(view: DiffView, line: DiffLine) -> Horizontal | Vertica
     view._register_row_anchor_widget(f"line-{line.line_index}", container)
     view._register_code_widgets(line.line_index, code_widget)
     return container
-
-
-# ---------------------------------------------------------------------------
-# Line rendering — split
-# ---------------------------------------------------------------------------
 
 
 def _build_split_prefix(
@@ -1229,17 +1459,17 @@ def _build_split_code_content(
     side: Literal["old", "new"],
     placeholder_when_missing: bool,
 ) -> Content | None:
-    has_side = line.has_old_side if side == "old" else line.has_new_side
-    if not has_side:
-        if placeholder_when_missing:
-            return _split_placeholder_content(view, side=side)
-        return None
-
-    spec = _selection_spec_for_rendered_line(view, line.line_index)
     has_cursor = (
         view._diff_line_cursor_active(line.line_index)
         and view._cursor_side_for_line(line) == side
     )
+    has_side = line.has_old_side if side == "old" else line.has_new_side
+    if not has_side:
+        if placeholder_when_missing or has_cursor:
+            return _split_placeholder_content(view, side=side, has_cursor=has_cursor)
+        return None
+
+    spec = _selection_spec_for_rendered_line(view, line.line_index)
     cursor_col = view.cursor_column if has_cursor else None
 
     if spec is not None:
@@ -1369,11 +1599,6 @@ def _render_line_split(
     return container
 
 
-# ---------------------------------------------------------------------------
-# Line rendering — modified (unified only)
-# ---------------------------------------------------------------------------
-
-
 def _build_unified_modified_prefix_content(
     view: DiffView,
     line: DiffLine,
@@ -1454,11 +1679,6 @@ def _render_modified_line(view: DiffView, line: DiffLine) -> Vertical:
     return container
 
 
-# ---------------------------------------------------------------------------
-# Code content helpers
-# ---------------------------------------------------------------------------
-
-
 def _compute_base_code_content(
     view: DiffView,
     line: DiffLine,
@@ -1515,11 +1735,6 @@ def _base_code_content(
     return cached
 
 
-# ---------------------------------------------------------------------------
-# Cursor display
-# ---------------------------------------------------------------------------
-
-
 def _update_non_block_line_prefix_cursor(view: DiffView, line_idx: int) -> None:
     container = view._get_line_container(line_idx)
     if container is None:
@@ -1553,10 +1768,7 @@ def _update_line_cursor(view: DiffView, line_idx: int) -> None:
     for code_widget in code_widgets:
         show_cursor = has_cursor and view._widget_matches_cursor_side(line, code_widget)
         if code_widget.has_class("-placeholder"):
-            if show_cursor:
-                code_widget.add_class("-cursor")
-            else:
-                code_widget.remove_class("-cursor")
+            view._update_placeholder_cursor(code_widget, line, show_cursor)
             continue
 
         side = view._get_line_side_for_widget(line, code_widget)
@@ -1617,11 +1829,6 @@ def _build_code_content_with_cursor(
         has_cursor=has_cursor,
         cursor_col=cursor_col,
     )
-
-
-# ---------------------------------------------------------------------------
-# Full-file diff builder (static)
-# ---------------------------------------------------------------------------
 
 
 def _build_full_file_diff(

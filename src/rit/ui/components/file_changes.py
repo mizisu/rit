@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal
 
 from textual import getters, on
 from textual.app import ComposeResult
@@ -78,7 +78,7 @@ class FileChanges(Horizontal):
     }
     """
 
-    BINDINGS = [
+    BINDINGS: ClassVar[list[Binding]] = [
         Binding(">", "expand_sidebar", "Expand Sidebar", show=False),
         Binding("<", "collapse_sidebar", "Collapse Sidebar", show=False),
         Binding("[", "prev_file", "Prev File", show=False),
@@ -110,7 +110,10 @@ class FileChanges(Horizontal):
         self.store = store
         self._drag_delta = 0
         self._is_dragging = False
-        self._queued_file_render: tuple[str, FileDiff | None, bool, bool] | None = None
+        self._queued_file_render: (
+            tuple[int, str, FileDiff | None, bool, bool] | None
+        ) = None
+        self._file_render_request_revision = 0
         self._file_render_worker_active = False
         self._render_session = FilesRenderSession()
         self._combined_render_worker_active = False
@@ -126,6 +129,11 @@ class FileChanges(Horizontal):
         signal = getattr(self.app, "settings_changed_signal", None)
         if signal is not None:
             signal.subscribe(self, self._on_settings_changed)
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if self.diff_view.has_focus_within and not self.diff_view.has_focus:
+            return False
+        return super().check_action(action, parameters)
 
     def on_unmount(self) -> None:
         signal = getattr(self.app, "settings_changed_signal", None)
@@ -232,6 +240,8 @@ class FileChanges(Horizontal):
         if not filename:
             return
 
+        self.diff_view.expand_file(filename)
+        self._render_session.clear_pending_location_jump()
         if self._jump_to_combined_file(
             filename,
             focus_diff=focus_diff,
@@ -477,17 +487,18 @@ class FileChanges(Horizontal):
             self._jump_to_diff_line(line_index, side=side, focus_diff=focus_diff)
             return True
 
+        render_revision = self._queue_file_render_request(
+            filename,
+            None,
+            focus_diff=False,
+            sync_tree_selection=True,
+        )
         self._render_session.queue_location_jump(
             filename,
             line,
             side,
             focus_diff=focus_diff,
-        )
-        self._queue_file_render_request(
-            filename,
-            None,
-            focus_diff=False,
-            sync_tree_selection=True,
+            render_revision=render_revision,
         )
         return True
 
@@ -541,16 +552,21 @@ class FileChanges(Horizontal):
         )
         return True
 
-    def _sync_combined_render_target(self, *, focus_diff: bool) -> None:
+    def _sync_combined_render_target(
+        self, *, focus_diff: bool, navigation_revision: int
+    ) -> None:
         if self._apply_pending_location_jump(COMBINED_DIFF_FILENAME):
             return
         if self._apply_pending_combined_file_jump():
+            return
+        if self.diff_view.view_revision[1] != navigation_revision:
             return
 
         selected_file = self.store.state.selected_file
         if selected_file:
             self.file_tree.select_file(selected_file, emit_message=False)
-            self._jump_to_combined_file(selected_file, focus_diff=focus_diff)
+            if self.current_diff_file_target() != selected_file:
+                self._jump_to_combined_file(selected_file, focus_diff=focus_diff)
 
     def _queue_file_render_request(
         self,
@@ -559,15 +575,17 @@ class FileChanges(Horizontal):
         *,
         focus_diff: bool,
         sync_tree_selection: bool,
-    ) -> None:
+    ) -> int:
+        self._file_render_request_revision += 1
         self._queued_file_render = (
+            self._file_render_request_revision,
             filename,
             diff,
             focus_diff,
             sync_tree_selection,
         )
         if self._file_render_worker_active:
-            return
+            return self._file_render_request_revision
 
         self._file_render_worker_active = True
         self.run_worker(
@@ -575,6 +593,7 @@ class FileChanges(Horizontal):
             exclusive=False,
             name="file-diff-render",
         )
+        return self._file_render_request_revision
 
     async def _drain_queued_file_render_requests(self) -> None:
         while True:
@@ -587,7 +606,13 @@ class FileChanges(Horizontal):
                 continue
 
             self._queued_file_render = None
-            filename, diff, focus_diff, sync_tree_selection = request
+            (
+                request_revision,
+                filename,
+                diff,
+                focus_diff,
+                sync_tree_selection,
+            ) = request
             if filename != COMBINED_DIFF_FILENAME and self._queue_combined_file_jump(
                 filename,
                 focus_diff=focus_diff,
@@ -600,13 +625,21 @@ class FileChanges(Horizontal):
             if diff is None:
                 diff = await self.store.get_file_diff_async(filename)
             if diff is None:
+                self._render_session.discard_pending_location_jump(request_revision)
                 continue
-            if self._queued_file_render is not None:
+            if request_revision != self._file_render_request_revision:
+                self._render_session.discard_pending_location_jump(request_revision)
                 continue
 
+            navigation_revision = self.diff_view.view_revision[1]
             await self.diff_view.show_diff(filename, diff)
+            if request_revision != self._file_render_request_revision:
+                self._render_session.discard_pending_location_jump(request_revision)
+                continue
             if filename == COMBINED_DIFF_FILENAME:
-                self._sync_combined_render_target(focus_diff=focus_diff)
+                self._sync_combined_render_target(
+                    focus_diff=focus_diff, navigation_revision=navigation_revision
+                )
             else:
                 self._apply_pending_location_jump(filename)
 
@@ -631,6 +664,7 @@ class FileChanges(Horizontal):
     def on_store_file_selected(self, event: PRStore.FileSelected) -> None:
         """Handle file selection from store (external selection)."""
         event.stop()
+        self._render_session.clear_pending_location_jump()
         if self._jump_to_combined_file(event.filename, focus_diff=False):
             self.file_tree.select_file(event.filename, emit_message=False)
             return

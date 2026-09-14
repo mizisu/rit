@@ -19,11 +19,6 @@ def sample_files() -> list[PRFile]:
     ]
 
 
-# ---------------------------------------------------------------------------
-# FileViewedState enum
-# ---------------------------------------------------------------------------
-
-
 def test_file_viewed_state_values() -> None:
     assert FileViewedState("UNVIEWED") == FileViewedState.UNVIEWED
     assert FileViewedState("VIEWED") == FileViewedState.VIEWED
@@ -33,11 +28,6 @@ def test_file_viewed_state_values() -> None:
 def test_prfile_default_viewed_state() -> None:
     f = PRFile(filename="test.py")
     assert f.viewer_viewed_state == FileViewedState.UNVIEWED
-
-
-# ---------------------------------------------------------------------------
-# FileTree label rendering
-# ---------------------------------------------------------------------------
 
 
 def test_file_label_unviewed_has_circle_badge(sample_files: list[PRFile]) -> None:
@@ -164,11 +154,6 @@ async def test_file_tree_uses_compact_folder_indentation() -> None:
         ]
 
 
-# ---------------------------------------------------------------------------
-# FileTree.update_view_state — single-node update
-# ---------------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_update_view_state_updates_single_node(
     sample_files: list[PRFile],
@@ -240,11 +225,6 @@ async def test_update_view_state_nonexistent_file_is_noop(
 
         file_tree.update_view_state("nonexistent.py")
         # No error raised
-
-
-# ---------------------------------------------------------------------------
-# Toggle logic
-# ---------------------------------------------------------------------------
 
 
 def test_toggle_unviewed_becomes_viewed() -> None:

@@ -1,11 +1,15 @@
 import pytest
+from rich.style import Style
+from textual import events, on
 from textual.app import App, ComposeResult
-from textual.widgets import Static, TextArea
+from textual.widgets import Button, Static, TextArea
 
 from rit.core.diff import parse_patch
 from rit.core.types import DiffHunk, DiffLine, FileDiff
-from rit.state.models import PRComment, PRUser, ReviewThread
+from rit.state.models import PRComment, PRFile, PRUser, ReviewThread
 from rit.state.store import PRStore
+from rit.ui.components.file_changes import FileChanges
+from rit.ui.widgets.comment_editor import InlineCommentEditor
 from rit.ui.widgets.diff_view import DiffView
 from tests.conftest import wait_until
 
@@ -96,6 +100,76 @@ async def test_file_headers_are_cursor_targets_for_file_comments() -> None:
 
 
 @pytest.mark.asyncio
+async def test_editor_buttons_keep_keys_from_diff_and_file_navigation() -> None:
+    store = PRStore()
+    store.state.files = [PRFile(filename="one.py"), PRFile(filename="two.py")]
+    submitted: list[InlineCommentEditor.Submitted] = []
+    cancelled: list[InlineCommentEditor.Cancelled] = []
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+        @on(InlineCommentEditor.Submitted)
+        def on_submitted(self, event: InlineCommentEditor.Submitted) -> None:
+            submitted.append(event)
+
+        @on(InlineCommentEditor.Cancelled)
+        def on_cancelled(self, event: InlineCommentEditor.Cancelled) -> None:
+            cancelled.append(event)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        files = app.query_one(FileChanges)
+        view = files.diff_view
+        view.mode = "unified"
+        await view.show_diff("All files", _combined_two_file_diff())
+
+        for kind in ("inline", "file"):
+            if kind == "inline":
+                assert await view.open_inline_comment_editor()
+            else:
+                view._set_file_header_selection(0)
+                assert await view.open_file_comment_editor()
+            editor = view.query_one(f"#diff-{kind}-comment-editor", InlineCommentEditor)
+            body = editor.query_one(TextArea)
+            await wait_until(lambda body=body: body.has_focus)
+            body.text = "keep this draft"
+            await pilot.press("tab")
+            button = editor.query_one("#comment-editor-queue", Button)
+            assert button.has_focus
+
+            for key in ("2", "j", "}", "{", "[", "]", "<", ">", "p", "|", "/"):
+                await pilot.press(key)
+                assert button.has_focus
+                assert view.current_file == "All files"
+                assert view.cursor_line == 0
+                assert view.mode == "unified"
+                assert files.sidebar_width == 35
+                assert view._cursor_ui.pending_count == ""
+                assert body.text == "keep this draft"
+
+            await pilot.press("enter")
+            await wait_until(lambda kind=kind: len(submitted) == (1 if kind == "inline" else 3))
+            assert submitted[-1].body == "keep this draft"
+            assert submitted[-1].kind == kind
+            assert submitted[-1].mode == "queue"
+
+            await pilot.press("tab", "enter")
+            await wait_until(lambda kind=kind: len(submitted) == (2 if kind == "inline" else 4))
+            assert submitted[-1].mode == "post"
+            await pilot.press("tab", "enter")
+            await wait_until(lambda kind=kind: len(cancelled) == (1 if kind == "inline" else 2))
+            assert cancelled[-1].kind == kind
+            assert not view._folded_file_paths
+            assert not view._manually_folded_files
+            if kind == "inline":
+                await view.close_inline_comment_editor()
+            else:
+                await view.close_file_comment_editor()
+
+
+@pytest.mark.asyncio
 async def test_selecting_visible_file_header_preserves_scroll_position() -> None:
     first_lines = [
         DiffLine(line, line, f"one {line}", f"one {line}") for line in range(1, 13)
@@ -179,6 +253,42 @@ async def test_open_inline_comment_editor_mounts_below_current_line() -> None:
         assert body.region.height >= 5
         assert diff_view.inline_comment_target() == ("test.py", 1, "LEFT")
         assert str(context.content) == "Selected: test.py:1 (old)"
+
+
+@pytest.mark.asyncio
+async def test_mouse_move_ignores_removed_inline_editor_before_refresh() -> None:
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        view = app.query_one(DiffView)
+        await view.show_diff("test.py", parse_patch("@@ -0,0 +1 @@\n+new", "test.py"))
+        await pilot.pause()
+
+        for _ in range(2):
+            assert await view.open_inline_comment_editor()
+            await pilot.pause()
+            body = view.query_one("#comment-editor-body", TextArea)
+            x, y, _, _ = body.region
+            x += 1
+            assert body.is_attached
+            assert app.screen.get_widget_at(x, y)[0] is body
+            mouse_move = events.MouseMove(None, x, y, 1, 0, 0, False, False, False)
+            await app.on_event(mouse_move)
+            assert mouse_move.style != Style.null()
+
+            with app.batch_update():
+                await view.close_inline_comment_editor()
+                assert not body.is_attached
+                assert app.screen.get_widget_at(x, y)[0] is body
+                mouse_move = events.MouseMove(None, x, y, 1, 0, 0, False, False, False)
+                await app.on_event(mouse_move)
+                assert mouse_move.style == Style.null()
+
+            await pilot.pause()
+            assert app.screen.get_widget_at(x, y)[0] is not body
 
 
 @pytest.mark.asyncio

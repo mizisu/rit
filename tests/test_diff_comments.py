@@ -18,6 +18,19 @@ from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets.diff_view import DiffView
 
 
+def test_comment_navigation_has_no_key_bindings() -> None:
+    from rit.ui.screens.main import (
+        _COMMON_BINDINGS,
+        _FILES_BINDINGS,
+        _PR_INFO_BINDINGS,
+    )
+
+    bindings = _COMMON_BINDINGS + _FILES_BINDINGS + _PR_INFO_BINDINGS + DiffView.BINDINGS
+    assert all(
+        binding.action not in {"next_comment", "prev_comment"} for binding in bindings
+    )
+
+
 def _make_thread(
     *,
     line: int | None,
@@ -920,13 +933,19 @@ async def test_unified_comment_jump_uses_new_side_anchor_for_right_comment() -> 
         diff_view.focus()
         await pilot.pause()
 
-        await pilot.press("}")
+        diff_view.action_next_comment()
         await pilot.pause()
 
         row = diff_view._current_row()
         assert row is not None
         assert diff_view.cursor_line == 1
         assert row.side == "new"
+
+        await pilot.press("j")
+        assert diff_view._comment_cursor_index == 1
+        await pilot.press("}")
+        assert diff_view.cursor_line == 2
+        assert diff_view._comment_cursor_index == 0
 
 
 @pytest.mark.asyncio
@@ -952,7 +971,7 @@ async def test_split_comment_jump_sets_old_pane_for_left_comment() -> None:
         diff_view.focus()
         await pilot.pause()
 
-        await pilot.press("}")
+        diff_view.action_next_comment()
         await pilot.pause()
 
         assert diff_view.cursor_line == 1
@@ -989,7 +1008,8 @@ async def test_split_comment_jump_uses_thread_diff_side_when_graphql_comment_has
         diff_view.focus()
         await pilot.pause()
 
-        await pilot.press("}")
+        await pilot.press("G")
+        diff_view.action_prev_comment()
         await pilot.pause()
 
         assert diff_view.cursor_line == 1

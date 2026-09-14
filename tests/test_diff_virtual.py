@@ -7,7 +7,7 @@ from textual.app import App, ComposeResult
 
 from rit.core.diff import parse_patch
 from rit.core.types import DiffHunk, DiffLine, FileDiff
-from rit.ui.widgets import diff_comments, diff_virtual
+from rit.ui.widgets import diff_blocks, diff_comments, diff_highlight, diff_virtual
 from rit.ui.widgets.diff_plan import build_diff_plan
 from rit.ui.widgets.diff_types import VirtualState
 from rit.ui.widgets.diff_view import DiffView
@@ -44,6 +44,16 @@ class CursorDrivenVirtualRenderView:
         )
         self.refresh_callbacks: list[Callable[[], None]] = []
         self.revealed = False
+        self.mounted = False
+        self.editors_restored = False
+
+    async def _await_content_mounts(self) -> None:
+        assert self._virt.render_pending
+        self.mounted = True
+
+    def _restore_comment_editors(self) -> None:
+        assert self.mounted
+        self.editors_restored = True
 
     def _is_current_render_request(self, request_token: int) -> bool:
         return request_token == self._render_request_token
@@ -58,6 +68,57 @@ class HeaderWidget:
 
     async def remove(self) -> None:
         self.removed = True
+
+
+@pytest.mark.parametrize(
+    "source_count, projected_count, virtual_threshold, block_threshold, virtual, blocks",
+    [
+        (0, 0, 800, 40, False, False),
+        (39, 1, 800, 40, False, False),
+        (40, 1, 800, 40, False, True),
+        (800, 1, 800, 40, False, True),
+        (801, 1, 800, 40, True, True),
+        (0, 801, 800, 40, True, True),
+        (90, 3, 90, 91, False, False),
+        (12, 1, 10, 40, True, True),
+        (12, 1, 800, 12, False, True),
+    ],
+)
+def test_render_eligibility_uses_source_and_projection_sizes(
+    source_count: int,
+    projected_count: int,
+    virtual_threshold: int,
+    block_threshold: int,
+    virtual: bool,
+    blocks: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = DiffView()
+    view._source_line_count = source_count
+    view._all_lines = [DiffLine(1, 1, "line", "line")] * projected_count
+    monkeypatch.setattr(view, "VIRTUALIZE_LINE_THRESHOLD", virtual_threshold)
+    monkeypatch.setattr(view, "BLOCK_RENDER_LINE_THRESHOLD", block_threshold)
+    monkeypatch.setattr(view, "VIRTUAL_WINDOW_RADIUS", 3)
+
+    diff_virtual._configure_virtual_window(view)
+
+    assert view._virt.active is virtual
+    assert view._virt.window_start == 0
+    assert view._virt.window_end == (
+        min(projected_count - 1, 6) if virtual else projected_count - 1
+    )
+    for split in (False, True):
+        view.split = split
+        assert diff_blocks._should_use_unified_block_renderer(view) is (
+            blocks and not split
+        )
+        assert diff_blocks._should_use_split_block_renderer(view) is (blocks and split)
+    assert diff_highlight._should_use_windowed_highlight_strategy(view) is blocks
+    assert diff_blocks._block_chunk_limit(view) == (
+        None if blocks and not virtual else view.UNIFIED_BLOCK_CHUNK_SIZE
+    )
+    view._showing_full_file = True
+    assert diff_blocks._block_chunk_limit(view) == view.UNIFIED_BLOCK_CHUNK_SIZE
 
 
 def test_iter_virtualized_line_groups_does_not_copy_line_window() -> None:
@@ -314,6 +375,7 @@ async def test_cursor_driven_virtual_render_stays_pending_until_revealed(
     await diff_virtual._render_virtual_window_and_finalize(view)
 
     assert view._virt.render_pending is True
+    assert view.mounted and view.editors_restored
     assert view.refresh_callbacks
     assert view.revealed is False
 

@@ -3,8 +3,8 @@
 import pytest
 from textual.app import App, ComposeResult
 from textual.color import Color
-from textual.content import Content
 from textual.containers import HorizontalScroll
+from textual.content import Content
 from textual.style import Style
 from textual.visual import RenderOptions
 from textual.widgets import Static
@@ -12,10 +12,10 @@ from textual.widgets import Static
 from rit.core.diff import parse_patch
 from rit.ui.widgets.diff_view import DiffView
 from rit.ui.widgets.diff_visual import (
-    LineContent,
     MISSING_SIDE_HATCH,
     MISSING_SIDE_HATCH_STYLE,
     MISSING_SIDE_STYLE,
+    LineContent,
     missing_side_hatch_text,
 )
 
@@ -130,9 +130,18 @@ async def test_block_split_cursor_stays_on_missing_selected_pane() -> None:
         right_visual = block._right_code._render()
         assert isinstance(left_visual, LineContent)
         assert isinstance(right_visual, LineContent)
-        assert left_visual.code_lines[row] is None
+        strip = block._left_code.render_line(row)
+        assert strip.text == MISSING_SIDE_HATCH * len(strip.text)
+        assert any(segment.style and segment.style.reverse for segment in strip)
         assert left_visual.line_styles[row] == "on $primary 25%"
         assert right_visual.line_styles[row] != "on $primary 25%"
+
+        await pilot.press("v", "j")
+        await pilot.pause()
+        assert not any(
+            segment.style and segment.style.reverse
+            for segment in block._left_code.render_line(row)
+        )
 
 
 @pytest.mark.asyncio
@@ -240,9 +249,7 @@ async def test_split_mode_uses_quiet_placeholders_for_missing_side() -> None:
         assert "deleted_value" in _as_plain(old_code)
         assert "added_value" in _as_plain(new_code)
 
-        add_patch = (
-            "@@ -1,3 +1,4 @@\n line1\n-shared_value\n+shared_value_v2\n+added_only\n line2"
-        )
+        add_patch = "@@ -1,3 +1,4 @@\n line1\n-shared_value\n+shared_value_v2\n+added_only\n line2"
         add_diff = parse_patch(add_patch, "test.py")
         await diff_view.show_diff("test.py", add_diff)
         await pilot.pause()

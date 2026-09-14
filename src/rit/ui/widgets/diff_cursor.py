@@ -26,22 +26,12 @@ if TYPE_CHECKING:
 __all__ = ()
 
 
-# ---------------------------------------------------------------------------
-# Count prefix
-# ---------------------------------------------------------------------------
-
-
 def _consume_count(view: DiffView) -> int:
     if view._cursor_ui.pending_count:
         count = int(view._cursor_ui.pending_count)
         view._cursor_ui.pending_count = ""
         return max(1, count)
     return 1
-
-
-# ---------------------------------------------------------------------------
-# Scroll actions
-# ---------------------------------------------------------------------------
 
 
 def _scroll_down(view: DiffView) -> None:
@@ -385,11 +375,6 @@ def _jump_half_page(view: DiffView, direction: int) -> None:
     _flush_cursor_ui_now_if_safe(view)
 
 
-# ---------------------------------------------------------------------------
-# Cursor movement actions
-# ---------------------------------------------------------------------------
-
-
 def _cursor_left(view: DiffView) -> None:
     if not view._all_lines:
         return
@@ -483,11 +468,6 @@ def _cycle_active_pane(view: DiffView) -> None:
         scroll_in_visual=view.visual_mode,
         update_active_pane=True,
     )
-
-
-# ---------------------------------------------------------------------------
-# Word motion actions
-# ---------------------------------------------------------------------------
 
 
 def _next_word(view: DiffView) -> None:
@@ -607,15 +587,47 @@ def _end_word_once(view: DiffView) -> bool:
     return False
 
 
+def _paragraph(view: DiffView, direction: Literal[-1, 1]) -> None:
+    count = _consume_count(view)
+    rows = view._rows_for_current_mode()
+    if not rows:
+        return
+
+    for _ in range(count):
+        current = view._current_row_index()
+        target = rows[current]
+        text = view._get_cursor_text()
+        column = 0
+        seen_text = bool(text)
+        end = len(rows) if direction > 0 else -1
+        for index in range(current + direction, end, direction):
+            row = rows[index]
+            pane = _pane_for_row(view, row)
+            line = view._all_lines[row.line_index]
+            if row.hunk_index == rows[current].hunk_index and not (
+                line.has_old_side if pane == "old" else line.has_new_side
+            ):
+                continue
+            target = row
+            text = _get_cursor_text_for_target(view, row.line_index, pane)
+            if row.hunk_index != rows[current].hunk_index or (seen_text and not text):
+                break
+            seen_text = seen_text or bool(text)
+        else:
+            if direction > 0:
+                column = max(0, len(text) - 1)
+
+        if not _move_cursor_to_row(
+            view, target, column=column, scroll_in_visual=view.visual_mode
+        ):
+            break
+    _flush_cursor_ui_now_if_safe(view)
+
+
 def _pane_for_row(view: DiffView, row: RenderedRow) -> Literal["old", "new"]:
     if row.side == "auto":
         return view.cursor_pane
     return row.side
-
-
-# ---------------------------------------------------------------------------
-# Shared helpers (primary home — DiffView keeps thin wrappers)
-# ---------------------------------------------------------------------------
 
 
 def _half_page_step(view: DiffView) -> int:
@@ -642,11 +654,6 @@ def _get_cursor_text_for_target(
     line = view._all_lines[line_index]
     side = view._cursor_side_for_line(line, pane)
     return view._get_line_text(line, side)
-
-
-# ---------------------------------------------------------------------------
-# Scroll helpers
-# ---------------------------------------------------------------------------
 
 
 def _viewport_geometry(view: DiffView) -> _geometry.ViewportGeometry:
@@ -865,11 +872,6 @@ def _scroll_to_cursor_horizontal(view: DiffView) -> None:
         scroll_widget.scroll_x = max(0, cursor_x - prefix_width - edge_padding)
 
 
-# ---------------------------------------------------------------------------
-# Jump / anchor
-# ---------------------------------------------------------------------------
-
-
 def _jump_to_row_with_anchor(
     view: DiffView,
     row: RenderedRow,
@@ -920,11 +922,6 @@ def _flush_cursor_ui_now_if_safe(view: DiffView) -> None:
     ):
         return
     _flush_queued_cursor_ui_updates(view)
-
-
-# ---------------------------------------------------------------------------
-# Cursor UI flush / batching
-# ---------------------------------------------------------------------------
 
 
 def _queue_cursor_ui_flush(
@@ -1030,11 +1027,6 @@ def _cursor_lines_for_repaint(cursor_lines: Collection[int]) -> Collection[int]:
     return sorted(cursor_lines)
 
 
-# ---------------------------------------------------------------------------
-# Core cursor movement
-# ---------------------------------------------------------------------------
-
-
 def _apply_cursor_move_side_effects(
     view: DiffView,
     *,
@@ -1094,6 +1086,11 @@ def _move_cursor(
         return False
 
     header_selection_cleared = view._set_file_header_selection(None)
+    comment_selection_cleared = view._comment_cursor_index != 0
+    if comment_selection_cleared:
+        view._comment_cursor_index = 0
+        _comments.update_cursor_highlight(view, view.cursor_line, view.cursor_line)
+        _queue_cursor_ui_flush(view, cursor_lines={view.cursor_line})
     if not preserve_desired_column:
         view._cursor_ui.desired_column = None
 
@@ -1120,7 +1117,7 @@ def _move_cursor(
         and target_pane == old_pane
         and (not update_active_pane or view.active_pane == target_pane)
     ):
-        return header_selection_cleared
+        return header_selection_cleared or comment_selection_cleared
 
     view._cursor_ui.suspend_pane_watch = True
     view._cursor_ui.suspend_line_watch = True
@@ -1246,11 +1243,6 @@ def _first_row_for_hunk(view: DiffView, hunk_index: int) -> RenderedRow | None:
     return _first_row_for_line(view, hunk_start)
 
 
-# ---------------------------------------------------------------------------
-# Hunk navigation
-# ---------------------------------------------------------------------------
-
-
 def _next_hunk(view: DiffView) -> None:
     if not view._diff or not view._diff.hunks:
         return
@@ -1323,11 +1315,6 @@ def _scroll_to_hunk(view: DiffView, index: int) -> None:
             animate=True,
             top_align=True,
         )
-
-
-# ---------------------------------------------------------------------------
-# Center cursor (zz)
-# ---------------------------------------------------------------------------
 
 
 def _center_cursor(view: DiffView) -> None:

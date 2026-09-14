@@ -33,16 +33,19 @@ def _invalidate_block_static_row_cache(
         view._split_block_static_rows_by_line.pop(line_idx, None)
 
 
-def _should_use_unified_block_renderer(view) -> bool:
+def _should_use_block_renderer(view) -> bool:
     return (
-        view._virt.active or len(view._all_lines) >= view.BLOCK_RENDER_LINE_THRESHOLD
-    ) and not view.split
+        view._virt.active
+        or view._render_policy_line_count >= view.BLOCK_RENDER_LINE_THRESHOLD
+    )
+
+
+def _should_use_unified_block_renderer(view) -> bool:
+    return _should_use_block_renderer(view) and not view.split
 
 
 def _should_use_split_block_renderer(view) -> bool:
-    return (
-        view._virt.active or len(view._all_lines) >= view.BLOCK_RENDER_LINE_THRESHOLD
-    ) and view.split
+    return _should_use_block_renderer(view) and view.split
 
 
 def _can_render_in_unified_block(view, line: DiffLine) -> bool:
@@ -564,10 +567,7 @@ def _refresh_grouped_blocks_for_lines(view, line_indices: Collection[int]) -> bo
 def _block_chunk_limit(view) -> int | None:
     if view._showing_full_file:
         return view.UNIFIED_BLOCK_CHUNK_SIZE
-    if (
-        not view._virt.active
-        and len(view._all_lines) >= view.BLOCK_RENDER_LINE_THRESHOLD
-    ):
+    if not view._virt.active and _should_use_block_renderer(view):
         return None
     return view.UNIFIED_BLOCK_CHUNK_SIZE
 
@@ -688,10 +688,7 @@ def _refresh_non_block_line_content(view, line_idx: int) -> None:
             line, code_widget
         )
         if code_widget.has_class("-placeholder"):
-            if show_cursor:
-                code_widget.add_class("-cursor")
-            else:
-                code_widget.remove_class("-cursor")
+            view._update_placeholder_cursor(code_widget, line, show_cursor)
             continue
 
         side = view._get_line_side_for_widget(line, code_widget)

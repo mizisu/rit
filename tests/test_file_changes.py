@@ -9,7 +9,7 @@ from rich.console import RenderableType
 from textual.app import App, ComposeResult
 from textual.screen import Screen
 from textual.signal import Signal
-from textual.widgets import Static
+from textual.widgets import Static, Tree
 
 from rit.core.diff import parse_patch
 from rit.core.types import DiffHunk, DiffLine, FileDiff
@@ -762,7 +762,9 @@ async def test_combined_diff_uses_prominent_file_headers_without_hunk_headers() 
 
 
 @pytest.mark.asyncio
-async def test_file_view_state_update_does_not_paint_before_folding() -> None:
+async def test_file_view_state_can_paint_while_fold_prepares(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     patch = "@@ -1,1 +1,1 @@\n-old\n+new"
     store = PRStore()
     store.state.files = [
@@ -801,10 +803,26 @@ async def test_file_view_state_update_does_not_paint_before_folding() -> None:
     async with app.run_test() as pilot:
         file_changes = app.query_one(FileChanges)
         file_changes.refresh_files()
-        await pilot.pause()
-        await pilot.pause()
+        await wait_until(
+            lambda: (
+                file_changes.diff_view.current_file == "All files"
+                and not file_changes._file_render_worker_active
+            )
+        )
 
-        first_header = file_changes.diff_view.query_one("#file-header-0", Static)
+        preparing = asyncio.Event()
+        release = asyncio.Event()
+        view = file_changes.diff_view
+        old_lines = view._all_lines
+        build_plan = view._build_render_plan
+
+        async def blocked_plan(*args, **kwargs):
+            preparing.set()
+            await release.wait()
+            return await build_plan(*args, **kwargs)
+
+        monkeypatch.setattr(view, "_build_render_plan", blocked_plan)
+        first_header = view.query_one("#file-header-0", Static)
         assert "Unviewed" in str(
             getattr(first_header.content, "plain", first_header.content)
         )
@@ -816,6 +834,14 @@ async def test_file_view_state_update_does_not_paint_before_folding() -> None:
             getattr(first_header.content, "plain", first_header.content)
         )
         assert "one.py" not in file_changes.diff_view._folded_file_paths
+        try:
+            await asyncio.wait_for(preparing.wait(), timeout=1)
+            await pilot.pause()
+            assert (True, False) in app.fold_frames
+            assert view._all_lines is old_lines
+            assert app._batch_count == 0
+        finally:
+            release.set()
 
         await wait_until(
             lambda: any(
@@ -831,7 +857,7 @@ async def test_file_view_state_update_does_not_paint_before_folding() -> None:
         await pilot.pause()
         app.capture_fold_frames = False
         assert app.fold_frames
-        assert (True, False) not in app.fold_frames
+        assert (True, True) in app.fold_frames
         first_header = file_changes.diff_view.query_one("#file-header-0", Static)
         header_text = str(getattr(first_header.content, "plain", first_header.content))
         assert "Viewed" in header_text
@@ -1107,6 +1133,7 @@ async def test_open_file_during_combined_load_does_not_render_single_file(
         PRFile(filename=filename, status="modified", patch=patch)
         for filename in filenames
     ]
+    store.state.files[1].viewer_viewed_state = FileViewedState.VIEWED
     one_requested = asyncio.Event()
     release_one = asyncio.Event()
 
@@ -1154,7 +1181,67 @@ async def test_open_file_during_combined_load_does_not_render_single_file(
         assert calls == ["All files"]
         assert file_changes.diff_view.current_file == "All files"
         assert file_changes.diff_view.cursor_line == 2
+        assert not file_changes.diff_view._folded_file_paths
+        assert store.state.files[1].viewer_viewed_state == FileViewedState.VIEWED
         assert store.state.selected_file == "two.py"
+
+
+@pytest.mark.asyncio
+async def test_new_file_request_suppresses_stale_render_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch = "@@ -1,1 +1,1 @@\n-old\n+new"
+    store = PRStore()
+    store.state.files_loading = LoadingState.LOADING
+    store.state.files = [
+        PRFile(filename="one.py", status="modified", patch=patch),
+        PRFile(filename="two.py", status="modified", patch=patch),
+    ]
+    store.state.file_diffs = {
+        filename: parse_patch(patch, filename) for filename in ("one.py", "two.py")
+    }
+    store.state.selected_file = "one.py"
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        file_changes = app.query_one(FileChanges)
+        file_changes.file_tree.refresh_files()
+        tree = file_changes.file_tree.query_one("#file-tree", Tree)
+        tree.focus()
+        await pilot.pause()
+
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        rendered: list[str] = []
+
+        async def delayed_show_diff(filename: str, _diff: FileDiff) -> None:
+            rendered.append(filename)
+            if filename == "one.py":
+                first_started.set()
+                await release_first.wait()
+
+        monkeypatch.setattr(file_changes.diff_view, "show_diff", delayed_show_diff)
+        assert file_changes.jump_to_file_location(
+            "one.py",
+            1,
+            "RIGHT",
+            focus_diff=True,
+        )
+        await asyncio.wait_for(first_started.wait(), timeout=1)
+
+        file_changes.open_file("two.py", focus_diff=False)
+        assert file_changes.file_tree.selected_file == "two.py"
+        release_first.set()
+
+        await wait_until(lambda: not file_changes._file_render_worker_active)
+        assert rendered == ["one.py", "two.py"]
+        assert file_changes.file_tree.selected_file == "two.py"
+        assert tree.has_focus
+        assert file_changes._render_session.take_pending_location_jump("one.py") is None
 
 
 @pytest.mark.asyncio
