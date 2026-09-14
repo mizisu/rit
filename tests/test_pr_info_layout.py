@@ -3,11 +3,13 @@
 from pathlib import Path
 
 import pytest
+from rich.cells import cell_len
 from textual import on
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
 from textual.css.query import NoMatches
-from textual.widgets import Button
+from textual.css.styles import Styles
+from textual.widgets import Button, Static
 
 import rit.ui.components.pr_info as pr_info_module
 from rit.state.models import PR, PRLabel, PRUser
@@ -23,6 +25,8 @@ ROOT = Path(__file__).parents[1]
 @pytest.mark.asyncio
 async def test_pr_info_groups_main_and_sidebar_in_centered_layout() -> None:
     store = PRStore()
+    pr = PR(number=1, title="Review navigation")
+    store.state.pr = pr
 
     class TestApp(App[None]):
         def compose(self) -> ComposeResult:
@@ -39,6 +43,34 @@ async def test_pr_info_groups_main_and_sidebar_in_centered_layout() -> None:
         assert main_scroll.parent is layout
         assert sidebar.parent is layout
 
+        title_row = app.query_one("#pr-title-row")
+        title = app.query_one("#pr-title", Static)
+        status = app.query_one("#pr-status", Static)
+        assert title.parent is title_row
+        assert status.parent is title_row
+        assert status.region.y == title.region.y
+        assert title.region.width == cell_len("Review navigation #1")
+        assert status.region.x == title.region.right + 2
+        assert "Open" in str(status.content)
+        assert not app.query("#branch-info")
+        assert not app.query("#copy-branch")
+
+        pr.title = "1:1 미팅 메모 삭제 지원"
+        app.query_one(PRInfo).refresh_summary()
+        await pilot.pause()
+        assert title.region.width == cell_len(f"{pr.title} #1")
+        rendered = app.screen._compositor.render_strips()[title.region.y].text
+        assert f"{pr.title} #1  ◎ Open" in rendered
+
+        pr.title = "Review navigation " * 12
+        app.query_one(PRInfo).refresh_summary()
+        await pilot.resize_terminal(40, 30)
+        await pilot.pause()
+        assert title.region.height > 1
+        assert title_row.region.height == title.region.height
+        assert status.region.y == title.region.y
+        assert status.region.right <= title_row.content_region.right
+
 
 @pytest.mark.asyncio
 async def test_pr_info_summary_actions_are_clickable() -> None:
@@ -53,10 +85,6 @@ async def test_pr_info_summary_actions_are_clickable() -> None:
         def compose(self) -> ComposeResult:
             yield PRInfo(store)
 
-        @on(PRInfo.CopyBranchRequested)
-        def capture_copy(self) -> None:
-            self.requests.append("branch")
-
         @on(PRInfo.EditReviewersRequested)
         def capture_reviewers(self) -> None:
             self.requests.append("reviewers")
@@ -68,25 +96,21 @@ async def test_pr_info_summary_actions_are_clickable() -> None:
     app = TestApp()
     async with app.run_test() as pilot:
         await pilot.pause()
-        copy_button = app.query_one("#copy-branch", Button)
         reviewer_button = app.query_one("#edit-reviewers", Button)
         assignee_button = app.query_one("#edit-assignees", Button)
 
-        assert copy_button.tooltip == "Copy branch"
         assert reviewer_button.tooltip == "Edit reviewers"
         assert assignee_button.tooltip == "Edit assignees"
-        assert copy_button.region.x == app.query_one("#branch-info").region.right + 1
         assert reviewer_button.parent is not None
         assert reviewer_button.region.x == (
             reviewer_button.parent.query_one(".sidebar-section-title").region.right + 1
         )
 
-        await pilot.click("#copy-branch")
         await pilot.click("#edit-reviewers")
         await pilot.click("#edit-assignees")
         await pilot.pause()
 
-    assert app.requests == ["branch", "reviewers", "assignees"]
+    assert app.requests == ["reviewers", "assignees"]
 
 
 @pytest.mark.asyncio
@@ -221,7 +245,6 @@ def test_pr_info_header_uses_shared_status_label_mapping(
     widgets = {
         "#pr-title": _CaptureStatic(),
         "#pr-status": _CaptureStatic(),
-        "#branch-info": _CaptureStatic(),
         "#pr-stats": _CaptureStatic(),
     }
 
@@ -257,7 +280,6 @@ def test_pr_info_reuses_header_rendering_for_unchanged_inputs(
     widgets = {
         "#pr-title": _CaptureStatic(),
         "#pr-status": _CaptureStatic(),
-        "#branch-info": _CaptureStatic(),
         "#pr-stats": _CaptureStatic(),
     }
 
@@ -272,7 +294,6 @@ def test_pr_info_reuses_header_rendering_for_unchanged_inputs(
     assert {selector: widget.update_count for selector, widget in widgets.items()} == {
         "#pr-title": 1,
         "#pr-status": 1,
-        "#branch-info": 1,
         "#pr-stats": 1,
     }
 
@@ -468,6 +489,7 @@ class _CaptureStatic:
     def __init__(self) -> None:
         self.content = ""
         self.update_count = 0
+        self.styles = Styles()
 
     def update(self, content: str) -> None:
         self.update_count += 1

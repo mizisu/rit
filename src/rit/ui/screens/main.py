@@ -35,6 +35,7 @@ from rit.ui.screens.multi_select_picker import (
 )
 from rit.ui.screens.review_submit import ReviewSubmitScreen
 from rit.ui.widgets import DiffView, Header
+from rit.ui.widgets.branch_info import BranchInfo
 from rit.ui.widgets.comment_editor import InlineCommentEditor
 
 __all__ = ("MainScreen",)
@@ -380,8 +381,8 @@ class MainScreen(Screen[None]):
         elif selection == "base":
             self._copy_branch(pr.base_ref if pr else None, label="base")
 
-    @on(PRInfo.CopyBranchRequested)
-    def _copy_branch_from_summary(self) -> None:
+    @on(BranchInfo.CopyRequested)
+    def _copy_branch_from_header(self) -> None:
         self.action_copy_branch()
 
     @on(PRInfo.EditReviewersRequested)

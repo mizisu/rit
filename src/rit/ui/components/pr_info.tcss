@@ -43,11 +43,23 @@ PRInfo .sidebar {
 }
 
 /* PR Header */
+PRInfo #pr-title-row {
+    width: 100%;
+    height: auto;
+    margin-bottom: 1;
+}
+
 PRInfo .pr-title {
     text-style: bold;
     color: #cad3f5;
+    width: 1fr;
     height: auto;
-    margin-bottom: 1;
+}
+
+PRInfo #pr-status {
+    width: auto;
+    height: 1;
+    margin-left: 2;
 }
 
 PRInfo .pr-status-open {
@@ -66,24 +78,6 @@ PRInfo .pr-status-draft {
     color: #6e738d;
 }
 
-PRInfo #branch-row {
-    height: 1;
-    width: 100%;
-    margin-bottom: 1;
-}
-
-PRInfo .branch-info {
-    color: #8aadf4;
-    width: auto;
-    max-width: 90%;
-    height: 1;
-    text-wrap: nowrap;
-}
-
-PRInfo #copy-branch {
-    margin-left: 1;
-}
-
 /* Stats bar */
 PRInfo .stats-bar {
     margin-bottom: 1;
@@ -100,7 +94,6 @@ PRInfo .sidebar-section-heading {
     width: 100%;
 }
 
-PRInfo #copy-branch,
 PRInfo #edit-reviewers,
 PRInfo #edit-assignees {
     width: 3;
@@ -113,14 +106,12 @@ PRInfo #edit-assignees {
     content-align: center middle;
 }
 
-PRInfo #copy-branch:hover,
 PRInfo #edit-reviewers:hover,
 PRInfo #edit-assignees:hover {
     background: #363a4f;
     color: $text;
 }
 
-PRInfo #copy-branch:focus,
 PRInfo #edit-reviewers:focus,
 PRInfo #edit-assignees:focus {
     background: $primary;

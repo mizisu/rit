@@ -2,12 +2,25 @@ import pytest
 from textual.css.query import NoMatches
 from textual.widgets import Static
 
+from rit.state.models import PR
 from rit.ui.widgets.header import Header
 
 
 class BrokenStatus(Static):
     def update(self, *args: object, **kwargs: object) -> None:
         raise RuntimeError("status update failed")
+
+
+def test_pr_update_refreshes_branches_before_mount() -> None:
+    header = Header()
+    assert header._branch_info.display is False
+
+    header.update_from_pr(PR(number=1, base_ref="main", head_ref="feature"))
+    assert header._branch_info.display is True
+    assert str(header._branch_info._branch_label.content) == "main ← feature"
+
+    header.update_from_pr(PR(number=1))
+    assert header._branch_info.display is False
 
 
 def test_status_watcher_ignores_missing_widget_before_mount(

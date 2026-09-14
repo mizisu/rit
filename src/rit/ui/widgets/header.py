@@ -4,11 +4,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import reactive, var
 from textual.widgets import Static
+
+from rit.ui.widgets.branch_info import BranchInfo
 
 if TYPE_CHECKING:
     from rit.state.models import PR
@@ -22,21 +24,28 @@ __all__ = (
 )
 
 
-class Header(Horizontal):
-    """Application header showing PR number, title, and status."""
+class Header(Vertical):
+    """Application header showing PR identity and comparison branches."""
 
     DEFAULT_CSS = """
     Header {
         dock: top;
-        height: 3;
+        height: auto;
         padding: 1 1 0 1;
         background: $surface;
         border-bottom: solid $primary;
     }
 
+    Header #header-title-row {
+        height: 1;
+    }
+
     Header .pr-title {
         width: 1fr;
+        height: 1;
         text-style: bold;
+        text-wrap: nowrap;
+        text-overflow: ellipsis;
     }
 
     Header .pr-status {
@@ -87,19 +96,22 @@ class Header(Horizontal):
         self.owner = owner
         self.repo = repo
         self.pr_number = pr_number
+        self._branch_info = BranchInfo(id="header-branch-row")
 
     def compose(self) -> ComposeResult:
         repo_str = f"{self.owner}/{self.repo}" if self.owner else "(current repo)"
-        yield Static(
-            f"PR #{self.pr_number} - {repo_str}",
-            classes="pr-title",
-            id="header-title",
-        )
-        yield Static(
-            f"[{self.pr_status}]",
-            classes="pr-status status-open",
-            id="header-status",
-        )
+        with Horizontal(id="header-title-row"):
+            yield Static(
+                f"PR #{self.pr_number} - {repo_str}",
+                classes="pr-title",
+                id="header-title",
+            )
+            yield Static(
+                f"[{self.pr_status}]",
+                classes="pr-status status-open",
+                id="header-status",
+            )
+        yield self._branch_info
 
     def watch_pr_status(self, new_status: PRStatus) -> None:
         self._status_open = new_status == "Open"
@@ -127,6 +139,7 @@ class Header(Horizontal):
     def update_from_pr(self, pr: PR) -> None:
         self.pr_title = pr.title
         self.pr_status = pr.state_display
+        self._branch_info.update_branches(pr.base_ref, pr.head_ref)
 
         self.post_message(self.PRInfoUpdated(title=pr.title, status=pr.state_display))
 

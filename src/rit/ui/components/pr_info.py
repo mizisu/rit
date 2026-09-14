@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from rich.cells import cell_len
 from textual import events, on
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
@@ -31,7 +32,6 @@ _PR_STATUS_LABELS: dict[str, str] = {
 }
 _DEFAULT_PR_STATUS_LABEL = _PR_STATUS_LABELS["Open"]
 _COMPACT_LAYOUT_BREAKPOINT = 94
-_COPY_ICON = "\U000f018f"
 _EDIT_ICON = "\U000f03eb"
 
 
@@ -47,9 +47,6 @@ class PRInfo(Container):
         root_comment_id: int
         is_resolved: bool  # New state after toggle
 
-    class CopyBranchRequested(Message):
-        pass
-
     class EditReviewersRequested(Message):
         pass
 
@@ -62,14 +59,11 @@ class PRInfo(Container):
         self._timeline: PRTimeline | None = None
         self._title_widget: Static | None = None
         self._status_widget: Static | None = None
-        self._branch_widget: Static | None = None
         self._stats_widget: Static | None = None
         self._labels_widget: Static | None = None
         self._assignees_widget: Static | None = None
         self._reviewers_widget: Static | None = None
-        self._header_render_signature: (
-            tuple[str, int, str, str, str, int, int] | None
-        ) = None
+        self._header_render_signature: tuple[str, int, str, int, int] | None = None
         self._labels_render_signature: tuple[int, int, int, int, int] | None = None
         self._labels_render_text: str | None = None
         self._assignees_render_signature: tuple[int, int, int, int, int] | None = None
@@ -85,18 +79,9 @@ class PRInfo(Container):
                 VerticalScroll(id="main-scroll"),
                 Vertical(classes="main-content", id="main-content"),
             ):
-                yield Static("Loading...", classes="pr-title", id="pr-title")
-                yield Static("", id="pr-status")
-                with Horizontal(id="branch-row"):
-                    yield Static("", classes="branch-info", id="branch-info")
-                    yield Button(
-                        _COPY_ICON,
-                        id="copy-branch",
-                        name="Copy branch",
-                        tooltip="Copy branch",
-                        compact=True,
-                        flat=True,
-                    )
+                with Horizontal(id="pr-title-row"):
+                    yield Static("Loading...", classes="pr-title", id="pr-title")
+                    yield Static("", id="pr-status")
                 yield Static("", classes="stats-bar", id="pr-stats")
                 yield Rule()
                 yield PRTimeline(self.store, id="pr-timeline")
@@ -152,11 +137,6 @@ class PRInfo(Container):
         width = self.size.width
         self.wide = width >= 120
         self.compact = width < _COMPACT_LAYOUT_BREAKPOINT
-
-    @on(Button.Pressed, "#copy-branch")
-    def _request_copy_branch(self, event: Button.Pressed) -> None:
-        event.stop()
-        self.post_message(self.CopyBranchRequested())
 
     @on(Button.Pressed, "#edit-reviewers")
     def _request_edit_reviewers(self, event: Button.Pressed) -> None:
@@ -232,8 +212,6 @@ class PRInfo(Container):
             pr.title,
             pr.number,
             pr.state_display,
-            pr.base_ref,
-            pr.head_ref,
             pr.additions,
             pr.deletions,
         )
@@ -241,6 +219,7 @@ class PRInfo(Container):
             return
 
         title_widget = self._static_widget("_title_widget", "#pr-title")
+        title_widget.styles.max_width = cell_len(f"{pr.title} #{pr.number}")
         title_widget.update(
             f"[bold underline]{pr.title}[/bold underline] [#6e738d]#{pr.number}[/]"
         )
@@ -249,9 +228,6 @@ class PRInfo(Container):
         status_widget.update(
             _PR_STATUS_LABELS.get(pr.state_display, _DEFAULT_PR_STATUS_LABEL)
         )
-
-        branch_widget = self._static_widget("_branch_widget", "#branch-info")
-        branch_widget.update(f"[#8aadf4]{pr.base_ref}[/] ← [#8aadf4]{pr.head_ref}[/]")
 
         stats_widget = self._static_widget("_stats_widget", "#pr-stats")
         total_changes = pr.additions + pr.deletions
