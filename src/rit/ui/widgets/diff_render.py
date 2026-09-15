@@ -320,7 +320,7 @@ def _has_annotations_for_paths(view: DiffView, paths: frozenset[str]) -> bool:
         getattr(annotation, "path", None) in paths
         for annotation in (
             *state.review_threads,
-            *state.pending_review_comments,
+            *state.pending_review.comments,
         )
     )
 

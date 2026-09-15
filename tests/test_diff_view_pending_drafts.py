@@ -306,7 +306,7 @@ async def test_pending_draft_keeps_collapsed_state_when_sync_replaces_model() ->
         replacement = merge_pending_review_drafts([original], [server_copy])[0]
         assert replacement is not original
         assert replacement.review_comment_id == 91001
-        store.state.pending_review_comments = [replacement]
+        store.state.pending_review.comments = [replacement]
 
         await diff_view.show_diff("test.py", diff)
         await wait_until(

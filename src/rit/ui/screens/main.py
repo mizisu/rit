@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Literal
 
 from textual import events, getters, on
@@ -50,15 +49,6 @@ _TAB_GROUP = Binding.Group("Move Tab", compact=True)
 
 _TAB_IDS = ("pr-info", "files")
 _TAB_INDEX_BY_ID = {tab_id: index for index, tab_id in enumerate(_TAB_IDS)}
-
-
-@dataclass
-class _FileViewedSyncState:
-    confirmed: FileViewedState
-    desired: FileViewedState
-    revision: int = 1
-    worker_active: bool = False
-    force_sync: bool = False
 
 
 _COMMON_BINDINGS = [
@@ -201,7 +191,6 @@ class MainScreen(Screen[None]):
         self.store.set_message_sink(self._post_store_message)
         self._pr_info_refresh_pending = False
         self._files_load_requested = False
-        self._file_viewed_sync: dict[str, _FileViewedSyncState] = {}
 
     def compose(self) -> ComposeResult:
         yield Header(
@@ -534,9 +523,9 @@ class MainScreen(Screen[None]):
             return
         self.app.push_screen(
             ReviewSubmitScreen(
-                pending_comments_count=len(self.store.state.pending_review_comments),
-                pending_comments=list(self.store.state.pending_review_comments),
-                initial_body=self.store.state.pending_review_body,
+                pending_comments_count=len(self.store.state.pending_review.comments),
+                pending_comments=list(self.store.state.pending_review.comments),
+                initial_body=self.store.state.pending_review.body,
             ),
             self._handle_review_submit,
         )
@@ -748,7 +737,7 @@ class MainScreen(Screen[None]):
         self,
         draft_index: int,
     ) -> PendingReviewComment | None:
-        comments = self.store.state.pending_review_comments
+        comments = self.store.state.pending_review.comments
         if not 0 <= draft_index < len(comments):
             return None
         return comments[draft_index]
@@ -1644,118 +1633,28 @@ class MainScreen(Screen[None]):
             self.post_message(Flash("PR not loaded yet", style="warning", duration=2.0))
             return
 
-        old_state = file.viewer_viewed_state
-        new_state = (
-            FileViewedState.UNVIEWED
-            if old_state == FileViewedState.VIEWED
-            else FileViewedState.VIEWED
-        )
+        if self.store.viewed_files.toggle(filename, self._on_file_viewed_toggled):
+            self.run_worker(
+                self._sync_file_viewed(filename),
+                exclusive=False,
+                name="sync-file-viewed",
+            )
 
-        sync_state = self._file_viewed_sync.get(filename)
-        if sync_state is None:
-            sync_state = _FileViewedSyncState(old_state, new_state)
-            self._file_viewed_sync[filename] = sync_state
-        else:
-            sync_state.desired = new_state
-            sync_state.revision += 1
-
-        file.viewer_viewed_state = new_state
-        if new_state == FileViewedState.VIEWED:
+    def _on_file_viewed_toggled(self, filename: str, state: FileViewedState) -> None:
+        if state == FileViewedState.VIEWED:
             self.file_changes.diff_view.collapse_viewed_file(filename)
         self.file_changes.update_file_view_state(filename)
 
-        if sync_state.worker_active:
-            return
-        sync_state.worker_active = True
-        self.run_worker(
-            self._sync_file_viewed(filename, old_state, new_state),
-            exclusive=False,
-            name="sync-file-viewed",
-        )
-
-    async def _sync_file_viewed(
-        self,
-        filename: str,
-        old_state: FileViewedState,
-        new_state: FileViewedState,
-    ) -> None:
-        sync_state = self._file_viewed_sync.get(filename)
-        if sync_state is None:
-            sync_state = _FileViewedSyncState(old_state, new_state, worker_active=True)
-            self._file_viewed_sync[filename] = sync_state
-
+    async def _sync_file_viewed(self, filename: str) -> None:
         try:
-            while True:
-                requested_state = sync_state.desired
-                request_revision = sync_state.revision
-                if (
-                    requested_state == sync_state.confirmed
-                    and not sync_state.force_sync
-                ):
-                    return
-
-                try:
-                    await self.store.set_file_viewed(
-                        filename,
-                        viewed=requested_state == FileViewedState.VIEWED,
-                    )
-                except GitHubError:
-                    if sync_state.revision != request_revision:
-                        sync_state.force_sync = True
-                        continue
-
-                    sync_state.desired = sync_state.confirmed
-                    sync_state.force_sync = False
-                    file = next(
-                        (
-                            candidate
-                            for candidate in self.store.state.files
-                            if candidate.filename == filename
-                        ),
-                        None,
-                    )
-                    if file is not None:
-                        file.viewer_viewed_state = sync_state.confirmed
-                    self.file_changes.update_file_view_state(filename)
-                    self.post_message(
-                        Flash(
-                            "Failed to update viewed state",
-                            style="error",
-                            duration=3.0,
-                        )
-                    )
-                    return
-
-                sync_state.confirmed = requested_state
-                sync_state.force_sync = False
-                file = next(
-                    (
-                        candidate
-                        for candidate in self.store.state.files
-                        if candidate.filename == filename
-                    ),
-                    None,
-                )
-                if file is not None and file.viewer_viewed_state != sync_state.desired:
-                    file.viewer_viewed_state = sync_state.desired
-                    self.file_changes.update_file_view_state(filename)
-                if sync_state.desired != sync_state.confirmed:
-                    continue
-
-                label = (
-                    "Viewed"
-                    if sync_state.confirmed == FileViewedState.VIEWED
-                    else "Unviewed"
-                )
-                self.post_message(
-                    Flash(f"Marked {label}", style="success", duration=1.5)
-                )
-                return
-        finally:
-            sync_state.worker_active = False
-            if (
-                self._file_viewed_sync.get(filename) is sync_state
-                and sync_state.desired == sync_state.confirmed
-                and not sync_state.force_sync
-            ):
-                self._file_viewed_sync.pop(filename, None)
+            state = await self.store.viewed_files.sync(
+                filename, self.file_changes.update_file_view_state
+            )
+        except GitHubError:
+            self.post_message(
+                Flash("Failed to update viewed state", style="error", duration=3.0)
+            )
+            return
+        if state is not None:
+            label = "Viewed" if state == FileViewedState.VIEWED else "Unviewed"
+            self.post_message(Flash(f"Marked {label}", style="success", duration=1.5))

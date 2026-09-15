@@ -224,11 +224,12 @@ def _pending_review_thread_is_draft(view: DiffView, thread: ReviewThread) -> boo
         raw_reviews = []
     reviews = [review for review in raw_reviews if isinstance(review, PRReview)]
 
-    raw_drafts = getattr(state, "pending_review_comments", [])
+    pending_review = getattr(state, "pending_review", None)
+    raw_drafts = getattr(pending_review, "comments", [])
     if not isinstance(raw_drafts, list):
         raw_drafts = []
     drafts = [draft for draft in raw_drafts if isinstance(draft, PendingReviewComment)]
-    obsolete_ids = getattr(state, "obsolete_pending_review_ids", ())
+    obsolete_ids = getattr(pending_review, "obsolete_review_ids", ())
     if not drafts and not reviews and not obsolete_ids:
         return False
 
@@ -236,7 +237,7 @@ def _pending_review_thread_is_draft(view: DiffView, thread: ReviewThread) -> boo
         thread,
         drafts=drafts,
         hidden_review_ids=pending_review_hidden_ids(
-            pending_review_id=getattr(state, "pending_review_id", None),
+            pending_review_id=getattr(pending_review, "review_id", None),
             reviews=reviews,
             obsolete_pending_review_ids=obsolete_ids,
         ),
@@ -303,7 +304,8 @@ def _pending_comments_for_current_diff(
             return drafts
 
     state = getattr(view.store, "state", None)
-    drafts = getattr(state, "pending_review_comments", [])
+    pending_review = getattr(state, "pending_review", None)
+    drafts = getattr(pending_review, "comments", [])
     if not isinstance(drafts, list):
         return ()
     if not drafts:
@@ -1700,7 +1702,8 @@ def _prune_collapsed_pending_drafts(view: DiffView) -> None:
         collapsed_drafts.clear()
         return
 
-    pending_comments = list(getattr(view.store.state, "pending_review_comments", ()))
+    pending_review = getattr(view.store.state, "pending_review", None)
+    pending_comments = list(getattr(pending_review, "comments", ()))
     available = {id(draft): draft for draft in pending_comments}
     retained: dict[int, PendingReviewComment] = {}
     unmatched: list[PendingReviewComment] = []

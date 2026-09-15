@@ -59,36 +59,14 @@ from rit.state.models import (
     ReviewThreadInfo,
 )
 from rit.state.pending_review import (
-    PendingReviewProjection,
-    PendingReviewSnapshot,
     UnsupportedInlineCommentTarget,
-    apply_pending_review_projection,
-    apply_pending_review_sync_result,
-    clear_pending_review,
-    delete_pending_comment,
-    delete_pending_comment_at,
-    load_pending_review_projection,
-    merge_pending_review_drafts,
     plan_inline_comment_submission,
-    plan_review_submission,
-    project_pending_review_sync_result,
-    save_pending_comment,
-    should_restore_pending_review_snapshot,
 )
 from rit.state.pending_review import (
     get_pending_inline_comment as find_pending_inline_comment,
 )
 from rit.state.pending_review import (
     is_inline_comment_diff_line as is_pending_inline_comment_diff_line,
-)
-from rit.state.pending_review import (
-    restore_pending_review_snapshot as build_pending_review_restoration,
-)
-from rit.state.pending_review import (
-    save_pending_file_comment as build_pending_file_comment,
-)
-from rit.state.pending_review import (
-    snapshot_pending_review as build_pending_review_snapshot,
 )
 from rit.state.pending_review_visibility import (
     pending_draft_matches_review_comment,
@@ -97,7 +75,7 @@ from rit.state.pending_review_visibility import (
     visible_timeline_comments,
     visible_timeline_reviews,
 )
-from rit.state.pending_review_workspace import replace_pending_review
+from rit.state.pending_review_workspace import PendingReviewWorkspace
 from rit.state.pr_management import plan_assignee_selection, plan_reviewer_selection
 from rit.state.pr_merge import merge_pr_discussion, merge_pr_summary
 from rit.state.review_annotations import ReviewAnnotationIndex
@@ -122,11 +100,9 @@ class PRStoreState:
     reviews: list[PRReview] = field(default_factory=list)
     issue_comments: list[PRIssueComment] = field(default_factory=list)
     review_threads: list[ReviewThread] = field(default_factory=list)
-    pending_review_id: int | None = None
-    pending_review_body: str = ""
-    pending_review_comments: list[PendingReviewComment] = field(default_factory=list)
-    pending_review_drafts_are_canonical: bool = False
-    obsolete_pending_review_ids: set[int] = field(default_factory=set)
+    pending_review: PendingReviewWorkspace = field(
+        default_factory=PendingReviewWorkspace
+    )
 
     file_diffs: dict[str, FileDiff] = field(default_factory=dict)
     comments_by_file: dict[str, list[PRComment]] = field(default_factory=dict)
@@ -210,9 +186,8 @@ class PRStore:
         self.pr_number = pr_number
         self._service = GitHubService(owner=owner, repo=repo)
         self._state = PRStoreState()
+        self.viewed_files = ViewedFiles(self._state, self._persist_file_viewed)
         self._message_sink: Callable[[Message], None] | None = None
-        self._pending_review_sync_lock = asyncio.Lock()
-        self._pending_review_local_version = 0
         self._recent_discussion = RecentDiscussion()
 
     @property
@@ -259,15 +234,18 @@ class PRStore:
             )
 
     async def load_pr_discussion(self) -> None:
-        pending_review_version = self._pending_review_local_version
-        try:
+        async def load_discussion() -> PR:
             discussion = await self._service.get_pr_discussion(self.pr_number)
             pr = self._merge_pr_discussion(discussion)
             self._apply_discussion_state(pr)
             self._post_discussion_messages(pr)
-            await self._load_pending_review(
-                pr,
-                loaded_at_version=pending_review_version,
+            return pr
+
+        try:
+            pr = await self._state.pending_review.refresh(
+                load_discussion,
+                adapter=self._service,
+                pr_number=self.pr_number,
             )
             self._post_discussion_metadata_messages(pr)
         except RuntimeError as e:
@@ -294,16 +272,20 @@ class PRStore:
 
     async def _load_pr_data(self) -> None:
         self._state.pr_loading = LoadingState.LOADING
-        pending_review_version = self._pending_review_local_version
-        try:
+
+        async def load_discussion() -> PR:
             pr = await self._service.get_pr_all(self.pr_number)
             self._state.pr = pr
             self._state.files_total_count = pr.changed_files
             self._apply_discussion_state(pr)
             self._state.pr_loading = LoadingState.LOADED
-            await self._load_pending_review(
-                pr,
-                loaded_at_version=pending_review_version,
+            return pr
+
+        try:
+            pr = await self._state.pending_review.refresh(
+                load_discussion,
+                adapter=self._service,
+                pr_number=self.pr_number,
             )
 
             self._post_message(self.PRLoaded(pr=pr))
@@ -386,23 +368,10 @@ class PRStore:
         sync_file_comments(self._state.files, projection.comments_by_file)
         self._state.thread_info_cache = projection.thread_info_cache
         self._state.thread_cache = projection.thread_cache
-        self._prune_obsolete_pending_review_ids()
-
-    def _prune_obsolete_pending_review_ids(self) -> None:
-        if not self._state.obsolete_pending_review_ids:
-            return
-
-        present_ids: set[int] = set()
-        for comment in self._state.comments:
-            review_id = comment.pull_request_review_id
-            if review_id:
-                present_ids.add(review_id)
-        for thread in self._state.review_threads:
-            for comment in thread.comments:
-                review_id = comment.pull_request_review_id
-                if review_id:
-                    present_ids.add(review_id)
-        self._state.obsolete_pending_review_ids.intersection_update(present_ids)
+        self._state.pending_review.prune_obsolete_review_ids(
+            self._state.comments,
+            self._state.review_threads,
+        )
 
     def select_file(self, filename: str) -> None:
         selection = project_file_selection(
@@ -609,16 +578,7 @@ class PRStore:
         *,
         path: str,
     ) -> PendingReviewComment:
-        result = build_pending_file_comment(
-            self._state.pending_review_comments,
-            body=body,
-            path=path,
-            current_version=self._pending_review_local_version,
-        )
-        self._state.pending_review_comments = result.comments
-        self._state.pending_review_drafts_are_canonical = True
-        self._pending_review_local_version = result.version
-        return result.draft
+        return self._state.pending_review.save_file_comment(body, path=path)
 
     def save_pending_inline_comment(
         self,
@@ -631,61 +591,20 @@ class PRStore:
         start_side: Literal["LEFT", "RIGHT"] | None = None,
         draft_index: int | None = None,
     ) -> PendingReviewComment:
-        result = save_pending_comment(
-            self._state.pending_review_comments,
-            body=body,
+        return self._state.pending_review.save_inline_comment(
+            body,
             path=path,
             line=line,
             side=side,
-            is_diff_line=self.is_inline_comment_diff_line(
-                path=path,
-                line=line,
-                side=side,
-                start_line=start_line,
-                start_side=start_side,
-            ),
-            current_version=self._pending_review_local_version,
+            diff=self._state.file_diffs.get(path),
             start_line=start_line,
             start_side=start_side,
-            replace_existing=False,
             draft_index=draft_index,
         )
-        self._state.pending_review_comments = result.comments
-        self._state.pending_review_drafts_are_canonical = True
-        self._pending_review_local_version = result.version
-        return result.draft
-
-    @property
-    def pending_review_version(self) -> int:
-        return self._pending_review_local_version
-
-    def snapshot_pending_review(self) -> PendingReviewSnapshot:
-        return build_pending_review_snapshot(
-            pending_review_id=self._state.pending_review_id,
-            pending_review_body=self._state.pending_review_body,
-            pending_review_comments=self._state.pending_review_comments,
-            version=self._pending_review_local_version,
-        )
-
-    def restore_pending_review_snapshot(
-        self,
-        snapshot: PendingReviewSnapshot,
-    ) -> None:
-        restored = build_pending_review_restoration(
-            snapshot,
-            current_version=self._pending_review_local_version,
-        )
-        self._state.pending_review_id = restored.pending_review_id
-        self._state.pending_review_body = restored.pending_review_body
-        self._state.pending_review_comments = restored.pending_review_comments
-        self._state.pending_review_drafts_are_canonical = bool(
-            restored.pending_review_comments
-        )
-        self._pending_review_local_version = restored.version
 
     def review_annotations(self) -> ReviewAnnotationIndex:
         return ReviewAnnotationIndex.from_parts(
-            pending_comments=self._state.pending_review_comments,
+            pending_comments=self._state.pending_review.comments,
             review_threads=self._state.review_threads,
         )
 
@@ -697,7 +616,7 @@ class PRStore:
         side: Literal["LEFT", "RIGHT"],
     ) -> PendingReviewComment | None:
         return find_pending_inline_comment(
-            self._state.pending_review_comments,
+            self._state.pending_review.comments,
             path=path,
             line=line,
             side=side,
@@ -709,15 +628,15 @@ class PRStore:
     def pending_review_hidden_ids(self) -> tuple[int, ...]:
         """Return pending review ids whose raw threads are local draft mirrors."""
         local_workspace_active = (
-            self._state.pending_review_drafts_are_canonical
-            or bool(self._state.pending_review_comments)
+            self._state.pending_review.drafts_are_canonical
+            or bool(self._state.pending_review.comments)
         )
         return pending_review_hidden_ids(
             pending_review_id=(
-                self._state.pending_review_id if local_workspace_active else None
+                self._state.pending_review.review_id if local_workspace_active else None
             ),
             reviews=self._state.reviews if local_workspace_active else (),
-            obsolete_pending_review_ids=self._state.obsolete_pending_review_ids,
+            obsolete_pending_review_ids=self._state.pending_review.obsolete_review_ids,
         )
 
     def visible_review_threads_for_paths(
@@ -736,7 +655,7 @@ class PRStore:
             if thread.path in paths
             and not review_thread_is_pending_draft(
                 thread,
-                drafts=self._state.pending_review_comments,
+                drafts=self._state.pending_review.comments,
                 hidden_review_ids=hidden_ids,
                 reviews=self._state.reviews,
             )
@@ -746,8 +665,8 @@ class PRStore:
         """Return timeline reviews using pending review local state as canonical."""
         return visible_timeline_reviews(
             self._state.reviews,
-            pending_review_id=self._state.pending_review_id,
-            pending_review_body=self._state.pending_review_body,
+            pending_review_id=self._state.pending_review.review_id,
+            pending_review_body=self._state.pending_review.body,
         )
 
     def visible_timeline_comments(self) -> list[PRComment]:
@@ -755,8 +674,8 @@ class PRStore:
         reviews = self.visible_timeline_reviews()
         return visible_timeline_comments(
             self._state.comments,
-            drafts=self._state.pending_review_comments,
-            pending_review_id=self._state.pending_review_id,
+            drafts=self._state.pending_review.comments,
+            pending_review_id=self._state.pending_review.review_id,
             hidden_review_ids=self.pending_review_hidden_ids(),
             reviews=reviews,
         )
@@ -781,43 +700,20 @@ class PRStore:
             start_side=start_side,
         )
 
-    async def _replace_pending_review(
-        self,
-        comments: list[PendingReviewComment],
-        *,
-        removed_comment: PendingReviewComment | None = None,
-    ) -> PRReview | None:
+    def _pending_review_head_sha(self) -> str:
+        """Read the head at synchronization time, after any optimistic UI callback."""
         pr = self._state.pr
-        replacement = await replace_pending_review(
-            adapter=self._service,
-            pr_number=self.pr_number,
-            comments=comments,
-            pending_review_id=self._state.pending_review_id,
-            pending_review_body=self._state.pending_review_body,
-            head_sha=pr.head_sha if pr is not None else "",
-            removed_comment=removed_comment,
-        )
-        self._state.pending_review_comments = replacement.comments
-        self._state.pending_review_drafts_are_canonical = bool(replacement.comments)
-        return replacement.review
+        return pr.head_sha if pr is not None else ""
 
     def _remember_pending_review_sync_review(
         self,
-        *,
         previous_review_id: int | None,
         review: PRReview | None,
     ) -> None:
-        next_review_id = review.id if review is not None and review.id else None
-        if previous_review_id and previous_review_id != next_review_id:
-            self._state.obsolete_pending_review_ids.add(previous_review_id)
-        if next_review_id:
-            self._state.obsolete_pending_review_ids.discard(next_review_id)
-
         if review is None:
             if previous_review_id:
                 self._remove_pending_review(previous_review_id)
             return
-
         self._upsert_pending_review(review, previous_review_id=previous_review_id)
 
     def _upsert_pending_review(
@@ -856,63 +752,6 @@ class PRStore:
             if not (review.id == review_id and review.state == ReviewState.PENDING)
         ]
 
-    async def _load_pending_review(
-        self,
-        pr: PR,
-        *,
-        loaded_at_version: int | None = None,
-    ) -> None:
-        expected_version = (
-            self._pending_review_local_version
-            if loaded_at_version is None
-            else loaded_at_version
-        )
-        projection = await load_pending_review_projection(
-            pr.reviews,
-            pr_number=self.pr_number,
-            review_threads=pr.review_threads,
-            list_review_comments=getattr(self._service, "list_review_comments", None),
-        )
-        if expected_version != self._pending_review_local_version:
-            return
-        if self._preserve_pending_review_projection(projection):
-            return
-
-        applied = apply_pending_review_projection(
-            projection,
-            current_version=self._pending_review_local_version,
-        )
-        self._state.pending_review_id = applied.review_id
-        self._state.pending_review_body = applied.body
-        self._state.pending_review_comments = applied.comments
-        self._state.pending_review_drafts_are_canonical = bool(applied.comments)
-        self._pending_review_local_version = applied.version
-
-    def _preserve_pending_review_projection(
-        self,
-        projection: PendingReviewProjection,
-    ) -> bool:
-        current_comments = self._state.pending_review_comments
-        if not current_comments:
-            return False
-
-        comments = merge_pending_review_drafts(current_comments, projection.comments)
-        review_id = projection.review_id or self._state.pending_review_id
-        body = projection.body or self._state.pending_review_body
-        if (
-            review_id == self._state.pending_review_id
-            and body == self._state.pending_review_body
-            and comments == current_comments
-        ):
-            return True
-
-        self._state.pending_review_id = review_id
-        self._state.pending_review_body = body
-        self._state.pending_review_comments = comments
-        self._state.pending_review_drafts_are_canonical = bool(comments)
-        self._pending_review_local_version += 1
-        return True
-
     def delete_pending_inline_comment(
         self,
         *,
@@ -921,19 +760,12 @@ class PRStore:
         side: Literal["LEFT", "RIGHT"],
         draft_index: int | None = None,
     ) -> bool:
-        result = delete_pending_comment(
-            self._state.pending_review_comments,
+        return self._state.pending_review.delete_inline_comment(
             path=path,
             line=line,
             side=side,
-            current_version=self._pending_review_local_version,
             draft_index=draft_index,
         )
-        if result.deleted:
-            self._state.pending_review_comments = result.comments
-            self._state.pending_review_drafts_are_canonical = True
-            self._pending_review_local_version = result.version
-        return result.deleted
 
     async def queue_pending_file_comment(
         self,
@@ -942,16 +774,15 @@ class PRStore:
         path: str,
         after_local_save: Callable[[], Awaitable[None]] | None = None,
     ) -> PendingReviewComment:
-        snapshot = self.snapshot_pending_review()
-        draft = self.save_pending_file_comment(body, path=path)
-        if after_local_save is not None:
-            await after_local_save()
-
-        await self.sync_pending_review(
-            rollback_to=snapshot,
-            rollback_if_version=self._pending_review_local_version,
+        return await self._state.pending_review.queue_file_comment(
+            body,
+            path=path,
+            after_local_save=after_local_save,
+            adapter=self._service,
+            pr_number=self.pr_number,
+            head_sha=self._pending_review_head_sha,
+            on_sync=self._remember_pending_review_sync_review,
         )
-        return draft
 
     async def queue_pending_inline_comment(
         self,
@@ -965,52 +796,21 @@ class PRStore:
         draft_index: int | None = None,
         after_local_save: Callable[[], Awaitable[None]] | None = None,
     ) -> PendingReviewComment:
-        normalized = body.strip()
-        if not normalized:
-            raise ValueError("Comment cannot be empty")
-
-        removed_comment = (
-            self._pending_review_comment_for_sync(path, line, side, draft_index)
-            if draft_index is not None
-            else None
-        )
-        snapshot = self.snapshot_pending_review()
-        draft = self.save_pending_inline_comment(
-            normalized,
+        return await self._state.pending_review.queue_inline_comment(
+            body,
             path=path,
             line=line,
             side=side,
+            diff=self._state.file_diffs.get(path),
             start_line=start_line,
             start_side=start_side,
             draft_index=draft_index,
+            after_local_save=after_local_save,
+            adapter=self._service,
+            pr_number=self.pr_number,
+            head_sha=self._pending_review_head_sha,
+            on_sync=self._remember_pending_review_sync_review,
         )
-        saved_version = self._pending_review_local_version
-        if after_local_save is not None:
-            await after_local_save()
-
-        if removed_comment is not None and removed_comment.review_comment_node_id:
-            try:
-                async with self._pending_review_sync_lock:
-                    await self._service.update_review_comment(
-                        removed_comment.review_comment_node_id,
-                        normalized,
-                    )
-            except Exception:
-                if should_restore_pending_review_snapshot(
-                    snapshot,
-                    rollback_if_version=saved_version,
-                    current_version=self._pending_review_local_version,
-                ):
-                    self.restore_pending_review_snapshot(snapshot)
-                raise
-            return draft
-
-        await self.sync_pending_review(
-            rollback_to=snapshot,
-            rollback_if_version=self._pending_review_local_version,
-            removed_comment=removed_comment,
-        )
-        return draft
 
     async def upsert_pending_inline_comment(
         self,
@@ -1060,46 +860,13 @@ class PRStore:
             )
         return comment
 
-    async def sync_pending_review(
-        self,
-        *,
-        rollback_to: PendingReviewSnapshot | None = None,
-        rollback_if_version: int | None = None,
-        removed_comment: PendingReviewComment | None = None,
-    ) -> PRReview | None:
-        try:
-            async with self._pending_review_sync_lock:
-                previous_review_id = self._state.pending_review_id
-                comments = list(self._state.pending_review_comments)
-                review = await self._replace_pending_review(
-                    comments,
-                    removed_comment=removed_comment,
-                )
-                result = project_pending_review_sync_result(
-                    review,
-                    current_body=self._state.pending_review_body,
-                )
-                applied = apply_pending_review_sync_result(
-                    result,
-                    current_version=self._pending_review_local_version,
-                )
-                self._state.pending_review_id = applied.pending_review_id
-                self._state.pending_review_body = applied.pending_review_body
-                self._pending_review_local_version = applied.version
-                self._remember_pending_review_sync_review(
-                    previous_review_id=previous_review_id,
-                    review=review,
-                )
-                return review
-        except Exception:
-            if should_restore_pending_review_snapshot(
-                rollback_to,
-                rollback_if_version=rollback_if_version,
-                current_version=self._pending_review_local_version,
-            ):
-                assert rollback_to is not None
-                self.restore_pending_review_snapshot(rollback_to)
-            raise
+    async def sync_pending_review(self) -> PRReview | None:
+        return await self._state.pending_review.sync(
+            adapter=self._service,
+            pr_number=self.pr_number,
+            head_sha=self._pending_review_head_sha,
+            on_sync=self._remember_pending_review_sync_review,
+        )
 
     async def remove_pending_inline_comment(
         self,
@@ -1110,45 +877,32 @@ class PRStore:
         draft_index: int | None = None,
         after_local_delete: Callable[[], Awaitable[None]] | None = None,
     ) -> bool:
-        snapshot = self.snapshot_pending_review()
-        removed_comment = self._pending_review_comment_for_sync(
-            path,
-            line,
-            side,
-            draft_index,
-        )
-        deleted = self.delete_pending_inline_comment(
+        return await self._state.pending_review.remove_inline_comment(
             path=path,
             line=line,
             side=side,
             draft_index=draft_index,
+            after_local_delete=after_local_delete,
+            adapter=self._service,
+            pr_number=self.pr_number,
+            head_sha=self._pending_review_head_sha,
+            on_sync=self._remember_pending_review_sync_review,
         )
-        if not deleted:
-            return False
-        if after_local_delete is not None:
-            await after_local_delete()
-
-        await self.sync_pending_review(
-            rollback_to=snapshot,
-            rollback_if_version=self._pending_review_local_version,
-            removed_comment=removed_comment,
-        )
-        return True
 
     def pending_review_comment_index_for(
         self,
         comment: PRComment,
     ) -> int | None:
         """Return the canonical pending draft index represented by a comment."""
-        drafts = self._state.pending_review_comments
+        drafts = self._state.pending_review.comments
         for index, draft in enumerate(drafts):
             if draft.review_comment_id and draft.review_comment_id == comment.id:
                 return index
 
         hidden_review_ids = pending_review_hidden_ids(
-            pending_review_id=self._state.pending_review_id,
+            pending_review_id=self._state.pending_review.review_id,
             reviews=self._state.reviews,
-            obsolete_pending_review_ids=self._state.obsolete_pending_review_ids,
+            obsolete_pending_review_ids=self._state.pending_review.obsolete_review_ids,
         )
         if comment.pull_request_review_id not in hidden_review_ids:
             return None
@@ -1168,29 +922,14 @@ class PRStore:
         after_local_delete: Callable[[], Awaitable[None]] | None = None,
     ) -> bool:
         """Delete one canonical pending draft selected outside the diff."""
-        comments = self._state.pending_review_comments
-        if not 0 <= draft_index < len(comments):
-            return False
-
-        snapshot = self.snapshot_pending_review()
-        removed_comment = comments[draft_index]
-        result = delete_pending_comment_at(
-            comments,
-            draft_index=draft_index,
-            current_version=self._pending_review_local_version,
+        return await self._state.pending_review.remove_comment_at(
+            draft_index,
+            after_local_delete=after_local_delete,
+            adapter=self._service,
+            pr_number=self.pr_number,
+            head_sha=self._pending_review_head_sha,
+            on_sync=self._remember_pending_review_sync_review,
         )
-        self._state.pending_review_comments = result.comments
-        self._state.pending_review_drafts_are_canonical = True
-        self._pending_review_local_version = result.version
-        if after_local_delete is not None:
-            await after_local_delete()
-
-        await self.sync_pending_review(
-            rollback_to=snapshot,
-            rollback_if_version=self._pending_review_local_version,
-            removed_comment=removed_comment,
-        )
-        return True
 
     def _pending_review_comment_index(
         self,
@@ -1204,57 +943,19 @@ class PRStore:
             side=side,
         )
 
-    def _pending_review_comment_for_sync(
-        self,
-        path: str,
-        line: int,
-        side: Literal["LEFT", "RIGHT"],
-        draft_index: int | None,
-    ) -> PendingReviewComment | None:
-        return self.review_annotations().pending_for_sync(
-            path=path,
-            line=line,
-            side=side,
-            draft_index=draft_index,
-        )
-
     async def submit_review(
         self,
         event: Literal["APPROVE", "COMMENT", "REQUEST_CHANGES"],
         body: str = "",
     ) -> None:
         """Submit a top-level review and refresh local review state."""
-        plan = plan_review_submission(
+        await self._state.pending_review.submit(
             event,
             body,
-            self._state.pending_review_comments,
-            pending_review_id=self._state.pending_review_id,
+            adapter=self._service,
+            pr_number=self.pr_number,
+            remember_submitted=self._remember_submitted_review,
         )
-        if plan.uses_pending_review:
-            assert plan.pending_review_id is not None
-            submitted_review = await self._service.submit_pending_review(
-                self.pr_number,
-                plan.pending_review_id,
-                event=plan.event,
-                body=plan.body,
-            )
-        else:
-            submitted_review = await self._service.submit_review(
-                self.pr_number,
-                event=plan.event,
-                body=plan.body,
-                comments=plan.comments,
-            )
-        await self._remember_submitted_review(submitted_review)
-
-        cleared = clear_pending_review(
-            current_version=self._pending_review_local_version,
-        )
-        self._state.pending_review_id = cleared.pending_review_id
-        self._state.pending_review_body = cleared.pending_review_body
-        self._state.pending_review_comments = cleared.pending_review_comments
-        self._state.pending_review_drafts_are_canonical = False
-        self._pending_review_local_version = cleared.version
 
     async def _remember_submitted_review(self, review: PRReview | None) -> None:
         if review is None or not review.id:
@@ -1375,24 +1076,21 @@ class PRStore:
             states = await self._service.get_pr_file_view_states(self.pr_number)
         except RuntimeError:
             return
-        apply_file_view_states(self._state.files, states)
+        self.viewed_files.apply_loaded(states)
 
     async def set_file_viewed(self, filename: str, *, viewed: bool) -> None:
         """Sync viewed state to GitHub."""
+        await self.viewed_files.set(filename, viewed=viewed)
+
+    async def _persist_file_viewed(self, filename: str, viewed: bool) -> bool:
         pr = self._state.pr
         if pr is None:
-            return
-        state = FileViewedState.VIEWED if viewed else FileViewedState.UNVIEWED
+            return False
         if viewed:
             await self._service.mark_file_as_viewed(pr.node_id, filename)
         else:
             await self._service.unmark_file_as_viewed(pr.node_id, filename)
-        apply_file_view_state(
-            self._state.files,
-            self._state.files_by_filename,
-            filename,
-            state,
-        )
+        return True
 
     def _update_thread_resolved_state(
         self, root_comment_id: int, *, is_resolved: bool
@@ -1407,3 +1105,119 @@ class PRStore:
         self._state.review_threads = updated.review_threads
         self._state.thread_info_cache = updated.thread_info_cache
         self._state.thread_cache = updated.thread_cache
+
+
+@dataclass
+class _FileViewedSyncState:
+    confirmed: FileViewedState
+    desired: FileViewedState
+    revision: int = 1
+    worker_active: bool = False
+    force_sync: bool = False
+
+
+class ViewedFiles:
+    """Own optimistic viewed state and per-file reconciliation."""
+
+    def __init__(
+        self,
+        state: PRStoreState,
+        persist: Callable[[str, bool], Awaitable[bool]],
+    ) -> None:
+        self._state = state
+        self._persist = persist
+        self._pending: dict[str, _FileViewedSyncState] = {}
+
+    def apply_loaded(self, states: dict[str, str]) -> None:
+        """Apply remotely loaded viewed states."""
+        apply_file_view_states(self._state.files, states)
+
+    async def set(self, filename: str, *, viewed: bool) -> None:
+        """Publish a viewed state after GitHub confirms the write."""
+        if await self._persist(filename, viewed):
+            apply_file_view_state(
+                self._state.files,
+                self._state.files_by_filename,
+                filename,
+                FileViewedState.VIEWED if viewed else FileViewedState.UNVIEWED,
+            )
+
+    def toggle(
+        self,
+        filename: str,
+        on_change: Callable[[str, FileViewedState], None] | None = None,
+    ) -> bool:
+        """Toggle locally and report whether a synchronization worker is needed."""
+        file = self._file(filename)
+        if file is None:
+            return False
+        old_state = file.viewer_viewed_state
+        desired = (
+            FileViewedState.UNVIEWED
+            if old_state == FileViewedState.VIEWED
+            else FileViewedState.VIEWED
+        )
+        pending = self._pending.get(filename)
+        if pending is None:
+            pending = _FileViewedSyncState(old_state, desired)
+            self._pending[filename] = pending
+        else:
+            pending.desired = desired
+            pending.revision += 1
+        file.viewer_viewed_state = desired
+        if on_change is not None:
+            on_change(filename, desired)
+        start_sync = not pending.worker_active
+        pending.worker_active = True
+        return start_sync
+
+    async def sync(
+        self,
+        filename: str,
+        on_change: Callable[[str], None],
+    ) -> FileViewedState | None:
+        """Reconcile queued intent, rolling back only the current failed request."""
+        pending = self._pending.get(filename)
+        if pending is None:
+            return None
+        try:
+            while True:
+                requested = pending.desired
+                revision = pending.revision
+                if requested == pending.confirmed and not pending.force_sync:
+                    return None
+                try:
+                    await self.set(filename, viewed=requested == FileViewedState.VIEWED)
+                except GitHubError:
+                    if pending.revision != revision:
+                        pending.force_sync = True
+                        continue
+                    pending.desired = pending.confirmed
+                    pending.force_sync = False
+                    file = self._file(filename)
+                    if file is not None:
+                        file.viewer_viewed_state = pending.confirmed
+                    on_change(filename)
+                    raise
+
+                pending.confirmed = requested
+                pending.force_sync = False
+                file = self._file(filename)
+                if file is not None and file.viewer_viewed_state != pending.desired:
+                    file.viewer_viewed_state = pending.desired
+                    on_change(filename)
+                if pending.desired == pending.confirmed:
+                    return pending.confirmed
+        finally:
+            pending.worker_active = False
+            if (
+                self._pending.get(filename) is pending
+                and pending.desired == pending.confirmed
+                and not pending.force_sync
+            ):
+                self._pending.pop(filename, None)
+
+    def _file(self, filename: str) -> PRFile | None:
+        return next(
+            (file for file in self._state.files if file.filename == filename), None
+        )

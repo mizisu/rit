@@ -1,6 +1,4 @@
 import asyncio
-from types import SimpleNamespace
-from typing import Any, cast
 
 import pytest
 
@@ -53,12 +51,9 @@ def test_toggle_file_viewed_uses_combined_diff_cursor_file() -> None:
 
     screen = TestScreen(owner="test", repo="repo", pr_number=123)
     screen.current_tab = 1
-    screen.store = cast(
-        Any,
-        SimpleNamespace(
-            state=SimpleNamespace(files=[file], pr=object(), selected_file="two.py")
-        ),
-    )
+    screen.store.state.files = [file]
+    screen.store.state.pr = PR(number=123, node_id="PR_123")
+    screen.store.state.selected_file = "two.py"
 
     screen.action_toggle_file_viewed()
 
@@ -94,10 +89,10 @@ async def test_toggle_targets_new_file_when_focus_moves_during_viewed_refresh(
             file.filename: parse_patch(patch, file.filename) for file in files
         }
 
-        async def set_file_viewed(_filename: str, *, viewed: bool) -> None:
-            assert isinstance(viewed, bool)
+        async def mark_file_as_viewed(_pr_id: str, filename: str) -> None:
+            assert filename in {"one.py", "two.py"}
 
-        monkeypatch.setattr(store, "set_file_viewed", set_file_viewed)
+        monkeypatch.setattr(store._service, "mark_file_as_viewed", mark_file_as_viewed)
 
         screen.switch_tab(1)
         screen.file_changes.refresh_files()
@@ -158,120 +153,21 @@ async def test_toggle_targets_new_file_when_focus_moves_during_viewed_refresh(
 
 
 @pytest.mark.asyncio
-async def test_current_viewed_failure_rolls_back_confirmed_state() -> None:
-    file = PRFile(filename="src/app.py", viewer_viewed_state=FileViewedState.VIEWED)
-    file_changes = CaptureFileChanges()
-    messages: list[Flash] = []
-
-    class Store:
-        state = SimpleNamespace(files=[file])
-
-        async def set_file_viewed(self, _filename: str, *, viewed: bool) -> None:
-            raise GitHubError("failed")
-
-    class TestScreen(MainScreen):
-        @property
-        def file_changes(self) -> CaptureFileChanges:
-            return file_changes
-
-        def post_message(self, message: Flash) -> None:
-            messages.append(message)
-
-    screen = TestScreen(owner="test", repo="repo", pr_number=123)
-    screen.store = cast(Any, Store())
-
-    await screen._sync_file_viewed(
-        "src/app.py",
-        FileViewedState.UNVIEWED,
-        FileViewedState.VIEWED,
-    )
-
-    assert file.viewer_viewed_state == FileViewedState.UNVIEWED
-    assert file_changes.updated == ["src/app.py"]
-    assert screen._file_viewed_sync == {}
-    assert [(message.content, message.style) for message in messages] == [
-        ("Failed to update viewed state", "error")
-    ]
-
-
-@pytest.mark.asyncio
-async def test_rapid_viewed_toggles_retry_latest_intent_after_stale_failure() -> None:
-    filename = "src/app.py"
-    file = PRFile(filename=filename)
-    first_started = asyncio.Event()
-    release_first = asyncio.Event()
-    calls: list[bool] = []
-    messages: list[Flash] = []
-
-    class Store:
-        state = SimpleNamespace(files=[file], pr=object())
-
-        async def set_file_viewed(self, _filename: str, *, viewed: bool) -> None:
-            calls.append(viewed)
-            if len(calls) == 1:
-                first_started.set()
-                await release_first.wait()
-                raise GitHubError("delayed failure")
-            file.viewer_viewed_state = (
-                FileViewedState.VIEWED if viewed else FileViewedState.UNVIEWED
-            )
-
-    class DiffView:
-        def collapse_viewed_file(self, _filename: str) -> None:
-            pass
-
-    file_changes = CaptureFileChanges()
-    file_changes.diff_view = DiffView()  # type: ignore[attr-defined]
-
-    tasks: list[asyncio.Task[None]] = []
-
-    class TestScreen(MainScreen):
-        @property
-        def file_changes(self) -> CaptureFileChanges:
-            return file_changes
-
-        def _resolve_file_view_target(self) -> str:
-            return filename
-
-        def run_worker(self, coro, *args: object, **kwargs: object) -> None:
-            tasks.append(asyncio.create_task(coro))
-
-        def post_message(self, message: Flash) -> None:
-            messages.append(message)
-
-    screen = TestScreen(owner="test", repo="repo", pr_number=123)
-    screen.store = cast(Any, Store())
-    screen.current_tab = 1
-
-    screen.action_toggle_file_viewed()
-    await asyncio.wait_for(first_started.wait(), timeout=1)
-    screen.action_toggle_file_viewed()
-    screen.action_toggle_file_viewed()
-    assert file.viewer_viewed_state == FileViewedState.VIEWED
-
-    release_first.set()
-    await asyncio.gather(*tasks)
-
-    assert calls == [True, True]
-    assert file.viewer_viewed_state == FileViewedState.VIEWED
-    assert screen._file_viewed_sync == {}
-    assert [(message.content, message.style) for message in messages] == [
-        ("Marked Viewed", "success")
-    ]
-
-
-@pytest.mark.asyncio
-async def test_sync_file_viewed_reraises_unexpected_success_flash_errors() -> None:
-    file = PRFile(filename="src/app.py", viewer_viewed_state=FileViewedState.VIEWED)
+@pytest.mark.parametrize("fail_sync", [False, True])
+async def test_sync_file_viewed_reraises_unexpected_flash_errors(
+    fail_sync: bool,
+) -> None:
+    file = PRFile(filename="src/app.py")
     file_changes = CaptureFileChanges()
     calls: list[tuple[str, bool]] = []
     messages: list[Flash] = []
 
-    class Store:
-        state = SimpleNamespace(files=[file])
-
-        async def set_file_viewed(self, filename: str, *, viewed: bool) -> None:
+    class Store(PRStore):
+        async def _persist_file_viewed(self, filename: str, viewed: bool) -> bool:
             calls.append((filename, viewed))
+            if fail_sync:
+                raise GitHubError("failed")
+            return True
 
     class TestScreen(MainScreen):
         @property
@@ -280,22 +176,23 @@ async def test_sync_file_viewed_reraises_unexpected_success_flash_errors() -> No
 
         def post_message(self, message: Flash) -> None:
             messages.append(message)
-            if message.style == "success":
-                raise RuntimeError("flash dispatch failed")
+            raise RuntimeError("flash dispatch failed")
 
     screen = TestScreen(owner="test", repo="repo", pr_number=123)
-    screen.store = cast(Any, Store())
+    screen.store = Store()
+    screen.store.state.files = [file]
+    assert screen.store.viewed_files.toggle(file.filename)
 
     with pytest.raises(RuntimeError, match="flash dispatch failed"):
-        await screen._sync_file_viewed(
-            "src/app.py",
-            FileViewedState.UNVIEWED,
-            FileViewedState.VIEWED,
-        )
+        await screen._sync_file_viewed(file.filename)
 
-    assert calls == [("src/app.py", True)]
-    assert file.viewer_viewed_state == FileViewedState.VIEWED
-    assert file_changes.updated == []
+    assert calls == [(file.filename, True)]
+    assert file.viewer_viewed_state == (
+        FileViewedState.UNVIEWED if fail_sync else FileViewedState.VIEWED
+    )
+    assert file_changes.updated == ([file.filename] if fail_sync else [])
     assert [(message.content, message.style) for message in messages] == [
-        ("Marked Viewed", "success")
+        ("Failed to update viewed state", "error")
+        if fail_sync
+        else ("Marked Viewed", "success")
     ]

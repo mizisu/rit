@@ -14,6 +14,7 @@ from rit.state.models import (
     ReviewState,
     ReviewThread,
 )
+from rit.state.pending_review_workspace import PendingReviewWorkspace
 from rit.state.store import PRStore, UnsupportedInlineCommentTarget
 
 
@@ -291,8 +292,8 @@ def test_pending_review_comment_index_matches_timeline_projection() -> None:
         subject_type="file",
         review_comment_id=501,
     )
-    store.state.pending_review_id = 91
-    store.state.pending_review_comments = [draft]
+    store.state.pending_review.review_id = 91
+    store.state.pending_review.comments = [draft]
     projected = PRComment(
         id=501,
         body="whole file",
@@ -307,7 +308,7 @@ def test_pending_review_comment_index_matches_timeline_projection() -> None:
 @pytest.mark.asyncio
 async def test_remove_pending_review_comment_at_supports_file_draft() -> None:
     store = PRStore(pr_number=123)
-    store.state.pending_review_comments = [
+    store.state.pending_review.comments = [
         PendingReviewComment(
             body="whole file",
             path="src/app.py",
@@ -319,7 +320,7 @@ async def test_remove_pending_review_comment_at_supports_file_draft() -> None:
     deleted = await store.remove_pending_review_comment_at(0)
 
     assert deleted is True
-    assert store.state.pending_review_comments == []
+    assert store.state.pending_review.comments == []
 
 
 @pytest.mark.asyncio
@@ -373,7 +374,7 @@ async def test_post_inline_comment_submits_only_selected_pending_draft() -> None
     assert service.inline_comment_calls == [
         (123, "second", "deadbeef", "src/app.py", 7, "RIGHT")
     ]
-    assert [draft.body for draft in store.state.pending_review_comments] == ["first"]
+    assert [draft.body for draft in store.state.pending_review.comments] == ["first"]
     assert service.create_pending_review_calls == [
         [("src/app.py", 7, "RIGHT", "first")]
     ]
@@ -418,7 +419,7 @@ async def test_queue_pending_file_comment_creates_file_level_review_draft() -> N
         side="RIGHT",
         subject_type="file",
     )
-    assert store.state.pending_review_comments == [
+    assert store.state.pending_review.comments == [
         draft.model_copy(
             update={
                 "review_comment_id": 100001,
@@ -430,7 +431,7 @@ async def test_queue_pending_file_comment_creates_file_level_review_draft() -> N
         [("src/app.py", 0, "RIGHT", "check the whole file")]
     ]
     assert service.file_comment_calls == []
-    assert store.state.pending_review_id == 100
+    assert store.state.pending_review.review_id == 100
 
 
 @pytest.mark.asyncio
@@ -510,7 +511,7 @@ def test_save_pending_inline_comment_allows_multiple_drafts_on_same_line() -> No
 
     assert first.body == "first body"
     assert second.body == "second body"
-    assert store.state.pending_review_comments == [first, second]
+    assert store.state.pending_review.comments == [first, second]
 
 
 def test_save_pending_inline_comment_preserves_multiline_range() -> None:
@@ -547,7 +548,7 @@ def test_save_pending_inline_comment_replaces_selected_draft() -> None:
     )
 
     assert second.body == "updated body"
-    assert store.state.pending_review_comments == [second]
+    assert store.state.pending_review.comments == [second]
 
 
 def test_delete_pending_inline_comment_removes_matching_target() -> None:
@@ -566,7 +567,7 @@ def test_delete_pending_inline_comment_removes_matching_target() -> None:
     )
 
     assert deleted is True
-    assert store.state.pending_review_comments == []
+    assert store.state.pending_review.comments == []
 
 
 @pytest.mark.asyncio
@@ -575,7 +576,7 @@ async def test_upsert_pending_inline_comment_syncs_pending_review() -> None:
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = FakeInlineCommentService()
     store._service = service  # type: ignore[assignment]
-    previous_version = store.pending_review_version
+    previous_version = store.state.pending_review.revision
 
     draft = await store.upsert_pending_inline_comment(
         "hello",
@@ -588,8 +589,8 @@ async def test_upsert_pending_inline_comment_syncs_pending_review() -> None:
     assert service.create_pending_review_calls == [
         [("src/app.py", 7, "RIGHT", "hello")]
     ]
-    assert store.state.pending_review_id == 100
-    assert store.pending_review_version == previous_version + 2
+    assert store.state.pending_review.review_id == 100
+    assert store.state.pending_review.revision == previous_version + 2
 
 
 @pytest.mark.asyncio
@@ -612,7 +613,7 @@ async def test_queue_pending_inline_comment_adds_multiple_drafts_on_same_line() 
         side="RIGHT",
     )
 
-    assert [comment.body for comment in store.state.pending_review_comments] == [
+    assert [comment.body for comment in store.state.pending_review.comments] == [
         first.body,
         second.body,
     ]
@@ -646,8 +647,8 @@ async def test_queue_pending_inline_comment_edits_selected_draft_without_droppin
         line=7,
         side="RIGHT",
     )
-    second_comment_id = store.state.pending_review_comments[1].review_comment_id
-    second_comment_node_id = store.state.pending_review_comments[
+    second_comment_id = store.state.pending_review.comments[1].review_comment_id
+    second_comment_node_id = store.state.pending_review.comments[
         1
     ].review_comment_node_id
     create_call_count = len(service.create_pending_review_calls)
@@ -660,7 +661,7 @@ async def test_queue_pending_inline_comment_edits_selected_draft_without_droppin
     )
 
     assert updated.body == "updated second"
-    assert [comment.body for comment in store.state.pending_review_comments] == [
+    assert [comment.body for comment in store.state.pending_review.comments] == [
         "first",
         "updated second",
     ]
@@ -675,7 +676,7 @@ async def test_queue_pending_inline_comment_edits_selected_draft_without_droppin
 async def test_queue_pending_inline_comment_updates_server_draft_in_place() -> None:
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
-    store.state.pending_review_id = 91
+    store.state.pending_review.review_id = 91
     original = PendingReviewComment(
         body="original",
         path="src/app.py",
@@ -684,7 +685,7 @@ async def test_queue_pending_inline_comment_updates_server_draft_in_place() -> N
         review_comment_id=91001,
         review_comment_node_id="PRRC_91001",
     )
-    store.state.pending_review_comments = [original]
+    store.state.pending_review.comments = [original]
     service = FakeInlineCommentService()
     store._service = service  # type: ignore[assignment]
 
@@ -698,8 +699,8 @@ async def test_queue_pending_inline_comment_updates_server_draft_in_place() -> N
 
     assert updated.body == "updated"
     assert updated.review_comment_id == original.review_comment_id
-    assert store.state.pending_review_comments == [updated]
-    assert store.state.pending_review_id == 91
+    assert store.state.pending_review.comments == [updated]
+    assert store.state.pending_review.review_id == 91
     assert service.update_review_comment_calls == [("PRRC_91001", "updated")]
     assert service.delete_pending_review_calls == []
     assert service.create_pending_review_calls == []
@@ -709,7 +710,7 @@ async def test_queue_pending_inline_comment_updates_server_draft_in_place() -> N
 async def test_queue_pending_inline_comment_rolls_back_failed_server_edit() -> None:
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
-    store.state.pending_review_id = 91
+    store.state.pending_review.review_id = 91
     original = PendingReviewComment(
         body="original",
         path="src/app.py",
@@ -718,7 +719,7 @@ async def test_queue_pending_inline_comment_rolls_back_failed_server_edit() -> N
         review_comment_id=91001,
         review_comment_node_id="PRRC_91001",
     )
-    store.state.pending_review_comments = [original]
+    store.state.pending_review.comments = [original]
     service = BlockingReviewCommentUpdateService()
     service.fail_update = True
     store._service = service  # type: ignore[assignment]
@@ -734,7 +735,7 @@ async def test_queue_pending_inline_comment_rolls_back_failed_server_edit() -> N
     )
     await asyncio.wait_for(service.update_started.wait(), timeout=1)
 
-    optimistic = store.state.pending_review_comments[0]
+    optimistic = store.state.pending_review.comments[0]
     assert optimistic.body == "updated"
     assert optimistic.review_comment_id == original.review_comment_id
 
@@ -742,11 +743,83 @@ async def test_queue_pending_inline_comment_rolls_back_failed_server_edit() -> N
     with pytest.raises(RuntimeError, match="update failed"):
         await task
 
-    assert store.state.pending_review_id == 91
-    assert store.state.pending_review_comments == [original]
+    assert store.state.pending_review.review_id == 91
+    assert store.state.pending_review.comments == [original]
     assert service.update_review_comment_calls == [("PRRC_91001", "updated")]
     assert service.delete_pending_review_calls == []
     assert service.create_pending_review_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("identified", [False, True])
+@pytest.mark.parametrize("edit_during", ["callback", "sync"])
+async def test_pending_review_rollback_preserves_existing_version_capture_policy(
+    identified: bool,
+    edit_during: str,
+) -> None:
+    store = PRStore(pr_number=123)
+    store.state.pr = PR(number=123, head_sha="deadbeef")
+    original = PendingReviewComment(
+        body="original",
+        path="src/app.py",
+        line=7,
+        review_comment_id=91001,
+        review_comment_node_id="PRRC_91001" if identified else "",
+    )
+    store.state.pending_review = PendingReviewWorkspace(
+        review_id=91,
+        body="summary",
+        comments=[original],
+    )
+    if identified:
+        service = BlockingReviewCommentUpdateService()
+        service.fail_update = True
+        started, release = service.update_started, service.allow_update
+    else:
+        service = BlockingPendingReviewService()
+        service.fail_create = True
+        service.list_review_comments_result = [_created_review_comment(91, 1, original)]
+        started, release = service.create_started, service.allow_create
+    store._service = service  # type: ignore[assignment]
+
+    def save_newer_draft() -> None:
+        store.save_pending_inline_comment(
+            "newer",
+            path="src/app.py",
+            line=8,
+            side="RIGHT",
+        )
+
+    async def after_local_save() -> None:
+        if edit_during == "callback":
+            save_newer_draft()
+
+    task = asyncio.create_task(
+        store.queue_pending_inline_comment(
+            "updated",
+            path="src/app.py",
+            line=7,
+            side="RIGHT",
+            draft_index=0,
+            after_local_save=after_local_save,
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+    if edit_during == "sync":
+        save_newer_draft()
+    release.set()
+    with pytest.raises(RuntimeError, match="failed"):
+        await task
+
+    expected_bodies = (
+        ["updated", "newer"] if identified or edit_during == "sync" else ["original"]
+    )
+    assert [
+        draft.body for draft in store.state.pending_review.comments
+    ] == expected_bodies
+    assert store.state.pending_review.review_id == 91
+    assert store.state.pending_review.body == "summary"
+    assert store.state.pending_review.drafts_are_canonical
 
 
 @pytest.mark.asyncio
@@ -779,7 +852,7 @@ async def test_remove_pending_inline_comment_deletes_selected_draft_without_drop
     )
 
     assert deleted is True
-    assert [comment.body for comment in store.state.pending_review_comments] == [
+    assert [comment.body for comment in store.state.pending_review.comments] == [
         "first"
     ]
     assert service.create_pending_review_calls[-1] == [
@@ -791,7 +864,7 @@ async def test_remove_pending_inline_comment_deletes_selected_draft_without_drop
 async def test_remove_pending_inline_comment_marks_replaced_review_obsolete() -> None:
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
-    store.state.pending_review_id = 91
+    store.state.pending_review.review_id = 91
     store.state.reviews = [PRReview(id=91, state=ReviewState.PENDING)]
     store.state.review_threads = [
         ReviewThread(
@@ -853,10 +926,10 @@ async def test_remove_pending_inline_comment_marks_replaced_review_obsolete() ->
     )
 
     assert deleted is True
-    assert store.state.pending_review_id == 100
-    assert store.state.obsolete_pending_review_ids == {91}
+    assert store.state.pending_review.review_id == 100
+    assert store.state.pending_review.obsolete_review_ids == {91}
     assert [review.id for review in store.state.reviews] == [100]
-    assert [comment.body for comment in store.state.pending_review_comments] == [
+    assert [comment.body for comment in store.state.pending_review.comments] == [
         keep.body
     ]
     assert store.visible_review_threads_for_paths({"src/app.py"}) == []
@@ -866,8 +939,8 @@ def test_visible_timeline_comments_render_pending_draft_once_after_replacement()
     None
 ):
     store = PRStore(pr_number=123)
-    store.state.pending_review_id = 100
-    store.state.obsolete_pending_review_ids = {91}
+    store.state.pending_review.review_id = 100
+    store.state.pending_review.obsolete_review_ids = {91}
     store.state.reviews = [PRReview(id=100, state=ReviewState.PENDING)]
     store.state.comments = [
         PRComment(
@@ -879,7 +952,7 @@ def test_visible_timeline_comments_render_pending_draft_once_after_replacement()
             pull_request_review_id=91,
         )
     ]
-    store.state.pending_review_comments = [
+    store.state.pending_review.comments = [
         PendingReviewComment(
             body="keep",
             path="src/app.py",
@@ -898,9 +971,9 @@ def test_visible_timeline_comments_render_pending_draft_once_after_replacement()
 
 def test_visible_timeline_file_comment_has_no_line_anchor() -> None:
     store = PRStore(pr_number=123)
-    store.state.pending_review_id = 100
+    store.state.pending_review.review_id = 100
     store.state.reviews = [PRReview(id=100, state=ReviewState.PENDING)]
-    store.state.pending_review_comments = [
+    store.state.pending_review.comments = [
         PendingReviewComment(
             body="whole file",
             path="src/app.py",
@@ -922,7 +995,7 @@ def test_visible_timeline_file_comment_has_no_line_anchor() -> None:
 async def test_upsert_pending_inline_comment_preserves_server_drafts_on_sync() -> None:
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
-    store.state.pending_review_id = 91
+    store.state.pending_review.review_id = 91
     service = FakeInlineCommentService()
     service.list_review_comments_result = [
         PRComment.model_validate(
@@ -951,7 +1024,7 @@ async def test_upsert_pending_inline_comment_preserves_server_drafts_on_sync() -
             ("src/app.py", 8, "RIGHT", "new draft"),
         ]
     ]
-    assert [comment.body for comment in store.state.pending_review_comments] == [
+    assert [comment.body for comment in store.state.pending_review.comments] == [
         "old server draft",
         "new draft",
     ]
@@ -963,7 +1036,7 @@ async def test_upsert_pending_inline_comment_preserves_server_pending_draft_posi
 ):
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
-    store.state.pending_review_id = 91
+    store.state.pending_review.review_id = 91
     service = FakeInlineCommentService()
     service.list_review_comments_result = [
         PRComment.model_validate(
@@ -993,7 +1066,7 @@ async def test_upsert_pending_inline_comment_preserves_server_pending_draft_posi
             ("src/app.py", 3, "RIGHT", "new draft"),
         ]
     ]
-    assert [comment.body for comment in store.state.pending_review_comments] == [
+    assert [comment.body for comment in store.state.pending_review.comments] == [
         "old server draft",
         "new draft",
     ]
@@ -1005,7 +1078,7 @@ async def test_upsert_pending_inline_comment_does_not_delete_when_server_fetch_f
 ):
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
-    store.state.pending_review_id = 91
+    store.state.pending_review.review_id = 91
     service = FakeInlineCommentService()
 
     async def list_review_comments(
@@ -1027,7 +1100,7 @@ async def test_upsert_pending_inline_comment_does_not_delete_when_server_fetch_f
 
     assert service.delete_pending_review_calls == []
     assert service.create_pending_review_calls == []
-    assert store.state.pending_review_comments == []
+    assert store.state.pending_review.comments == []
 
 
 @pytest.mark.asyncio
@@ -1036,7 +1109,7 @@ async def test_upsert_pending_inline_comment_does_not_delete_when_server_comment
 ):
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
-    store.state.pending_review_id = 91
+    store.state.pending_review.review_id = 91
     service = FakeInlineCommentService()
     store._service = service  # type: ignore[assignment]
 
@@ -1050,7 +1123,7 @@ async def test_upsert_pending_inline_comment_does_not_delete_when_server_comment
 
     assert service.delete_pending_review_calls == []
     assert service.create_pending_review_calls == []
-    assert store.state.pending_review_comments == []
+    assert store.state.pending_review.comments == []
 
 
 @pytest.mark.asyncio
@@ -1075,8 +1148,8 @@ async def test_upsert_pending_inline_comment_keeps_unchanged_line_local() -> Non
 
     assert draft.is_diff_line is False
     assert service.create_pending_review_calls == []
-    assert store.state.pending_review_id is None
-    assert store.state.pending_review_comments == [draft]
+    assert store.state.pending_review.review_id is None
+    assert store.state.pending_review.comments == [draft]
 
 
 @pytest.mark.asyncio
@@ -1111,16 +1184,17 @@ async def test_upsert_pending_inline_comment_syncs_mixed_pending_comments() -> N
         [("src/app.py", 3, "RIGHT", "hello diff")],
         [("src/app.py", 3, "RIGHT", "hello diff")],
     ]
-    assert [comment.body for comment in store.state.pending_review_comments] == [
+    assert [comment.body for comment in store.state.pending_review.comments] == [
         diff_draft.body,
         full_file_draft.body,
     ]
 
 
 @pytest.mark.asyncio
-async def test_queue_pending_inline_comment_runs_hook_after_local_save_before_sync() -> (
-    None
-):
+@pytest.mark.parametrize("file_level", [False, True])
+async def test_queue_pending_comment_runs_hook_after_local_save_before_sync(
+    file_level: bool,
+) -> None:
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = BlockingPendingReviewService()
@@ -1129,13 +1203,17 @@ async def test_queue_pending_inline_comment_runs_hook_after_local_save_before_sy
     allow_hook = asyncio.Event()
 
     async def after_local_save() -> None:
-        assert store.state.pending_review_comments[0].body == "hello"
+        assert store.state.pending_review.comments[0].body == "hello"
         assert not service.create_started.is_set()
         hook_started.set()
         await allow_hook.wait()
 
-    task = asyncio.create_task(
-        store.queue_pending_inline_comment(
+    queue = (
+        store.queue_pending_file_comment(
+            "hello", path="src/app.py", after_local_save=after_local_save,
+        )
+        if file_level
+        else store.queue_pending_inline_comment(
             "hello",
             path="src/app.py",
             line=7,
@@ -1143,6 +1221,7 @@ async def test_queue_pending_inline_comment_runs_hook_after_local_save_before_sy
             after_local_save=after_local_save,
         )
     )
+    task = asyncio.create_task(queue)
 
     await asyncio.wait_for(hook_started.wait(), timeout=1)
     assert task.done() is False
@@ -1176,7 +1255,7 @@ async def test_upsert_pending_inline_comment_updates_local_state_before_sync_fin
     await asyncio.wait_for(service.create_started.wait(), timeout=1)
 
     assert task.done() is False
-    assert store.state.pending_review_comments[0].body == "hello"
+    assert store.state.pending_review.comments[0].body == "hello"
 
     service.allow_create.set()
     await task
@@ -1188,7 +1267,7 @@ async def test_upsert_pending_inline_comment_rolls_back_local_state_on_sync_fail
 ):
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
-    store.state.pending_review_id = 91
+    store.state.pending_review.review_id = 91
     old_draft = store.save_pending_inline_comment(
         "old body",
         path="src/app.py",
@@ -1220,14 +1299,14 @@ async def test_upsert_pending_inline_comment_rolls_back_local_state_on_sync_fail
     )
     await asyncio.wait_for(service.create_started.wait(), timeout=1)
 
-    assert store.state.pending_review_comments[0].body == "new body"
+    assert store.state.pending_review.comments[0].body == "new body"
 
     service.allow_create.set()
     with pytest.raises(RuntimeError, match="sync failed"):
         await task
 
-    assert store.state.pending_review_id == 91
-    assert store.state.pending_review_comments == [old_draft]
+    assert store.state.pending_review.review_id == 91
+    assert store.state.pending_review.comments == [old_draft]
 
 
 @pytest.mark.asyncio
@@ -1252,8 +1331,8 @@ async def test_remove_pending_inline_comment_deletes_server_pending_review() -> 
 
     assert deleted is True
     assert service.delete_pending_review_calls == [(123, 100)]
-    assert store.state.pending_review_id is None
-    assert store.state.pending_review_comments == []
+    assert store.state.pending_review.review_id is None
+    assert store.state.pending_review.comments == []
 
 
 @pytest.mark.asyncio
@@ -1262,7 +1341,7 @@ async def test_remove_pending_inline_comment_runs_hook_after_local_delete_before
 ):
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
-    store.state.pending_review_id = 100
+    store.state.pending_review.review_id = 100
     store.save_pending_inline_comment(
         "hello",
         path="src/app.py",
@@ -1276,7 +1355,7 @@ async def test_remove_pending_inline_comment_runs_hook_after_local_delete_before
     allow_hook = asyncio.Event()
 
     async def after_local_delete() -> None:
-        assert store.state.pending_review_comments == []
+        assert store.state.pending_review.comments == []
         assert not service.delete_started.is_set()
         hook_started.set()
         await allow_hook.wait()
@@ -1306,7 +1385,7 @@ async def test_remove_pending_inline_comment_updates_local_state_before_sync_fin
 ):
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
-    store.state.pending_review_id = 100
+    store.state.pending_review.review_id = 100
     store.save_pending_inline_comment(
         "hello",
         path="src/app.py",
@@ -1328,7 +1407,7 @@ async def test_remove_pending_inline_comment_updates_local_state_before_sync_fin
     await asyncio.wait_for(service.delete_started.wait(), timeout=1)
 
     assert task.done() is False
-    assert store.state.pending_review_comments == []
+    assert store.state.pending_review.comments == []
 
     service.allow_delete.set()
     assert await task is True
@@ -1346,12 +1425,12 @@ async def test_load_pending_review_does_not_clear_local_drafts() -> None:
         line=7,
         side="RIGHT",
     )
-    previous_version = store.pending_review_version
+    previous_version = store.state.pending_review.revision
 
-    await store._load_pending_review(PR(number=123, head_sha="deadbeef"))
+    await store.refresh_review_data()
 
-    assert store.state.pending_review_comments == [draft]
-    assert store.pending_review_version == previous_version
+    assert store.state.pending_review.comments == [draft]
+    assert store.state.pending_review.revision == previous_version
 
 
 @pytest.mark.asyncio
@@ -1380,7 +1459,7 @@ async def test_stale_pr_refresh_does_not_clear_new_pending_drafts() -> None:
         side="RIGHT",
     )
 
-    assert [comment.body for comment in store.state.pending_review_comments] == [
+    assert [comment.body for comment in store.state.pending_review.comments] == [
         "first draft",
         "second draft",
     ]
@@ -1404,17 +1483,17 @@ async def test_load_pr_data_restores_pending_review_comments() -> None:
 
     service.get_pr_all = get_pr_all  # type: ignore[method-assign]
     store._service = service  # type: ignore[assignment]
-    previous_version = store.pending_review_version
+    previous_version = store.state.pending_review.revision
 
     await store._load_pr_data()
 
-    assert store.state.pending_review_id == 91
-    assert store.state.pending_review_body == "pending body"
-    assert store.state.pending_review_comments == [
-        store.state.pending_review_comments[0]
+    assert store.state.pending_review.review_id == 91
+    assert store.state.pending_review.body == "pending body"
+    assert store.state.pending_review.comments == [
+        store.state.pending_review.comments[0]
     ]
-    assert store.state.pending_review_comments[0].body == "hello"
-    assert store.pending_review_version == previous_version + 1
+    assert store.state.pending_review.comments[0].body == "hello"
+    assert store.state.pending_review.revision == previous_version + 1
 
 
 @pytest.mark.asyncio
@@ -1467,8 +1546,8 @@ async def test_load_pr_data_restores_pending_review_comment_from_thread_anchor()
 
     await store._load_pr_data()
 
-    assert store.state.pending_review_id == 91
-    assert store.state.pending_review_comments == [
+    assert store.state.pending_review.review_id == 91
+    assert store.state.pending_review.comments == [
         PendingReviewComment(
             body="server draft",
             path="src/app.py",

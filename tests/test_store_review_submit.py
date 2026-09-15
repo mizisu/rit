@@ -109,17 +109,17 @@ async def test_submit_review_includes_pending_comments_and_clears_them() -> None
         line=7,
         side="RIGHT",
     )
-    previous_version = store.pending_review_version
+    previous_version = store.state.pending_review.revision
     service = FakeReviewService()
     store._service = service  # type: ignore[assignment]
 
     await store.submit_review("COMMENT", "")
 
     assert service.submit_review_calls == [(123, "COMMENT", None, 1)]
-    assert store.state.pending_review_comments == []
-    assert store.state.pending_review_id is None
-    assert store.state.pending_review_body == ""
-    assert store.pending_review_version == previous_version + 1
+    assert store.state.pending_review.comments == []
+    assert store.state.pending_review.review_id is None
+    assert store.state.pending_review.body == ""
+    assert store.state.pending_review.revision == previous_version + 1
 
 
 @pytest.mark.asyncio
@@ -131,7 +131,7 @@ async def test_submit_review_rejects_unsupported_inline_targets() -> None:
             "src/app.py",
         )
     }
-    store.state.pending_review_comments = [
+    store.state.pending_review.comments = [
         PendingReviewComment(
             body="hello outside hunk",
             path="src/app.py",
@@ -154,7 +154,7 @@ async def test_submit_review_rejects_unsupported_inline_targets() -> None:
 @pytest.mark.asyncio
 async def test_submit_review_submits_existing_pending_review() -> None:
     store = PRStore(pr_number=123)
-    store.state.pending_review_id = 91
+    store.state.pending_review.review_id = 91
     store.save_pending_inline_comment(
         "hello inline",
         path="src/app.py",
@@ -168,14 +168,14 @@ async def test_submit_review_submits_existing_pending_review() -> None:
 
     assert service.submit_pending_review_calls == [(123, 91, "COMMENT", "summary")]
     assert service.submit_review_calls == []
-    assert store.state.pending_review_id is None
-    assert store.state.pending_review_comments == []
+    assert store.state.pending_review.review_id is None
+    assert store.state.pending_review.comments == []
 
 
 @pytest.mark.asyncio
 async def test_submitted_pending_comments_survive_stale_review_refresh() -> None:
     store = PRStore(pr_number=123)
-    store.state.pending_review_id = 91
+    store.state.pending_review.review_id = 91
     store.save_pending_inline_comment(
         "hello inline",
         path="src/app.py",
@@ -200,6 +200,6 @@ async def test_submitted_pending_comments_survive_stale_review_refresh() -> None
     await store.refresh_review_data()
 
     assert service.list_review_comments_calls == [(123, 91)]
-    assert store.state.pending_review_comments == []
+    assert store.state.pending_review.comments == []
     assert store.state.comments_by_file["src/app.py"] == [submitted_comment]
     assert store.state.review_threads[0].root_comment == submitted_comment

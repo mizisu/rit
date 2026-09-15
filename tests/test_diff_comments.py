@@ -5,6 +5,7 @@ from textual.app import App, ComposeResult
 
 from rit.core.diff import parse_patch
 from rit.core.types import DiffHunk, DiffLine
+from rit.state.pending_review_workspace import PendingReviewWorkspace
 from rit.state.models import (
     NodeList,
     PendingReviewComment,
@@ -323,8 +324,7 @@ def test_build_comment_map_skips_pending_review_thread_already_rendered_as_draft
     view = SimpleNamespace(
         store=SimpleNamespace(
             state=SimpleNamespace(
-                pending_review_id=91,
-                pending_review_comments=[draft],
+                pending_review=PendingReviewWorkspace(review_id=91, comments=[draft]),
                 review_threads=[thread],
             ),
             get_pending_file_comments=lambda _filename: [draft],
@@ -380,8 +380,7 @@ def test_build_comment_map_skips_pending_review_thread_when_server_reissues_id()
     view = SimpleNamespace(
         store=SimpleNamespace(
             state=SimpleNamespace(
-                pending_review_id=91,
-                pending_review_comments=[draft],
+                pending_review=PendingReviewWorkspace(review_id=91, comments=[draft]),
                 review_threads=[thread],
             ),
             get_pending_file_comments=lambda _filename: [draft],
@@ -435,8 +434,7 @@ def test_build_comment_map_skips_stale_pending_review_thread_after_resync() -> N
     view = SimpleNamespace(
         store=SimpleNamespace(
             state=SimpleNamespace(
-                pending_review_id=100,
-                pending_review_comments=[draft],
+                pending_review=PendingReviewWorkspace(review_id=100, comments=[draft]),
                 reviews=[PRReview(id=91, state=ReviewState.PENDING)],
                 review_threads=[thread],
             ),
@@ -493,11 +491,9 @@ def test_build_comment_map_hides_replaced_pending_thread_matching_remaining_draf
     view = SimpleNamespace(
         store=SimpleNamespace(
             state=SimpleNamespace(
-                pending_review_id=100,
-                pending_review_comments=[draft],
+                pending_review=PendingReviewWorkspace(review_id=100, comments=[draft], obsolete_review_ids={91}),
                 reviews=[PRReview(id=100, state=ReviewState.PENDING)],
                 review_threads=[thread],
-                obsolete_pending_review_ids={91},
             ),
             get_pending_file_comments=lambda _filename: [draft],
         ),
@@ -550,8 +546,7 @@ def test_build_comment_map_keeps_submitted_thread_matching_draft_content() -> No
     view = SimpleNamespace(
         store=SimpleNamespace(
             state=SimpleNamespace(
-                pending_review_id=100,
-                pending_review_comments=[draft],
+                pending_review=PendingReviewWorkspace(review_id=100, comments=[draft]),
                 reviews=[
                     PRReview(id=91, state=ReviewState.COMMENTED),
                     PRReview(id=100, state=ReviewState.PENDING),
@@ -602,8 +597,7 @@ def test_build_comment_map_hides_pending_review_thread_after_local_delete() -> N
     view = SimpleNamespace(
         store=SimpleNamespace(
             state=SimpleNamespace(
-                pending_review_id=91,
-                pending_review_comments=[],
+                pending_review=PendingReviewWorkspace(review_id=91, comments=[]),
                 reviews=[PRReview(id=91, state=ReviewState.PENDING)],
                 review_threads=[thread],
             ),
@@ -641,7 +635,7 @@ def test_pending_comments_for_current_diff_skips_empty_state_scan() -> None:
     drafts = EmptyDrafts()
     view = SimpleNamespace(
         store=SimpleNamespace(
-            state=SimpleNamespace(pending_review_comments=drafts),
+            state=SimpleNamespace(pending_review=PendingReviewWorkspace(comments=drafts)),
         ),
     )
 
