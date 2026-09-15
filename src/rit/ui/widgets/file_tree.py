@@ -485,7 +485,7 @@ class FileTree(Vertical):
         contents_by_path, files_by_path = self._build_directory_contents(files)
         pending_counts = (
             Counter(
-                comment.path for comment in self.store.state.pending_review_comments
+                comment.path for comment in self.store.state.pending_review.comments
             )
             if self.store is not None
             else {}

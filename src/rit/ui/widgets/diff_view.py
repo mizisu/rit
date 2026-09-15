@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Collection
-from collections.abc import Set as AbstractSet
 from contextlib import nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -40,13 +39,21 @@ from rit.ui.widgets import diff_layout as _layout
 from rit.ui.widgets import diff_location as _location
 from rit.ui.widgets import diff_plan as _plan
 from rit.ui.widgets import diff_render as _render
-from rit.ui.widgets import diff_search as _search
 from rit.ui.widgets import diff_selection as _selection
 from rit.ui.widgets import diff_virtual as _virtual
 from rit.ui.widgets import diff_visual_mode as _visual_mode
 from rit.ui.widgets.comment_card import CommentCard
 from rit.ui.widgets.comment_editor import InlineCommentEditor
 from rit.ui.widgets.diff_plan_cache import DiffPlanCache, publish_line_metadata
+from rit.ui.widgets.diff_search import DiffSearchSession, SearchCursor, SearchResult
+from rit.ui.widgets.diff_search_policy import (
+    search_activation_placement_update,
+    search_close_update,
+    search_reveal_update,
+    search_start_update,
+    search_submitted_input_update,
+)
+from rit.ui.widgets.diff_search_types import SearchActivationUpdate
 from rit.ui.widgets.diff_types import (
     DEFAULT_DIFF_LAYOUT,
     CursorUIState,
@@ -224,16 +231,9 @@ class DiffView(VerticalScroll):
         self._inline_editor_state: _fold_state.EditorState | None = None
         self._file_editor_state: _fold_state.EditorState | None = None
 
-        self._search_query: str = ""
-        self._search_request_token: int = 0
-        self._search_matches: list[DiffSearchMatch] = []
-        self._search_match_index: int = -1
-        self._search_matches_by_line_side: dict[
-            tuple[int, Literal["old", "new", "auto"]],
-            tuple[tuple[int, DiffSearchMatch], ...],
-        ] = {}
-        self._search_matches_by_line_side_source: tuple[int, int] | None = None
-        self._prev_search_match_lines: AbstractSet[int] = frozenset()
+        self._search = DiffSearchSession(
+            self._search_cursor, self._display_search_result
+        )
 
         self._hl_state = HighlightState()
         self._unified_block_static_rows_by_line: dict[
@@ -375,7 +375,10 @@ class DiffView(VerticalScroll):
         if self._suspend_split_state_rerender:
             return
         _render._update_split_state(self)
-        _search.refresh_matches(self)
+        self._search.refresh(
+            self._all_lines,
+            self._rows_for_current_mode() if self._search.query else (),
+        )
 
     def watch_show_line_numbers(self, old_value: bool, new_value: bool) -> None:
         if old_value == new_value or not self.is_mounted or not self._all_lines:
@@ -407,7 +410,10 @@ class DiffView(VerticalScroll):
         was_split = self.split
         _render._update_split_state(self)
         if was_split != self.split:
-            _search.refresh_matches(self)
+            self._search.refresh(
+                self._all_lines,
+                self._rows_for_current_mode() if self._search.query else (),
+            )
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
@@ -769,27 +775,171 @@ class DiffView(VerticalScroll):
         inp = self._search_input_widget
         return inp is not None and self.screen.focused is inp
 
+    def _search_cursor(self) -> SearchCursor:
+        return SearchCursor(
+            row=self._current_row_index(),
+            line=self.cursor_line,
+            side=self._current_cursor_side(),
+            column=self.cursor_column,
+        )
+
     def _close_search(self, *, clear_query: bool) -> None:
-        _search.close_search(self, clear_query=clear_query)
+        bar = self._search_bar_widget
+        update = search_close_update(
+            has_bar=bar is not None,
+            bar_displayed=bool(bar.display) if bar is not None else False,
+            clear_query=clear_query,
+        )
+        if update.action == "ignore":
+            return
+        assert bar is not None
+        bar.display = False
+        if update.clear_state:
+            self._search.clear()
+        elif update.refresh_display:
+            self._search.repaint()
+        if update.focus_view:
+            self.focus()
 
     def action_start_search(self) -> None:
-        _search.start_search(self)
+        bar = self._search_bar_widget
+        search_input = self._search_input_widget
+        update = search_start_update(
+            has_bar=bar is not None,
+            has_input=search_input is not None,
+            query=self._search.query,
+        )
+        if update.action == "ignore":
+            return
+        assert bar is not None
+        assert search_input is not None
+        bar.display = True
+        search_input.value = update.input_value
+        if update.focus_input:
+            search_input.focus()
+
+    def _run_search(self, value: str, *, submitted: bool = False) -> None:
+        work = self._search.search(
+            value, self._all_lines, self._rows_for_current_mode(), submitted=submitted
+        )
+        if work is not None:
+            self.run_worker(
+                work,
+                group="diff-search",
+                exclusive=True,
+                name="diff-search-submit" if submitted else "diff-search-change",
+            )
 
     @on(Input.Changed, "#diff-search-input")
     def _on_search_changed(self, event: Input.Changed) -> None:
         event.stop()
-        _search.handle_changed(self, event.value)
+        self._run_search(event.value)
 
     @on(Input.Submitted, "#diff-search-input")
     def _on_search_submitted(self, event: Input.Submitted) -> None:
         event.stop()
-        _search.handle_submitted_input(self, event.value)
+        update = search_submitted_input_update(
+            has_bar=self._search_bar_widget is not None,
+            value=event.value,
+        )
+        if update.close_bar:
+            assert self._search_bar_widget is not None
+            self._search_bar_widget.display = False
+        if update.focus_view:
+            self.focus()
+        self._run_search(update.submit_query, submitted=True)
 
     def action_next_search_match(self) -> None:
-        _search.jump_match(self, 1)
+        self._search.jump(
+            1,
+            self._all_lines,
+            self._rows_for_current_mode() if self._search.query else (),
+        )
 
     def action_prev_search_match(self) -> None:
-        _search.jump_match(self, -1)
+        self._search.jump(
+            -1,
+            self._all_lines,
+            self._rows_for_current_mode() if self._search.query else (),
+        )
+
+    def _display_search_result(self, result: SearchResult) -> None:
+        if result.dirty_lines:
+            self._invalidate_base_code_content_cache(result.dirty_lines)
+            from rit.ui.widgets import diff_blocks as _blocks
+
+            if not _blocks._refresh_grouped_blocks_for_lines(self, result.dirty_lines):
+                for line_index in result.dirty_lines:
+                    self._update_line_cursor(line_index)
+        if result.flash_message is not None:
+            self.post_message(
+                Flash(
+                    result.flash_message,
+                    style=result.flash_style,
+                    duration=result.flash_duration,
+                )
+            )
+        if result.reveal is not None:
+            self._reveal_search_match(result.reveal)
+        if result.activation is not None:
+            self._activate_search_match(result.activation)
+
+    def _reveal_search_match(self, match: DiffSearchMatch) -> None:
+        rows = self._rows_for_current_mode()
+        target_row = rows[match.row_index] if 0 <= match.row_index < len(rows) else None
+        if target_row is None:
+            return
+        target_widget = _cursor._target_widget_for_row(self, target_row)
+        update = search_reveal_update(
+            target_exists=True,
+            has_target_widget=target_widget is not None,
+            target_visible=False
+            if target_widget is not None
+            else self._row_is_visible(target_row),
+        )
+        if update.action == "scroll_widget":
+            assert target_widget is not None
+            self.scroll_to_widget(target_widget, animate=False, top=True)
+        elif update.action == "scroll_row":
+            _cursor._scroll_row_to_viewport_offset(
+                self, target_row, update.viewport_offset
+            )
+
+    def _activate_search_match(self, activation: SearchActivationUpdate) -> None:
+        match = activation.match
+        self._invalidate_base_code_content_cache(activation.dirty_lines)
+        rows = self._rows_for_current_mode()
+        target_row = rows[match.row_index] if 0 <= match.row_index < len(rows) else None
+        current_row = self._current_row()
+        placement = search_activation_placement_update(
+            has_target_row=target_row is not None,
+            target_row_visible=self._row_is_visible(target_row)
+            if target_row is not None
+            else False,
+            has_current_row=current_row is not None,
+            row_distance=abs(target_row.row_index - current_row.row_index)
+            if target_row is not None and current_row is not None
+            else 0,
+            half_page_step=self._half_page_step(),
+        )
+        if placement.action == "jump_anchor" and target_row is not None:
+            self._jump_to_row_with_anchor(
+                target_row,
+                pane=activation.pane,
+                column=match.column,
+                viewport_offset=placement.viewport_offset,
+                reveal_horizontal=placement.reveal_horizontal,
+                update_active_pane=activation.update_active_pane,
+            )
+            return
+        self._move_cursor(
+            line=match.line_index,
+            pane=activation.pane,
+            column=match.column,
+            scroll_in_visual=self.visual_mode,
+            update_active_pane=activation.update_active_pane,
+        )
+        self._scroll_to_cursor_horizontal()
 
     def action_next_comment(self) -> None:
         _comments.next_comment(self)
@@ -2151,7 +2301,7 @@ class DiffView(VerticalScroll):
             self._rows_split_ready = False
             self._diff_file_paths = frozenset()
             self._file_change_stats = {}
-            _search.clear_state(self)
+            self._search.clear(repaint=False)
             _comments.clear_state(self)
             self._line_index_by_new_number = {}
             self._line_index_by_old_number = {}

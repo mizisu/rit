@@ -13,7 +13,6 @@ from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets import diff_cursor_update as _cursor_update
 from rit.ui.widgets import diff_folding as _folding
 from rit.ui.widgets import diff_geometry as _geometry
-from rit.ui.widgets import diff_search as _search
 from rit.ui.widgets import diff_virtual as _virtual
 from rit.ui.widgets import diff_visual_mode as _visual_mode
 from rit.ui.widgets import diff_word_motion as _word_motion
@@ -934,7 +933,7 @@ def _queue_cursor_ui_flush(
 ) -> None:
     if not view.is_mounted:
         if sync_search_match:
-            _search.sync_match_index_to_cursor(view)
+            view._search.sync_cursor()
         return
 
     request = _cursor_update.cursor_flush_request(
@@ -1013,7 +1012,7 @@ def _flush_queued_cursor_ui_updates(view: DiffView) -> None:
         view._update_selection_highlighting(selection_dirty_lines)
 
     if sync_search_match:
-        _search.sync_match_index_to_cursor(view)
+        view._search.sync_cursor()
 
 
 def _cursor_lines_for_repaint(cursor_lines: Collection[int]) -> Collection[int]:

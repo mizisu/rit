@@ -9,7 +9,6 @@ from textual.content import Content
 
 from rit.ui.messages import Flash
 from rit.ui.widgets import diff_blocks as _blocks
-from rit.ui.widgets import diff_search as _search
 from rit.ui.widgets import diff_selection_content as _selection_content
 from rit.ui.widgets import diff_selection_range as _selection_range
 from rit.ui.widgets import diff_selection_text as _selection_text
@@ -150,9 +149,8 @@ def _yank(view: DiffView) -> None:
 def _exit_visual(view: DiffView) -> None:
     if view.visual_mode:
         _exit_visual_mode(view)
-    elif view._search_query:
-        _search.clear_state(view)
-        _search._refresh_search_display(view)
+    elif view._search.query:
+        view._search.clear()
 
 
 def _compute_selection_spec_for_line(
@@ -370,8 +368,7 @@ def _build_code_content_with_selection(
     side: Literal["old", "new", "auto"] = "auto",
 ) -> Content:
     base_content = view._base_code_content(line, side=side)
-    base_content = _search.apply_search_highlights(
-        view,
+    base_content = view._search.highlight(
         base_content,
         line.line_index,
         side,

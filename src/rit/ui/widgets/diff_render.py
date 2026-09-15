@@ -25,7 +25,6 @@ from rit.ui.widgets import diff_highlight as _hl
 from rit.ui.widgets import diff_layout as _layout
 from rit.ui.widgets import diff_plan as _plan
 from rit.ui.widgets import diff_prefix as _prefix
-from rit.ui.widgets import diff_search as _search
 from rit.ui.widgets import diff_styles as _styles
 from rit.ui.widgets import diff_virtual as _virtual
 from rit.ui.widgets.diff_types import SplitDiffBlock
@@ -348,7 +347,7 @@ def _capture_retained_render_prefix(
         or not planned_split
         or not changed_paths
         or view.visual_mode
-        or view._search_query
+        or view._search.query
         or _has_annotations_for_paths(view, frozenset(_hunk_paths(source)))
         or plan.code_widths
         != (
@@ -1773,7 +1772,7 @@ def _update_line_cursor(view: DiffView, line_idx: int) -> None:
 
         side = view._get_line_side_for_widget(line, code_widget)
         had_cursor = code_widget.has_class("-cursor")
-        has_search = bool(view._search_query and view._search_matches)
+        has_search = bool(view._search.query and view._search.matches)
 
         if not show_cursor and not had_cursor and not has_search:
             continue
@@ -1815,8 +1814,7 @@ def _build_code_content_with_cursor(
     side: Literal["old", "new", "auto"] = "auto",
 ) -> Content:
     base_content = _base_code_content(view, line, side=side, empty_fallback=" ")
-    base_content = _search.apply_search_highlights(
-        view,
+    base_content = view._search.highlight(
         base_content,
         line.line_index,
         side,

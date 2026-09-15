@@ -5,16 +5,12 @@ import pytest
 from textual.content import Content
 
 from rit.core.types import DiffLine
-from rit.ui.widgets import diff_blocks as diff_blocks_module
 from rit.ui.widgets import (
-    diff_search,
-    diff_search_bar,
-    diff_search_display,
     diff_search_match_index,
     diff_search_matching,
     diff_search_policy,
+    diff_search_types,
 )
-from rit.ui.widgets.diff_search_types import SearchRefreshUpdate
 from rit.ui.widgets.diff_types import DiffSearchMatch, RenderedRow
 
 
@@ -23,7 +19,7 @@ def _spans(content: Content) -> list[tuple[int, int, str]]:
 
 
 def test_search_sides_for_line_uses_rendered_side_in_unified_mode() -> None:
-    assert diff_search.search_sides_for_line(
+    assert diff_search_matching.search_sides_for_line(
         row_mode="unified",
         row_side="old",
         line_is_modified=True,
@@ -33,7 +29,7 @@ def test_search_sides_for_line_uses_rendered_side_in_unified_mode() -> None:
 
 
 def test_search_sides_for_line_searches_both_sides_for_split_modified_line() -> None:
-    assert diff_search.search_sides_for_line(
+    assert diff_search_matching.search_sides_for_line(
         row_mode="split",
         row_side="old",
         line_is_modified=True,
@@ -45,14 +41,14 @@ def test_search_sides_for_line_searches_both_sides_for_split_modified_line() -> 
 def test_search_sides_for_line_uses_existing_side_for_split_single_sided_lines() -> (
     None
 ):
-    assert diff_search.search_sides_for_line(
+    assert diff_search_matching.search_sides_for_line(
         row_mode="split",
         row_side="old",
         line_is_modified=False,
         line_is_deleted=True,
         line_is_added=False,
     ) == ("old",)
-    assert diff_search.search_sides_for_line(
+    assert diff_search_matching.search_sides_for_line(
         row_mode="split",
         row_side="new",
         line_is_modified=False,
@@ -62,7 +58,7 @@ def test_search_sides_for_line_uses_existing_side_for_split_single_sided_lines()
 
 
 def test_search_sides_for_line_uses_auto_for_split_context_line() -> None:
-    assert diff_search.search_sides_for_line(
+    assert diff_search_matching.search_sides_for_line(
         row_mode="split",
         row_side="auto",
         line_is_modified=False,
@@ -71,7 +67,7 @@ def test_search_sides_for_line_uses_auto_for_split_context_line() -> None:
     ) == ("auto",)
 
 
-def test_search_sides_for_row_does_not_import_rendered_row_per_call(
+def test_build_matches_does_not_import_rendered_row_per_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class View:
@@ -97,7 +93,7 @@ def test_search_sides_for_row_does_not_import_rendered_row_per_call(
 
     monkeypatch.setattr(builtins, "__import__", blocked_import)
 
-    assert diff_search_match_index.search_sides_for_row(View(), row) == ("auto",)
+    assert diff_search_match_index.build_matches_from_rows(View._all_lines, [row], "missing") == []
 
 
 def test_build_matches_appends_casefolded_matches_without_tuple_return_helper(
@@ -154,16 +150,16 @@ def test_build_matches_appends_casefolded_matches_without_tuple_return_helper(
         raising=False,
     )
 
-    assert diff_search_match_index.build_matches(View(), "Needle") == []
+    assert diff_search_match_index.build_matches_from_rows(View._all_lines, rows, "Needle") == []
     assert seen_queries == ["needle", "needle", "needle"]
 
 
 def test_search_match_columns_finds_case_insensitive_non_overlapping_matches() -> None:
-    assert diff_search.search_match_columns("Alpha alpha ALPHA", "alpha") == (0, 6, 12)
+    assert diff_search_matching.search_match_columns("Alpha alpha ALPHA", "alpha") == (0, 6, 12)
 
 
 def test_search_match_columns_advances_by_query_length() -> None:
-    assert diff_search.search_match_columns("aaaa", "aa") == (0, 2)
+    assert diff_search_matching.search_match_columns("aaaa", "aa") == (0, 2)
 
 
 def test_search_match_columns_single_match_avoids_tuple_conversion(
@@ -182,13 +178,13 @@ def test_search_match_columns_single_match_avoids_tuple_conversion(
 
 
 def test_search_match_columns_returns_empty_for_empty_query_or_text() -> None:
-    assert diff_search.search_match_columns("alpha", "") == ()
-    assert diff_search.search_match_columns("", "alpha") == ()
+    assert diff_search_matching.search_match_columns("alpha", "") == ()
+    assert diff_search_matching.search_match_columns("", "alpha") == ()
 
 
 def test_search_match_style_uses_stronger_warning_for_active_match() -> None:
     assert (
-        diff_search.search_match_style(
+        diff_search_matching.search_match_style(
             match_index=2,
             active_match_index=2,
         )
@@ -198,7 +194,7 @@ def test_search_match_style_uses_stronger_warning_for_active_match() -> None:
 
 def test_search_match_style_uses_softer_warning_for_inactive_match() -> None:
     assert (
-        diff_search.search_match_style(
+        diff_search_matching.search_match_style(
             match_index=1,
             active_match_index=2,
         )
@@ -207,7 +203,7 @@ def test_search_match_style_uses_softer_warning_for_inactive_match() -> None:
 
 
 def test_search_matches_for_text_builds_matches_with_row_metadata() -> None:
-    assert diff_search.search_matches_for_text(
+    assert diff_search_matching.search_matches_for_text(
         text="foo and Foo",
         query="foo",
         row_index=7,
@@ -221,7 +217,7 @@ def test_search_matches_for_text_builds_matches_with_row_metadata() -> None:
 
 def test_search_matches_for_text_returns_empty_without_matches() -> None:
     assert (
-        diff_search.search_matches_for_text(
+        diff_search_matching.search_matches_for_text(
             text="alpha",
             query="z",
             row_index=7,
@@ -256,44 +252,44 @@ def test_search_matches_for_text_casefolded_builds_matches_without_column_tuple(
 
 
 def test_search_reveal_update_ignores_missing_target_row() -> None:
-    assert diff_search.search_reveal_update(
+    assert diff_search_policy.search_reveal_update(
         target_exists=False,
         has_target_widget=False,
         target_visible=False,
-    ) == diff_search.SearchRevealUpdate(
+    ) == diff_search_types.SearchRevealUpdate(
         action="ignore",
         viewport_offset=0,
     )
 
 
 def test_search_reveal_update_scrolls_to_target_widget_first() -> None:
-    assert diff_search.search_reveal_update(
+    assert diff_search_policy.search_reveal_update(
         target_exists=True,
         has_target_widget=True,
         target_visible=True,
-    ) == diff_search.SearchRevealUpdate(
+    ) == diff_search_types.SearchRevealUpdate(
         action="scroll_widget",
         viewport_offset=0,
     )
 
 
 def test_search_reveal_update_ignores_visible_row_without_widget() -> None:
-    assert diff_search.search_reveal_update(
+    assert diff_search_policy.search_reveal_update(
         target_exists=True,
         has_target_widget=False,
         target_visible=True,
-    ) == diff_search.SearchRevealUpdate(
+    ) == diff_search_types.SearchRevealUpdate(
         action="ignore",
         viewport_offset=0,
     )
 
 
 def test_search_reveal_update_scrolls_hidden_row_without_widget() -> None:
-    assert diff_search.search_reveal_update(
+    assert diff_search_policy.search_reveal_update(
         target_exists=True,
         has_target_widget=False,
         target_visible=False,
-    ) == diff_search.SearchRevealUpdate(
+    ) == diff_search_types.SearchRevealUpdate(
         action="scroll_row",
         viewport_offset=0,
     )
@@ -307,19 +303,19 @@ def test_search_highlight_spans_filters_line_side_and_marks_active_match() -> No
         _match(1, 2, "new", 0),
     ]
 
-    assert diff_search.search_highlight_spans(
+    assert diff_search_matching.search_highlight_spans(
         matches,
         line_index=1,
         side="new",
         query_length=4,
         active_match_index=2,
     ) == (
-        diff_search.SearchHighlightSpan(
+        diff_search_types.SearchHighlightSpan(
             start=2,
             end=6,
             style="on $warning 25%",
         ),
-        diff_search.SearchHighlightSpan(
+        diff_search_types.SearchHighlightSpan(
             start=8,
             end=12,
             style="on $warning 45%",
@@ -340,7 +336,7 @@ def test_search_highlight_spans_returns_empty_without_line_side_matches(
     )
 
     assert (
-        diff_search.search_highlight_spans(
+        diff_search_matching.search_highlight_spans(
             [_match(0, 1, "old", 2)],
             line_index=1,
             side="new",
@@ -363,59 +359,19 @@ def test_search_highlight_spans_returns_single_match_without_tuple_conversion(
         raising=False,
     )
 
-    assert diff_search.search_highlight_spans(
+    assert diff_search_matching.search_highlight_spans(
         [_match(0, 1, "new", 2)],
         line_index=1,
         side="new",
         query_length=4,
         active_match_index=0,
     ) == (
-        diff_search.SearchHighlightSpan(
+        diff_search_types.SearchHighlightSpan(
             start=2,
             end=6,
             style="on $warning 45%",
         ),
     )
-
-
-def test_apply_search_highlights_reuses_cached_line_side_matches(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    target_match = _match(3, 5, "new", 6)
-    matches = [
-        _match(0, 1, "new", 0),
-        _match(1, 2, "old", 2),
-        _match(2, 5, "old", 4),
-        target_match,
-    ]
-
-    class View:
-        _search_query = "beta"
-        _search_matches = matches
-        _search_match_index = 3
-        _search_matches_by_line_side = {
-            (5, "new"): ((3, target_match),),
-        }
-        _search_matches_by_line_side_source = (id(matches), len(matches))
-
-    monkeypatch.setattr(
-        diff_search_match_index,
-        "search_highlight_spans",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("search highlight should use the line-side match index")
-        ),
-        raising=False,
-    )
-
-    result = diff_search.apply_search_highlights(
-        View(),
-        Content("alpha beta gamma"),
-        5,
-        "new",
-    )
-
-    assert result.plain == "alpha beta gamma"
-    assert _spans(result) == [(6, 10, "on $warning 45%")]
 
 
 def test_search_match_line_side_index_keeps_singleton_buckets_without_tuple_conversion(
@@ -465,20 +421,20 @@ def test_search_refresh_update_marks_current_and_previous_match_lines_dirty() ->
         _match(2, 3, "auto", 5),
     ]
 
-    assert diff_search.search_refresh_update(
+    assert diff_search_policy.search_refresh_update(
         matches,
         previous_match_lines={3, 9},
-    ) == diff_search.SearchRefreshUpdate(
+    ) == diff_search_types.SearchRefreshUpdate(
         dirty_lines=frozenset({1, 3, 9}),
         previous_match_lines=frozenset({1, 3}),
     )
 
 
 def test_search_refresh_update_keeps_previous_lines_dirty_when_matches_clear() -> None:
-    assert diff_search.search_refresh_update(
+    assert diff_search_policy.search_refresh_update(
         [],
         previous_match_lines={3, 9},
-    ) == diff_search.SearchRefreshUpdate(
+    ) == diff_search_types.SearchRefreshUpdate(
         dirty_lines=frozenset({3, 9}),
         previous_match_lines=frozenset(),
     )
@@ -502,10 +458,10 @@ def test_search_refresh_update_single_match_avoids_generator_allocation(
         raising=False,
     )
 
-    assert diff_search.search_refresh_update(
+    assert diff_search_policy.search_refresh_update(
         [_match(0, 4, "auto", 0)],
         previous_match_lines=(),
-    ) == diff_search.SearchRefreshUpdate(
+    ) == diff_search_types.SearchRefreshUpdate(
         dirty_lines=original_frozenset({4}),
         previous_match_lines=original_frozenset({4}),
     )
@@ -531,10 +487,10 @@ def test_search_refresh_update_two_matches_avoids_generator_allocation(
         raising=False,
     )
 
-    assert diff_search.search_refresh_update(
+    assert diff_search_policy.search_refresh_update(
         [_match(0, 4, "auto", 0), _match(1, 7, "auto", 2)],
         previous_match_lines=(),
-    ) == diff_search.SearchRefreshUpdate(
+    ) == diff_search_types.SearchRefreshUpdate(
         dirty_lines=original_frozenset({4, 7}),
         previous_match_lines=original_frozenset({4, 7}),
     )
@@ -560,10 +516,10 @@ def test_search_refresh_update_reuses_current_lines_when_previous_lines_match(
         raising=False,
     )
 
-    assert diff_search.search_refresh_update(
+    assert diff_search_policy.search_refresh_update(
         [_match(0, 4, "auto", 0)],
         previous_match_lines=previous_lines,
-    ) == diff_search.SearchRefreshUpdate(
+    ) == diff_search_types.SearchRefreshUpdate(
         dirty_lines=original_frozenset({4}),
         previous_match_lines=original_frozenset({4}),
     )
@@ -584,65 +540,13 @@ def test_search_refresh_update_empty_state_reuses_empty_current_lines(
         raising=False,
     )
 
-    assert diff_search.search_refresh_update(
+    assert diff_search_policy.search_refresh_update(
         [],
         previous_match_lines=(),
-    ) == diff_search.SearchRefreshUpdate(
+    ) == diff_search_types.SearchRefreshUpdate(
         dirty_lines=original_frozenset(),
         previous_match_lines=original_frozenset(),
     )
-
-
-def test_refresh_search_display_reuses_policy_line_sets_without_copy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dirty_lines = frozenset({1, 3})
-    previous_lines = frozenset({1})
-
-    class View:
-        _search_matches: list[DiffSearchMatch] = []
-        _prev_search_match_lines = frozenset({9})
-        invalidated: object = None
-
-        def _invalidate_base_code_content_cache(self, line_indices: object) -> None:
-            self.invalidated = line_indices
-
-        def _update_line_cursor(self, _line_idx: int) -> None:
-            raise AssertionError("grouped refresh should handle dirty lines")
-
-    view = View()
-    refreshed: list[object] = []
-
-    def search_refresh_update(*_args: object, **_kwargs: object) -> SearchRefreshUpdate:
-        return SearchRefreshUpdate(
-            dirty_lines=dirty_lines,
-            previous_match_lines=previous_lines,
-        )
-
-    monkeypatch.setattr(
-        diff_search_display,
-        "search_refresh_update",
-        search_refresh_update,
-    )
-    monkeypatch.setattr(
-        diff_search_display,
-        "set",
-        lambda _values: (_ for _ in ()).throw(
-            AssertionError("search display should not copy match line sets")
-        ),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        diff_blocks_module,
-        "_refresh_grouped_blocks_for_lines",
-        lambda _view, line_indices: refreshed.append(line_indices) or True,
-    )
-
-    diff_search_display.refresh_search_display(view)
-
-    assert view.invalidated is dirty_lines
-    assert refreshed == [dirty_lines]
-    assert view._prev_search_match_lines is previous_lines
 
 
 def test_search_activation_update_marks_new_and_previous_match_lines_dirty() -> None:
@@ -651,11 +555,11 @@ def test_search_activation_update_marks_new_and_previous_match_lines_dirty() -> 
         _match(2, 3, "new", 5),
     ]
 
-    assert diff_search.search_activation_update(
+    assert diff_search_policy.search_activation_update(
         matches,
         old_index=0,
         target_index=1,
-    ) == diff_search.SearchActivationUpdate(
+    ) == diff_search_types.SearchActivationUpdate(
         match=matches[1],
         dirty_lines=frozenset({1, 3}),
         pane="new",
@@ -666,11 +570,11 @@ def test_search_activation_update_marks_new_and_previous_match_lines_dirty() -> 
 def test_search_activation_update_keeps_auto_match_pane_neutral() -> None:
     matches = [_match(0, 1, "auto", 0)]
 
-    assert diff_search.search_activation_update(
+    assert diff_search_policy.search_activation_update(
         matches,
         old_index=-1,
         target_index=0,
-    ) == diff_search.SearchActivationUpdate(
+    ) == diff_search_types.SearchActivationUpdate(
         match=matches[0],
         dirty_lines=frozenset({1}),
         pane=None,
@@ -680,7 +584,7 @@ def test_search_activation_update_keeps_auto_match_pane_neutral() -> None:
 
 def test_search_activation_update_returns_none_for_invalid_target() -> None:
     assert (
-        diff_search.search_activation_update(
+        diff_search_policy.search_activation_update(
             [_match(0, 1, "auto", 0)],
             old_index=-1,
             target_index=3,
@@ -690,13 +594,13 @@ def test_search_activation_update_returns_none_for_invalid_target() -> None:
 
 
 def test_search_activation_placement_update_jumps_when_target_row_is_hidden() -> None:
-    assert diff_search.search_activation_placement_update(
+    assert diff_search_policy.search_activation_placement_update(
         has_target_row=True,
         target_row_visible=False,
         has_current_row=True,
         row_distance=0,
         half_page_step=10,
-    ) == diff_search.SearchActivationPlacementUpdate(
+    ) == diff_search_types.SearchActivationPlacementUpdate(
         action="jump_anchor",
         viewport_offset=0,
         reveal_horizontal=True,
@@ -704,13 +608,13 @@ def test_search_activation_placement_update_jumps_when_target_row_is_hidden() ->
 
 
 def test_search_activation_placement_update_jumps_without_current_row() -> None:
-    assert diff_search.search_activation_placement_update(
+    assert diff_search_policy.search_activation_placement_update(
         has_target_row=True,
         target_row_visible=True,
         has_current_row=False,
         row_distance=0,
         half_page_step=10,
-    ) == diff_search.SearchActivationPlacementUpdate(
+    ) == diff_search_types.SearchActivationPlacementUpdate(
         action="jump_anchor",
         viewport_offset=0,
         reveal_horizontal=True,
@@ -718,13 +622,13 @@ def test_search_activation_placement_update_jumps_without_current_row() -> None:
 
 
 def test_search_activation_placement_update_jumps_when_match_is_far() -> None:
-    assert diff_search.search_activation_placement_update(
+    assert diff_search_policy.search_activation_placement_update(
         has_target_row=True,
         target_row_visible=True,
         has_current_row=True,
         row_distance=11,
         half_page_step=10,
-    ) == diff_search.SearchActivationPlacementUpdate(
+    ) == diff_search_types.SearchActivationPlacementUpdate(
         action="jump_anchor",
         viewport_offset=0,
         reveal_horizontal=True,
@@ -732,13 +636,13 @@ def test_search_activation_placement_update_jumps_when_match_is_far() -> None:
 
 
 def test_search_activation_placement_update_moves_cursor_when_match_is_near() -> None:
-    assert diff_search.search_activation_placement_update(
+    assert diff_search_policy.search_activation_placement_update(
         has_target_row=True,
         target_row_visible=True,
         has_current_row=True,
         row_distance=10,
         half_page_step=10,
-    ) == diff_search.SearchActivationPlacementUpdate(
+    ) == diff_search_types.SearchActivationPlacementUpdate(
         action="move_cursor",
         viewport_offset=0,
         reveal_horizontal=False,
@@ -746,13 +650,13 @@ def test_search_activation_placement_update_moves_cursor_when_match_is_near() ->
 
 
 def test_search_activation_placement_update_moves_cursor_without_target_row() -> None:
-    assert diff_search.search_activation_placement_update(
+    assert diff_search_policy.search_activation_placement_update(
         has_target_row=False,
         target_row_visible=False,
         has_current_row=True,
         row_distance=99,
         half_page_step=10,
-    ) == diff_search.SearchActivationPlacementUpdate(
+    ) == diff_search_types.SearchActivationPlacementUpdate(
         action="move_cursor",
         viewport_offset=0,
         reveal_horizontal=False,
@@ -781,7 +685,7 @@ def test_search_match_index_at_cursor_finds_exact_line_side_and_column() -> None
     ]
 
     assert (
-        diff_search.search_match_index_at_cursor(
+        diff_search_policy.search_match_index_at_cursor(
             matches,
             current_line=1,
             current_side="new",
@@ -810,7 +714,7 @@ def test_search_match_index_at_cursor_uses_indexed_lookup_without_prefix_scan() 
     )
 
     assert (
-        diff_search.search_match_index_at_cursor(
+        diff_search_policy.search_match_index_at_cursor(
             matches,
             current_line=1000,
             current_side="old",
@@ -827,7 +731,7 @@ def test_search_match_index_at_cursor_returns_minus_one_without_exact_match() ->
     ]
 
     assert (
-        diff_search.search_match_index_at_cursor(
+        diff_search_policy.search_match_index_at_cursor(
             matches,
             current_line=1,
             current_side="new",
@@ -840,13 +744,13 @@ def test_search_match_index_at_cursor_returns_minus_one_without_exact_match() ->
 def test_search_match_refresh_clears_matches_without_query() -> None:
     matches = [_match(0, 0, "auto", 2)]
 
-    assert diff_search.search_match_refresh(
+    assert diff_search_policy.search_match_refresh(
         query="",
         matches=matches,
         current_line=0,
         current_side="auto",
         current_column=2,
-    ) == diff_search.SearchMatchRefresh(
+    ) == diff_search_types.SearchMatchRefresh(
         matches=[],
         match_index=-1,
     )
@@ -858,24 +762,24 @@ def test_search_match_refresh_sets_index_from_cursor_for_query() -> None:
         _match(1, 1, "new", 4),
     ]
 
-    assert diff_search.search_match_refresh(
+    assert diff_search_policy.search_match_refresh(
         query="needle",
         matches=matches,
         current_line=1,
         current_side="new",
         current_column=4,
-    ) == diff_search.SearchMatchRefresh(
+    ) == diff_search_types.SearchMatchRefresh(
         matches=matches,
         match_index=1,
     )
 
 
 def test_search_change_update_clears_state_for_blank_input() -> None:
-    assert diff_search.search_change_update(
+    assert diff_search_policy.search_change_update(
         "  ",
         matches=[_match(0, 0, "auto", 2)],
         cursor_target_index=0,
-    ) == diff_search.SearchChangeUpdate(
+    ) == diff_search_types.SearchChangeUpdate(
         query="",
         matches=[],
         match_index=-1,
@@ -889,11 +793,11 @@ def test_search_change_update_uses_next_cursor_target_for_search_input() -> None
         _match(1, 1, "new", 4),
     ]
 
-    assert diff_search.search_change_update(
+    assert diff_search_policy.search_change_update(
         "  needle  ",
         matches=matches,
         cursor_target_index=1,
-    ) == diff_search.SearchChangeUpdate(
+    ) == diff_search_types.SearchChangeUpdate(
         query="needle",
         matches=matches,
         match_index=1,
@@ -902,11 +806,11 @@ def test_search_change_update_uses_next_cursor_target_for_search_input() -> None
 
 
 def test_search_change_update_omits_reveal_without_matches() -> None:
-    assert diff_search.search_change_update(
+    assert diff_search_policy.search_change_update(
         "needle",
         matches=[],
         cursor_target_index=-1,
-    ) == diff_search.SearchChangeUpdate(
+    ) == diff_search_types.SearchChangeUpdate(
         query="needle",
         matches=[],
         match_index=-1,
@@ -922,7 +826,7 @@ def test_next_search_match_index_prefers_later_row_then_later_column() -> None:
     ]
 
     assert (
-        diff_search.next_search_match_index(
+        diff_search_policy.next_search_match_index(
             matches,
             current_row_index=1,
             current_side="auto",
@@ -931,7 +835,7 @@ def test_next_search_match_index_prefers_later_row_then_later_column() -> None:
         == 1
     )
     assert (
-        diff_search.next_search_match_index(
+        diff_search_policy.next_search_match_index(
             matches,
             current_row_index=1,
             current_side="auto",
@@ -961,7 +865,7 @@ def test_next_search_match_index_uses_indexed_lookup_without_scanning_prefix() -
     matches = IndexedMatches([_match(i, i, "auto", 0) for i in range(1000)])
 
     assert (
-        diff_search.next_search_match_index(
+        diff_search_policy.next_search_match_index(
             matches,
             current_row_index=900,
             current_side="auto",
@@ -978,7 +882,7 @@ def test_next_search_match_index_wraps_when_cursor_is_after_last_match() -> None
     ]
 
     assert (
-        diff_search.next_search_match_index(
+        diff_search_policy.next_search_match_index(
             matches,
             current_row_index=9,
             current_side="auto",
@@ -990,7 +894,7 @@ def test_next_search_match_index_wraps_when_cursor_is_after_last_match() -> None
 
 def test_next_search_match_index_returns_minus_one_without_matches() -> None:
     assert (
-        diff_search.next_search_match_index(
+        diff_search_policy.next_search_match_index(
             [],
             current_row_index=0,
             current_side="auto",
@@ -1002,7 +906,7 @@ def test_next_search_match_index_returns_minus_one_without_matches() -> None:
 
 def test_search_jump_target_index_moves_relative_to_active_match() -> None:
     assert (
-        diff_search.search_jump_target_index(
+        diff_search_policy.search_jump_target_index(
             current_match_index=1,
             match_count=3,
             cursor_target_index=0,
@@ -1011,7 +915,7 @@ def test_search_jump_target_index_moves_relative_to_active_match() -> None:
         == 2
     )
     assert (
-        diff_search.search_jump_target_index(
+        diff_search_policy.search_jump_target_index(
             current_match_index=0,
             match_count=3,
             cursor_target_index=0,
@@ -1023,7 +927,7 @@ def test_search_jump_target_index_moves_relative_to_active_match() -> None:
 
 def test_search_jump_target_index_uses_cursor_when_no_match_is_active() -> None:
     assert (
-        diff_search.search_jump_target_index(
+        diff_search_policy.search_jump_target_index(
             current_match_index=-1,
             match_count=3,
             cursor_target_index=1,
@@ -1032,7 +936,7 @@ def test_search_jump_target_index_uses_cursor_when_no_match_is_active() -> None:
         == 1
     )
     assert (
-        diff_search.search_jump_target_index(
+        diff_search_policy.search_jump_target_index(
             current_match_index=-1,
             match_count=3,
             cursor_target_index=1,
@@ -1044,7 +948,7 @@ def test_search_jump_target_index_uses_cursor_when_no_match_is_active() -> None:
 
 def test_search_jump_target_index_returns_minus_one_without_matches() -> None:
     assert (
-        diff_search.search_jump_target_index(
+        diff_search_policy.search_jump_target_index(
             current_match_index=-1,
             match_count=0,
             cursor_target_index=0,
@@ -1055,13 +959,13 @@ def test_search_jump_target_index_returns_minus_one_without_matches() -> None:
 
 
 def test_search_jump_update_reports_inactive_search() -> None:
-    assert diff_search.search_jump_update(
+    assert diff_search_policy.search_jump_update(
         query="",
         match_count=0,
         current_match_index=-1,
         cursor_target_index=-1,
         direction=1,
-    ) == diff_search.SearchJumpUpdate(
+    ) == diff_search_types.SearchJumpUpdate(
         action="inactive",
         target_index=-1,
         flash_message="No active search",
@@ -1070,13 +974,13 @@ def test_search_jump_update_reports_inactive_search() -> None:
 
 
 def test_search_jump_update_reports_active_query_without_matches() -> None:
-    assert diff_search.search_jump_update(
+    assert diff_search_policy.search_jump_update(
         query="needle",
         match_count=0,
         current_match_index=-1,
         cursor_target_index=-1,
         direction=1,
-    ) == diff_search.SearchJumpUpdate(
+    ) == diff_search_types.SearchJumpUpdate(
         action="no_matches",
         target_index=-1,
         flash_message="No matches: needle",
@@ -1085,13 +989,13 @@ def test_search_jump_update_reports_active_query_without_matches() -> None:
 
 
 def test_search_jump_update_activates_next_target() -> None:
-    assert diff_search.search_jump_update(
+    assert diff_search_policy.search_jump_update(
         query="needle",
         match_count=3,
         current_match_index=1,
         cursor_target_index=0,
         direction=1,
-    ) == diff_search.SearchJumpUpdate(
+    ) == diff_search_types.SearchJumpUpdate(
         action="activate",
         target_index=2,
         flash_message=None,
@@ -1100,38 +1004,38 @@ def test_search_jump_update_activates_next_target() -> None:
 
 
 def test_search_submission_request_ignores_missing_query() -> None:
-    assert diff_search.search_submission_request(
+    assert diff_search_policy.search_submission_request(
         None
-    ) == diff_search.SearchSubmissionRequest(
+    ) == diff_search_types.SearchSubmissionRequest(
         action="ignore",
         query="",
     )
 
 
 def test_search_submission_request_clears_blank_query() -> None:
-    assert diff_search.search_submission_request(
+    assert diff_search_policy.search_submission_request(
         "  \t "
-    ) == diff_search.SearchSubmissionRequest(
+    ) == diff_search_types.SearchSubmissionRequest(
         action="clear",
         query="",
     )
 
 
 def test_search_submission_request_normalizes_search_query() -> None:
-    assert diff_search.search_submission_request(
+    assert diff_search_policy.search_submission_request(
         "  needle  "
-    ) == diff_search.SearchSubmissionRequest(
+    ) == diff_search_types.SearchSubmissionRequest(
         action="search",
         query="needle",
     )
 
 
 def test_search_submit_update_ignores_missing_query() -> None:
-    assert diff_search.search_submit_update(
+    assert diff_search_policy.search_submit_update(
         None,
         matches=[],
         cursor_target_index=-1,
-    ) == diff_search.SearchSubmitUpdate(
+    ) == diff_search_types.SearchSubmitUpdate(
         action="ignore",
         query="",
         match_index=-1,
@@ -1141,11 +1045,11 @@ def test_search_submit_update_ignores_missing_query() -> None:
 
 
 def test_search_submit_update_clears_blank_query() -> None:
-    assert diff_search.search_submit_update(
+    assert diff_search_policy.search_submit_update(
         "  ",
         matches=[_match(0, 0, "auto", 2)],
         cursor_target_index=0,
-    ) == diff_search.SearchSubmitUpdate(
+    ) == diff_search_types.SearchSubmitUpdate(
         action="clear",
         query="",
         match_index=-1,
@@ -1155,11 +1059,11 @@ def test_search_submit_update_clears_blank_query() -> None:
 
 
 def test_search_submit_update_reports_no_matches() -> None:
-    assert diff_search.search_submit_update(
+    assert diff_search_policy.search_submit_update(
         " needle ",
         matches=[],
         cursor_target_index=-1,
-    ) == diff_search.SearchSubmitUpdate(
+    ) == diff_search_types.SearchSubmitUpdate(
         action="no_matches",
         query="needle",
         match_index=-1,
@@ -1171,11 +1075,11 @@ def test_search_submit_update_reports_no_matches() -> None:
 def test_search_submit_update_activates_cursor_target_for_matches() -> None:
     matches = [_match(0, 0, "auto", 2), _match(1, 1, "auto", 4)]
 
-    assert diff_search.search_submit_update(
+    assert diff_search_policy.search_submit_update(
         "needle",
         matches=matches,
         cursor_target_index=1,
-    ) == diff_search.SearchSubmitUpdate(
+    ) == diff_search_types.SearchSubmitUpdate(
         action="activate",
         query="needle",
         match_index=1,
@@ -1184,40 +1088,11 @@ def test_search_submit_update_activates_cursor_target_for_matches() -> None:
     )
 
 
-def test_handle_submitted_input_closes_bar_focuses_view_and_delegates(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[object, str]] = []
-
-    class SearchBar:
-        display = True
-
-    class View:
-        _search_bar_widget = SearchBar()
-        focused = False
-
-        def focus(self) -> None:
-            self.focused = True
-
-    def handle_submitted(view: object, query: str | None) -> None:
-        assert query is not None
-        calls.append((view, query))
-
-    monkeypatch.setattr(diff_search_bar, "handle_submitted", handle_submitted)
-
-    view = View()
-    diff_search.handle_submitted_input(view, "needle")
-
-    assert view._search_bar_widget.display is False
-    assert view.focused is True
-    assert calls == [(view, "needle")]
-
-
 def test_search_submitted_input_update_closes_existing_bar_and_submits_value() -> None:
-    assert diff_search.search_submitted_input_update(
+    assert diff_search_policy.search_submitted_input_update(
         has_bar=True,
         value="needle",
-    ) == diff_search.SearchSubmittedInputUpdate(
+    ) == diff_search_types.SearchSubmittedInputUpdate(
         close_bar=True,
         focus_view=True,
         submit_query="needle",
@@ -1225,10 +1100,10 @@ def test_search_submitted_input_update_closes_existing_bar_and_submits_value() -
 
 
 def test_search_submitted_input_update_submits_without_bar() -> None:
-    assert diff_search.search_submitted_input_update(
+    assert diff_search_policy.search_submitted_input_update(
         has_bar=False,
         value="needle",
-    ) == diff_search.SearchSubmittedInputUpdate(
+    ) == diff_search_types.SearchSubmittedInputUpdate(
         close_bar=False,
         focus_view=True,
         submit_query="needle",
@@ -1236,11 +1111,11 @@ def test_search_submitted_input_update_submits_without_bar() -> None:
 
 
 def test_search_start_update_opens_with_current_query() -> None:
-    assert diff_search.search_start_update(
+    assert diff_search_policy.search_start_update(
         has_bar=True,
         has_input=True,
         query="needle",
-    ) == diff_search.SearchStartUpdate(
+    ) == diff_search_types.SearchStartUpdate(
         action="open",
         input_value="needle",
         focus_input=True,
@@ -1248,11 +1123,11 @@ def test_search_start_update_opens_with_current_query() -> None:
 
 
 def test_search_start_update_ignores_missing_widgets() -> None:
-    assert diff_search.search_start_update(
+    assert diff_search_policy.search_start_update(
         has_bar=False,
         has_input=True,
         query="needle",
-    ) == diff_search.SearchStartUpdate(
+    ) == diff_search_types.SearchStartUpdate(
         action="ignore",
         input_value="",
         focus_input=False,
@@ -1260,11 +1135,11 @@ def test_search_start_update_ignores_missing_widgets() -> None:
 
 
 def test_search_close_update_ignores_missing_or_hidden_bar() -> None:
-    assert diff_search.search_close_update(
+    assert diff_search_policy.search_close_update(
         has_bar=True,
         bar_displayed=False,
         clear_query=True,
-    ) == diff_search.SearchCloseUpdate(
+    ) == diff_search_types.SearchCloseUpdate(
         action="ignore",
         clear_state=False,
         refresh_display=False,
@@ -1273,91 +1148,13 @@ def test_search_close_update_ignores_missing_or_hidden_bar() -> None:
 
 
 def test_search_close_update_closes_visible_bar_with_requested_clear_state() -> None:
-    assert diff_search.search_close_update(
+    assert diff_search_policy.search_close_update(
         has_bar=True,
         bar_displayed=True,
         clear_query=True,
-    ) == diff_search.SearchCloseUpdate(
+    ) == diff_search_types.SearchCloseUpdate(
         action="close",
         clear_state=True,
         refresh_display=True,
         focus_view=True,
     )
-
-
-def test_start_search_opens_bar_restores_query_and_focuses_input() -> None:
-    class SearchBar:
-        display = False
-
-    class SearchInput:
-        value = ""
-        focused = False
-
-        def focus(self) -> None:
-            self.focused = True
-
-    class View:
-        _search_bar_widget = SearchBar()
-        _search_input_widget = SearchInput()
-        _search_query = "needle"
-
-    view = View()
-    diff_search.start_search(view)
-
-    assert view._search_bar_widget.display is True
-    assert view._search_input_widget.value == "needle"
-    assert view._search_input_widget.focused is True
-
-
-def test_start_search_ignores_missing_widgets() -> None:
-    class View:
-        _search_bar_widget = None
-        _search_input_widget = None
-        _search_query = "needle"
-
-    diff_search.start_search(View())
-
-
-def test_close_search_closes_visible_bar_clears_and_refreshes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[str] = []
-
-    class SearchBar:
-        display = True
-
-    class View:
-        _search_bar_widget = SearchBar()
-
-        def focus(self) -> None:
-            calls.append("focus")
-
-    def clear_state(view: object) -> None:
-        calls.append("clear")
-
-    def refresh_search_display(view: object) -> None:
-        calls.append("refresh")
-
-    monkeypatch.setattr(diff_search_bar, "clear_state", clear_state)
-    monkeypatch.setattr(
-        diff_search_bar, "refresh_search_display", refresh_search_display
-    )
-
-    view = View()
-    diff_search.close_search(view, clear_query=True)
-
-    assert view._search_bar_widget.display is False
-    assert calls == ["clear", "refresh", "focus"]
-
-
-def test_close_search_ignores_missing_or_hidden_bar() -> None:
-    class HiddenView:
-        class SearchBar:
-            display = False
-
-        _search_bar_widget = SearchBar()
-
-        def focus(self) -> None:
-            raise AssertionError("hidden search should not refocus")
-
-    diff_search.close_search(HiddenView(), clear_query=True)

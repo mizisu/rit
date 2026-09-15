@@ -19,7 +19,6 @@ from rit.ui.widgets import diff_cursor as _cursor_mod
 from rit.ui.widgets import diff_highlight as _hl_mod
 from rit.ui.widgets import diff_plan as _plan_mod
 from rit.ui.widgets import diff_render as _render_mod
-from rit.ui.widgets import diff_search as _search_mod
 from rit.ui.widgets import diff_selection as _selection_mod
 from rit.ui.widgets import diff_types as _diff_types_mod
 from rit.ui.widgets import diff_virtual as _virtual_mod
@@ -191,10 +190,10 @@ def test_line_number_width_uses_planned_values_without_scanning_keys(
 def test_code_content_without_cursor_skips_line_text_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    line = DiffLine(None, "content", line_index=2)
+    line = DiffLine(None, None, new_content="content", line_index=2)
     base_content = Content("content")
 
-    class View:
+    class View(DiffView):
         def _get_line_text(self, *_args: object, **_kwargs: object) -> str:
             raise AssertionError("non-cursor content should not read line text")
 
@@ -203,12 +202,6 @@ def test_code_content_without_cursor_skips_line_text_lookup(
         "_base_code_content",
         lambda *_args, **_kwargs: base_content,
     )
-    monkeypatch.setattr(
-        _render_mod._search,
-        "apply_search_highlights",
-        lambda _view, content, _line_idx, _side: content,
-    )
-
     content = _render_mod._build_code_content_with_cursor(
         View(),
         line,
@@ -747,7 +740,7 @@ def test_build_comment_map_merges_line_indices_without_temporary_sets(
     diff_view.current_file = "large.py"
     diff_view._diff_file_paths = {"large.py"}
     diff_view._line_index_by_new_number = {1: 4, 2: 9}
-    diff_view.store.state.pending_review_comments = [
+    diff_view.store.state.pending_review.comments = [
         PendingReviewComment(
             path="large.py",
             line=1,
@@ -2625,7 +2618,7 @@ async def test_cursor_ui_flush_coalesces_multiple_requests_in_same_tick(
 
         original_flush = diff_view._flush_queued_cursor_ui_updates
         original_grouped = _blocks_mod._refresh_grouped_blocks_for_lines
-        original_search = _search_mod.sync_match_index_to_cursor
+        original_search = diff_view._search.sync_cursor
 
         def counted_flush() -> None:
             flush_calls["count"] += 1
@@ -2635,15 +2628,15 @@ async def test_cursor_ui_flush_coalesces_multiple_requests_in_same_tick(
             grouped_calls.append(set(lines))
             return original_grouped(view, lines)
 
-        def counted_search(view: DiffView) -> None:
+        def counted_search() -> None:
             search_calls["count"] += 1
-            original_search(view)
+            original_search()
 
         diff_view._flush_queued_cursor_ui_updates = counted_flush  # type: ignore[method-assign]
         monkeypatch.setattr(
             _blocks_mod, "_refresh_grouped_blocks_for_lines", counted_grouped
         )
-        monkeypatch.setattr(_search_mod, "sync_match_index_to_cursor", counted_search)
+        monkeypatch.setattr(diff_view._search, "sync_cursor", counted_search)
 
         diff_view._queue_cursor_ui_flush(
             cursor_lines={0},
