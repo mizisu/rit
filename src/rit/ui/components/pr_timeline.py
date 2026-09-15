@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
+from rich.markup import escape
 from textual import events
 from textual._context import NoActiveAppError
 from textual.app import ComposeResult
@@ -13,7 +14,7 @@ from textual.containers import Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widget import Widget
-from textual.widgets import Collapsible
+from textual.widgets import Collapsible, Static
 from textual.worker import Worker, WorkerState
 
 from rit.core.datetime_utils import (
@@ -26,15 +27,19 @@ from rit.state.models import (
     PRComment,
     PRIssueComment,
     PRReview,
+    PRTimelineEvent,
     ReviewState,
 )
 from rit.ui.components.pr_timeline_formatting import (
+    author_display_name,
     pending_review_summary_header,
     resolved_thread_title,
     thread_title,
+    timeline_event_header,
 )
 from rit.ui.components.pr_timeline_projection import (
     build_timeline_items,
+    review_has_summary,
     review_timeline_time,
 )
 from rit.ui.widgets.comment_card import CommentCard
@@ -57,11 +62,11 @@ TIMELINE_BODY_MOUNT_DELAY = 0.85
 TIMELINE_BODY_MOUNT_STAGGER_DELAY = 0.01
 INITIAL_TIMELINE_BODY_COUNT = 3
 _REVIEW_STATE_LABELS: dict[ReviewState, str] = {
-    ReviewState.APPROVED: "[#a6da95]approved[/]",
-    ReviewState.CHANGES_REQUESTED: "[#ed8796]requested changes[/]",
+    ReviewState.APPROVED: "[#a6da95]✓ approved[/]",
+    ReviewState.CHANGES_REQUESTED: "[#ed8796]● requested changes[/]",
     ReviewState.COMMENTED: "[#6e738d]reviewed[/]",
     ReviewState.PENDING: "[#eed49f]pending[/]",
-    ReviewState.DISMISSED: "[#6e738d]dismissed[/]",
+    ReviewState.DISMISSED: "[#a5adcb]— review dismissed[/]",
 }
 
 
@@ -83,8 +88,10 @@ def _timeline_render_signature(
     issue_comments: Iterable[PRIssueComment],
     reviews: Iterable[PRReview],
     comments: Iterable[PRComment],
+    events: Sequence[PRTimelineEvent] = (),
 ) -> tuple[object, ...]:
     return (
+        tuple(events),
         tuple(
             sorted(
                 (
@@ -118,6 +125,7 @@ def _timeline_render_signature(
                     comment.path,
                     comment.anchor_line,
                     comment.created_at,
+                    comment.published_at,
                     comment.in_reply_to_id,
                     comment.pull_request_review_id,
                     comment.diff_hunk,
@@ -163,6 +171,38 @@ class PRTimeline(Vertical):
 
     PRTimeline MarkdownH1 {
         content-align: left middle;
+    }
+
+    PRTimeline .timeline-event {
+        height: auto;
+        padding: 0 1;
+        margin: 0 0 1 0;
+        border: none;
+        border-left: solid transparent;
+        background: transparent;
+        color: #a5adcb;
+    }
+
+    PRTimeline .timeline-event:hover {
+        background: #24273a;
+    }
+
+    PRTimeline .timeline-event.--selected {
+        border: none;
+        border-left: solid #8aadf4;
+        background: #24273a;
+    }
+
+    PRTimeline Collapsible.timeline-event {
+        padding: 0;
+    }
+
+    PRTimeline Collapsible.timeline-event > CollapsibleTitle {
+        padding: 0 1;
+    }
+
+    PRTimeline Collapsible.timeline-event > Contents {
+        padding: 0 2;
     }
     """
 
@@ -329,16 +369,19 @@ class PRTimeline(Vertical):
             issue_comments=state.issue_comments,
             reviews=self.store.visible_timeline_reviews(),
             comments=self.store.visible_timeline_comments(),
+            events=state.pr.timeline_events if state.pr else (),
         )
 
     async def _build_timeline_async(self) -> None:
         state = self.store.state
         reviews = self.store.visible_timeline_reviews()
         comments = self.store.visible_timeline_comments()
+        events = state.pr.timeline_events if state.pr else ()
         render_signature = _timeline_render_signature(
             issue_comments=state.issue_comments,
             reviews=reviews,
             comments=comments,
+            events=events,
         )
 
         container = self._comments_container_widget()
@@ -354,6 +397,7 @@ class PRTimeline(Vertical):
                 issue_comments=state.issue_comments,
                 reviews=reviews,
                 comments=comments,
+                events=events,
             )
 
             if not timeline_items:
@@ -381,12 +425,42 @@ class PRTimeline(Vertical):
                         item.thread,
                         body_mount_delay=None,
                     )
+                elif item.kind == "event" and item.events:
+                    self._mount_event(
+                        container,
+                        timeline_event_header(
+                            item.events,
+                            time_str=self._format_time(item.events[-1].created_at),
+                        ),
+                        details="\n".join(
+                            f"{event.commit_oid[:7]} {event.commit_message}"
+                            for event in item.events
+                        )
+                        if len(item.events) > 1
+                        else "",
+                    )
 
                 if i == 0 or (i + 1) % MOUNT_BATCH_SIZE == 0:
                     await asyncio.sleep(0)
 
             self._invalidate_navigable_items()
             self._timeline_render_signature = render_signature
+
+    def _mount_event(
+        self, container: Vertical, header: str, *, details: str = ""
+    ) -> None:
+        item = (
+            Collapsible(
+                Static(details, markup=False),
+                title=header,
+                collapsed=True,
+                classes="timeline-event",
+            )
+            if details
+            else Static(header, classes="timeline-event")
+        )
+        container.mount(item)
+        self._register_navigable_item(item)
 
     def _body_mount_delay_for_index(self, index: int) -> float:
         if index < INITIAL_TIMELINE_BODY_COUNT:
@@ -435,18 +509,20 @@ class PRTimeline(Vertical):
         review: PRReview,
         *,
         body_mount_delay: float | None = TIMELINE_BODY_MOUNT_DELAY,
-        body_is_known_present: bool = False,
     ) -> None:
-        if not body_is_known_present and not _has_body(review.body):
+        if not review_has_summary(review):
             return
-        if body_mount_delay is None:
-            body_mount_delay = self._next_body_mount_delay()
 
         time_str = self._format_time(review_timeline_time(review, []))
         state_display = _review_state_display(review.state)
 
-        user_name = review.user.login if review.user else "unknown"
+        user_name = escape(author_display_name(review.user))
         header_text = f"[bold]{user_name}[/] {state_display} {time_str}"
+        if not _has_body(review.body):
+            self._mount_event(container, header_text)
+            return
+        if body_mount_delay is None:
+            body_mount_delay = self._next_body_mount_delay()
 
         card = CommentCard(
             header_text,
@@ -481,13 +557,7 @@ class PRTimeline(Vertical):
                 )
             return
 
-        if _has_body(review.body):
-            self._mount_review(
-                container,
-                review,
-                body_mount_delay=body_mount_delay,
-                body_is_known_present=True,
-            )
+        self._mount_review(container, review, body_mount_delay=body_mount_delay)
 
         for thread in threads:
             self._mount_comment_thread(
@@ -708,7 +778,7 @@ class PRTimeline(Vertical):
             filtered_items = (
                 item
                 for item in self.query(
-                    ".description-container, .comment-box, Collapsible"
+                    ".description-container, .comment-box, .timeline-event, Collapsible"
                 )
                 if not isinstance(item, Collapsible)
                 or self._is_visible_collapsible(item)
@@ -848,6 +918,8 @@ class PRTimeline(Vertical):
         return None
 
     def _is_unresolved_thread_or_comment(self, widget: Widget) -> bool:
+        if widget.has_class("timeline-event"):
+            return False
         if widget in self._thread_widget_info:
             _, _, is_resolved = self._thread_widget_info[widget]
             return not is_resolved
@@ -888,10 +960,13 @@ class PRTimeline(Vertical):
             self._update_selection(0)
 
     def select_last_item(self) -> None:
+        self._preserve_initial_scroll_home = False
         self._collect_navigable_items()
 
         if self._navigable_items:
-            self._update_selection(len(self._navigable_items) - 1)
+            self._update_selection(len(self._navigable_items) - 1, scroll_to_view=False)
+        if self._scroll_container is not None:
+            self._scroll_container.anchor()
 
     def select_first_visible_item(self) -> None:
         self._collect_navigable_items()
@@ -1004,7 +1079,7 @@ class PRTimeline(Vertical):
         return self._scroll_container.scroll_offset.y <= 1
 
     def _restore_scroll_home(self) -> None:
-        if self._scroll_container is None:
+        if self._scroll_container is None or not self._preserve_initial_scroll_home:
             return
         try:
             self._scroll_container.scroll_home(animate=False)

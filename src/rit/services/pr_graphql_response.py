@@ -4,6 +4,7 @@ import asyncio
 import json
 from collections.abc import Mapping
 
+from rit.services.gh_paginated_json import parse_paginated_items
 from rit.services.gh_request import GitHubInputRunner, run_request
 from rit.services.pr_graphql_queries import (
     PullRequestGraphQLView,
@@ -142,7 +143,7 @@ async def fetch_pull_request_graphql_pr(
     pr_number: int,
     runner: GitHubInputRunner,
 ) -> PR:
-    """Fetch and parse one pull request GraphQL view."""
+    """Fetch a PR view, including any remaining activity pages."""
     result = await fetch_pull_request_graphql_result(
         view=view,
         owner=owner,
@@ -150,11 +151,29 @@ async def fetch_pull_request_graphql_pr(
         pr_number=pr_number,
         runner=runner,
     )
-    return await asyncio.to_thread(
-        parse_pull_request_graphql_pr_result,
-        result,
-        pr_number=pr_number,
+    pr_data = await asyncio.to_thread(
+        parse_pull_request_graphql_result, result, pr_number=pr_number
     )
+    pr = await asyncio.to_thread(PR.model_validate, pr_data)
+    page_info = _mapping_value(_mapping_value(pr_data, "timelineItems"), "pageInfo")
+    if _mapping_value(page_info, "hasNextPage") is True:
+        cursor = _mapping_value(page_info, "endCursor")
+        if not isinstance(cursor, str) or not cursor:
+            raise PullRequestGraphQLError("Missing PR timeline pagination cursor")
+        request = pull_request_graphql_request(
+            view=PullRequestGraphQLView.TIMELINE,
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+        )
+        remaining = await run_request(
+            (*request, "--paginate", "-f", f"endCursor={cursor}"), runner
+        )
+        for page in await asyncio.to_thread(parse_paginated_items, remaining):
+            pr.timeline_events.extend(
+                parse_pull_request_graphql_pr(page, pr_number=pr_number).timeline_events
+            )
+    return pr
 
 
 async def fetch_pull_request_all(
@@ -164,7 +183,7 @@ async def fetch_pull_request_all(
     pr_number: int,
     runner: GitHubInputRunner,
 ) -> PR:
-    """Fetch all PR data used by the store in one GraphQL request."""
+    """Fetch PR data used by the store, including all activity pages."""
     return await fetch_pull_request_graphql_pr(
         view=PullRequestGraphQLView.ALL,
         owner=owner,

@@ -15,6 +15,7 @@ from rit.state.models import (
     PRComment,
     PRIssueComment,
     PRReview,
+    PRTimelineEvent,
     ReviewState,
     group_comments_into_threads,
 )
@@ -27,7 +28,7 @@ __all__ = (
 )
 
 
-TimelineItemKind = Literal["issue_comment", "review", "thread"]
+TimelineItemKind = Literal["issue_comment", "review", "thread", "event"]
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,16 @@ class TimelineItem:
     review: PRReview | None = None
     thread: CommentThread | None = None
     threads: list[CommentThread] = field(default_factory=list)
+    events: list[PRTimelineEvent] = field(default_factory=list)
+
+
+def review_has_summary(review: PRReview) -> bool:
+    """Keep review decisions visible even without a written summary."""
+    return _has_body(review.body) or review.state in {
+        ReviewState.APPROVED,
+        ReviewState.CHANGES_REQUESTED,
+        ReviewState.DISMISSED,
+    }
 
 
 def build_timeline_items(
@@ -47,8 +58,9 @@ def build_timeline_items(
     issue_comments: Sequence[PRIssueComment],
     reviews: Sequence[PRReview],
     comments: Iterable[PRComment],
+    events: Sequence[PRTimelineEvent] = (),
 ) -> list[TimelineItem]:
-    """Return visible timeline items sorted by timeline time."""
+    """Preserve GitHub timeline order; append local-only items by time."""
     threads_by_review: dict[int, list[CommentThread]] = {}
     orphan_threads: list[CommentThread] = []
 
@@ -80,7 +92,7 @@ def build_timeline_items(
 
     for review in reviews:
         review_threads = threads_by_review.get(review.id, [])
-        if _has_body(review.body) or review_threads:
+        if review_has_summary(review) or review_threads:
             items.append(
                 TimelineItem(
                     when=review_timeline_time(review, review_threads),
@@ -93,9 +105,61 @@ def build_timeline_items(
     for thread in orphan_threads:
         items.append(TimelineItem(when=thread.created_at, kind="thread", thread=thread))
 
-    if len(items) > 1:
-        items.sort(key=lambda item: datetime_sort_key(item.when))
-    return items
+    # ponytail: same-second merge/close pairing; use explicit links if GitHub exposes them.
+    merged_times = {
+        datetime_sort_key(event.created_at)
+        for event in events
+        if event.kind == "MergedEvent"
+    }
+    timeline_order: dict[tuple[TimelineItemKind, int | str], int] = {}
+    for index, event in enumerate(events):
+        if event.kind in {"IssueComment", "PullRequestReview"}:
+            if event.database_id is not None:
+                kind: TimelineItemKind = (
+                    "issue_comment" if event.kind == "IssueComment" else "review"
+                )
+                timeline_order[kind, event.database_id] = index
+            continue
+        if (
+            event.kind == "ClosedEvent"
+            and datetime_sort_key(event.created_at) in merged_times
+        ):
+            continue
+        timeline_order["event", event.id] = index
+        items.append(TimelineItem(when=event.created_at, kind="event", events=[event]))
+
+    if len(items) < 2:
+        return items
+
+    def sort_key(item: TimelineItem) -> tuple[int, datetime]:
+        identifier: int | str = 0
+        if item.issue_comment is not None:
+            identifier = item.issue_comment.id
+        elif item.review is not None:
+            identifier = item.review.id
+        elif item.events:
+            identifier = item.events[0].id
+        return (
+            timeline_order.get((item.kind, identifier), len(events)),
+            datetime_sort_key(item.when),
+        )
+
+    items.sort(key=sort_key)
+
+    grouped: list[TimelineItem] = []
+    for item in items:
+        if (
+            grouped
+            and item.events
+            and item.events[0].kind == "PullRequestCommit"
+            and grouped[-1].events
+            and grouped[-1].events[-1].kind == "PullRequestCommit"
+            and grouped[-1].events[-1].actor == item.events[0].actor
+        ):
+            grouped[-1].events.extend(item.events)
+        else:
+            grouped.append(item)
+    return grouped
 
 
 def review_timeline_time(

@@ -186,6 +186,18 @@ def test_refresh_timeline_skips_unchanged_render_signature(
     timeline.refresh_timeline()
 
 
+def test_timeline_render_identity_changes_when_a_comment_is_published() -> None:
+    store = PRStore()
+    comment = PRComment(id=1, body="Review comment")
+    store.state.comments = [comment]
+    timeline = PRTimeline(store)
+    before = timeline._current_timeline_render_signature()
+
+    comment.published_at = datetime(2026, 7, 5, tzinfo=UTC)
+
+    assert timeline._current_timeline_render_signature() != before
+
+
 @pytest.mark.asyncio
 async def test_refresh_timeline_queues_second_refresh_without_canceling_first() -> None:
     store = PRStore()

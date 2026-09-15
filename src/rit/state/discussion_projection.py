@@ -9,6 +9,7 @@ from rit.state.models import (
     PRComment,
     PRIssueComment,
     PRReview,
+    PRTimelineEvent,
     ReviewThread,
     ReviewThreadInfo,
 )
@@ -39,6 +40,7 @@ class PRDiscussion:
     reviews: list[PRReview]
     issue_comments: list[PRIssueComment]
     review_threads: list[ReviewThread]
+    timeline_events: list[PRTimelineEvent] = field(default_factory=list)
 
 
 @dataclass(frozen=True)

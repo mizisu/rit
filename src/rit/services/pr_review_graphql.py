@@ -49,6 +49,7 @@ author {
 }
 body
 createdAt
+publishedAt
 updatedAt
 diffHunk
 path

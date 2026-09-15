@@ -19,6 +19,7 @@ from rit.state.models import (
     PendingReviewComment,
     PRComment,
     PRFile,
+    PRIssueComment,
     PRReview,
     ReviewState,
     ReviewThread,
@@ -162,6 +163,64 @@ class TestRitApp:
             await pilot.pause()
 
             assert calls == ["Loaded body"]
+
+    async def test_timeline_bottom_keys_follow_late_content_without_overriding_navigation(
+        self, app: RitApp
+    ) -> None:
+        from textual.containers import VerticalScroll
+
+        from rit.ui.components.pr_timeline import PRTimeline
+        from rit.ui.screens.main import MainScreen
+        from rit.ui.widgets.comment_card import CommentCard
+
+        async with app.run_test(size=(100, 26)) as pilot:
+            screen = cast(MainScreen, app.screen)
+            app.set_focus(None)
+            screen.store.state.pr = PR(
+                number=123, title="Long discussion", body="Description"
+            )
+            screen.store.state.issue_comments = [
+                PRIssueComment(id=1, body="First comment"),
+                PRIssueComment(
+                    id=2, body="\n".join(f"Line {index}" for index in range(40))
+                ),
+            ]
+            screen.pr_info.refresh_pr_data()
+            timeline = screen.query_one(PRTimeline)
+            scroll = screen.pr_info.query_one("#main-scroll", VerticalScroll)
+            await timeline._build_timeline_async()
+            await pilot.pause()
+            last = list(screen.query(".comment-box"))[-1]
+            assert isinstance(last, CommentCard)
+            assert last.size.height > scroll.size.height
+
+            for key in ("ctrl+g", "G"):
+                await pilot.press("g", key)
+                await pilot.pause()
+                assert timeline.current_item is last
+                assert scroll.scroll_y == scroll.max_scroll_y > 0
+
+            previous_max = scroll.max_scroll_y
+            last.set_content(
+                "Last comment", "\n".join(f"Late line {index}" for index in range(80))
+            )
+            await wait_until(lambda: scroll.max_scroll_y > previous_max)
+            await pilot.pause()
+            assert scroll.scroll_y == scroll.max_scroll_y
+            timeline._restore_scroll_home()
+            await pilot.pause()
+            assert scroll.scroll_y == scroll.max_scroll_y
+
+            await pilot.press("k")
+            await pilot.pause()
+            assert scroll.scroll_y < scroll.max_scroll_y
+            position = scroll.scroll_y
+            last.set_content(
+                "Last comment", "\n".join(f"Later line {index}" for index in range(100))
+            )
+            await wait_until(lambda: last.size.height > 100)
+            await pilot.pause()
+            assert scroll.scroll_y == position
 
     async def test_header_branches_are_shared_across_tabs_and_reuse_copy_picker(
         self, app: RitApp, monkeypatch: pytest.MonkeyPatch
@@ -802,7 +861,7 @@ class TestRitApp:
                     line=0,
                     subject_type="file",
                 )
-                screen.store.state.pending_review_comments.append(draft)
+                screen.store.state.pending_review.comments.append(draft)
                 if after_local_save is not None:
                     await after_local_save()
                 return draft
@@ -855,7 +914,7 @@ class TestRitApp:
 
             await pilot.press("enter")
             await wait_until(
-                lambda: not screen.store.state.pending_review_comments,
+                lambda: not screen.store.state.pending_review.comments,
                 timeout=1,
             )
             await wait_until(
@@ -921,7 +980,7 @@ class TestRitApp:
             assert await screen._post_file_comment("whole file", path=path) is True
 
             assert diff_view.file_comment_target() is None
-            assert screen.store.state.pending_review_comments == [
+            assert screen.store.state.pending_review.comments == [
                 PendingReviewComment(
                     body="whole file",
                     path=path,
@@ -1206,7 +1265,7 @@ class TestRitApp:
             screen = cast(MainScreen, app.screen)
             screen.current_tab = 1
             screen.store.state.pr = PR(number=123, head_sha="deadbeef")
-            screen.store.state.pending_review_id = 88
+            screen.store.state.pending_review.review_id = 88
             screen.store.state.file_diffs = {"preview.py": source_diff}
             screen.store.save_pending_inline_comment(
                 "hello draft",
@@ -1235,7 +1294,7 @@ class TestRitApp:
 
             assert screen._selected_comment_delete_target() is None
 
-            assert screen.store.state.pending_review_comments[0].body == "hello draft"
+            assert screen.store.state.pending_review.comments[0].body == "hello draft"
             assert service.delete_called is False
             assert refresh_calls == 0
 
@@ -1279,7 +1338,7 @@ class TestRitApp:
             screen = cast(MainScreen, app.screen)
             screen.current_tab = 1
             screen.store.state.pr = PR(number=123, head_sha="deadbeef")
-            screen.store.state.pending_review_id = 88
+            screen.store.state.pending_review.review_id = 88
             screen.store.state.file_diffs = {"preview.py": source_diff}
             screen.store.save_pending_inline_comment(
                 "hello draft",
@@ -1351,18 +1410,18 @@ class TestRitApp:
             await pilot.press("d")
             await pilot.pause()
             assert isinstance(app.screen, CommentDeleteScreen)
-            assert len(screen.store.state.pending_review_comments) == 1
+            assert len(screen.store.state.pending_review.comments) == 1
 
             await pilot.press("escape")
             await pilot.pause()
-            assert len(screen.store.state.pending_review_comments) == 1
+            assert len(screen.store.state.pending_review.comments) == 1
 
             await pilot.press("d")
             await pilot.pause()
             assert isinstance(app.screen, CommentDeleteScreen)
             await pilot.press("enter")
             await wait_until(
-                lambda: not screen.store.state.pending_review_comments,
+                lambda: not screen.store.state.pending_review.comments,
                 timeout=1,
             )
 
@@ -1539,7 +1598,7 @@ class TestRitApp:
 
             draft = diff_view.query_one("#pending-draft-5-right-0", CommentCard)
             assert draft._body == "local only draft"
-            assert screen.store.state.pending_review_id is None
+            assert screen.store.state.pending_review.review_id is None
             assert service.create_calls == 0
 
     async def test_save_continuous_diff_draft_renders_immediately(

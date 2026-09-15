@@ -109,6 +109,7 @@ def _reviewer_candidate_result(
 
 
 _PR_INFO_BINDINGS = [
+    Binding("ctrl+g", "scroll_to_bottom", "Bottom", show=False),
     Binding("j", "cursor_down", "", group=_NAVIGATION_GROUP),
     Binding("k", "cursor_up", "", group=_NAVIGATION_GROUP),
     Binding("c", "comment", "Comment", group=_COMMENT_GROUP),
@@ -450,8 +451,6 @@ class MainScreen(Screen[None]):
 
     def action_scroll_to_bottom(self) -> None:
         if self.current_tab == 0:
-            scroll = self.pr_info.query_one("#main-scroll", VerticalScroll)
-            scroll.scroll_end(animate=False)
             self.pr_info.select_last_item()
 
     def action_toggle_resolve(self) -> None:

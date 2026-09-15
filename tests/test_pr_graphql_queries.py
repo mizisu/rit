@@ -1,3 +1,5 @@
+import pytest
+
 from rit.services.pr_graphql_queries import (
     PullRequestGraphQLView,
     pull_request_graphql_request,
@@ -30,12 +32,23 @@ def test_pull_request_graphql_request_builds_gh_args_for_named_view() -> None:
     )
 
 
-def test_fast_discussion_query_uses_graphql_review_threads() -> None:
-    query = pull_request_query(PullRequestGraphQLView.FAST_DISCUSSION)
+@pytest.mark.parametrize(
+    "view",
+    [
+        PullRequestGraphQLView.DISCUSSION,
+        PullRequestGraphQLView.FAST_DISCUSSION,
+        PullRequestGraphQLView.ALL,
+    ],
+)
+def test_discussion_queries_fetch_review_threads_with_publication_times(
+    view: PullRequestGraphQLView,
+) -> None:
+    query = pull_request_query(view)
 
     assert "reviewThreads(first: 100)" in query
     assert "startLine" in query
     assert "startDiffSide" in query
+    assert "publishedAt" in query
     assert "/pulls/" not in query
 
 

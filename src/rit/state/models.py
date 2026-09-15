@@ -6,7 +6,14 @@ from datetime import datetime
 from enum import Enum
 from typing import Generic, Literal, TypeVar
 
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    AliasChoices,
+    AliasPath,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+)
 
 from rit.core.datetime_utils import datetime_min_utc, datetime_sort_key
 
@@ -182,6 +189,9 @@ class PRComment(BaseModel):
     created_at: datetime = Field(
         default_factory=datetime_min_utc,
         validation_alias=AliasChoices("createdAt", "created_at"),
+    )
+    published_at: datetime | None = Field(
+        default=None, validation_alias=AliasChoices("publishedAt", "published_at")
     )
     updated_at: datetime = Field(
         default_factory=datetime_min_utc,
@@ -452,6 +462,54 @@ class PRReview(BaseModel):
         return v
 
 
+class PRTimelineEvent(BaseModel):
+    """Immutable activity metadata from GitHub's PR timeline."""
+
+    model_config = ConfigDict(populate_by_name=True, frozen=True)
+
+    id: str
+    database_id: int | None = Field(default=None, validation_alias="databaseId")
+    kind: Literal[
+        "IssueComment",
+        "PullRequestReview",
+        "PullRequestCommit",
+        "HeadRefForcePushedEvent",
+        "ReadyForReviewEvent",
+        "ConvertToDraftEvent",
+        "MergedEvent",
+        "ClosedEvent",
+        "ReopenedEvent",
+        "ReviewRequestedEvent",
+        "ReviewRequestRemovedEvent",
+    ] = Field(validation_alias="__typename")
+    created_at: datetime = Field(
+        validation_alias=AliasChoices("createdAt", AliasPath("commit", "committedDate"))
+    )
+    actor: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            AliasPath("actor", "login"),
+            AliasPath("commit", "author", "user", "login"),
+            AliasPath("commit", "author", "name"),
+        ),
+    )
+    commit_oid: str = Field(default="", validation_alias=AliasPath("commit", "oid"))
+    commit_message: str = Field(
+        default="", validation_alias=AliasPath("commit", "messageHeadline")
+    )
+    before_oid: str = Field(
+        default="", validation_alias=AliasPath("beforeCommit", "oid")
+    )
+    after_oid: str = Field(default="", validation_alias=AliasPath("afterCommit", "oid"))
+    merge_ref_name: str = Field(default="", validation_alias="mergeRefName")
+    reviewer: str | None = Field(
+        default=None, validation_alias=AliasPath("requestedReviewer", "login")
+    )
+    reviewer_team: str | None = Field(
+        default=None, validation_alias=AliasPath("requestedReviewer", "name")
+    )
+
+
 class PRFile(BaseModel):
     """A changed file assembled from GraphQL metadata and raw diff data."""
 
@@ -583,6 +641,12 @@ class PR(BaseModel):
         exclude=True,
     )
 
+    timeline_events_connection: NodeList[PRTimelineEvent] = Field(
+        default_factory=lambda: NodeList[PRTimelineEvent](),
+        validation_alias=AliasChoices("timelineItems", "timeline_events_connection"),
+        exclude=True,
+    )
+
     html_url: str = Field(
         default="", validation_alias=AliasChoices("htmlUrl", "html_url")
     )
@@ -620,6 +684,10 @@ class PR(BaseModel):
     @property
     def issue_comments(self) -> list[PRIssueComment]:
         return self.issue_comments_connection.nodes
+
+    @property
+    def timeline_events(self) -> list[PRTimelineEvent]:
+        return self.timeline_events_connection.nodes
 
     @property
     def pr_state(self) -> PRState:

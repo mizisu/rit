@@ -11,7 +11,6 @@ from rit.state.models import (
     ReviewThread,
 )
 
-
 __all__ = (
     "discussion_render_signature",
     "normalized_author_login",
@@ -120,6 +119,7 @@ def _thread_comment_signatures(comments: Sequence[PRComment]) -> tuple[object, .
                 comment.path,
                 comment.anchor_line,
                 comment.created_at,
+                comment.published_at,
                 comment.updated_at,
                 comment.in_reply_to_id,
                 comment.pull_request_review_id,
@@ -134,6 +134,7 @@ def _thread_comment_signatures(comments: Sequence[PRComment]) -> tuple[object, .
             comment.path,
             comment.anchor_line,
             comment.created_at,
+            comment.published_at,
             comment.updated_at,
             comment.in_reply_to_id,
             comment.pull_request_review_id,

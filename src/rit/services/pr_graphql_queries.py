@@ -14,7 +14,79 @@ class PullRequestGraphQLView(Enum):
     SUMMARY = "summary"
     DISCUSSION = "discussion"
     FAST_DISCUSSION = "fast_discussion"
+    TIMELINE = "timeline"
     NODE_ID = "node_id"
+
+
+_PR_TIMELINE_GRAPHQL_FRAGMENT = """
+fragment TimelineEvents on PullRequest {
+  timelineItems(first: 100, after: $endCursor, itemTypes: [
+    PULL_REQUEST_COMMIT, HEAD_REF_FORCE_PUSHED_EVENT,
+    READY_FOR_REVIEW_EVENT, CONVERT_TO_DRAFT_EVENT,
+    MERGED_EVENT, CLOSED_EVENT, REOPENED_EVENT,
+    REVIEW_REQUESTED_EVENT, REVIEW_REQUEST_REMOVED_EVENT,
+    ISSUE_COMMENT, PULL_REQUEST_REVIEW
+  ]) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      __typename
+      ... on Node { id }
+      ... on IssueComment { databaseId createdAt }
+      ... on PullRequestReview { databaseId createdAt }
+      ... on PullRequestCommit {
+        commit {
+          oid
+          messageHeadline
+          committedDate
+          author { name user { login } }
+        }
+      }
+      ... on HeadRefForcePushedEvent {
+        createdAt
+        actor { login }
+        beforeCommit { oid }
+        afterCommit { oid }
+      }
+      ... on ReadyForReviewEvent { createdAt actor { login } }
+      ... on ConvertToDraftEvent { createdAt actor { login } }
+      ... on MergedEvent {
+        createdAt
+        actor { login }
+        mergeRefName
+        commit { oid }
+      }
+      ... on ClosedEvent { createdAt actor { login } }
+      ... on ReopenedEvent { createdAt actor { login } }
+      ... on ReviewRequestedEvent {
+        createdAt
+        actor { login }
+        requestedReviewer {
+          ... on User { login }
+          ... on Team { name }
+        }
+      }
+      ... on ReviewRequestRemovedEvent {
+        createdAt
+        actor { login }
+        requestedReviewer {
+          ... on User { login }
+          ... on Team { name }
+        }
+      }
+    }
+  }
+}
+"""
+
+_PR_TIMELINE_GRAPHQL_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      ...TimelineEvents
+    }
+  }
+}
+"""
 
 
 _PR_SUMMARY_GRAPHQL_QUERY = """
@@ -76,9 +148,10 @@ query($owner: String!, $repo: String!, $number: Int!) {
 
 
 _PR_DISCUSSION_GRAPHQL_QUERY = """
-query($owner: String!, $repo: String!, $number: Int!) {
+query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
+      ...TimelineEvents
       body
       reviews(first: 100) {
         nodes {
@@ -116,6 +189,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
               }
               body
               createdAt
+              publishedAt
               updatedAt
               diffHunk
               path
@@ -160,9 +234,10 @@ query($owner: String!, $repo: String!, $number: Int!) {
 
 
 _PR_FAST_DISCUSSION_GRAPHQL_QUERY = """
-query($owner: String!, $repo: String!, $number: Int!) {
+query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
+      ...TimelineEvents
       body
       reviews(first: 100) {
         nodes {
@@ -200,6 +275,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
               }
               body
               createdAt
+              publishedAt
               updatedAt
               diffHunk
               path
@@ -244,9 +320,10 @@ query($owner: String!, $repo: String!, $number: Int!) {
 
 
 _PR_GRAPHQL_QUERY = """
-query($owner: String!, $repo: String!, $number: Int!) {
+query($owner: String!, $repo: String!, $number: Int!, $endCursor: String) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
+      ...TimelineEvents
       id
       number
       title
@@ -338,6 +415,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
               }
               body
               createdAt
+              publishedAt
               updatedAt
               diffHunk
               path
@@ -398,13 +476,22 @@ _PULL_REQUEST_QUERIES = {
     PullRequestGraphQLView.SUMMARY: _PR_SUMMARY_GRAPHQL_QUERY,
     PullRequestGraphQLView.DISCUSSION: _PR_DISCUSSION_GRAPHQL_QUERY,
     PullRequestGraphQLView.FAST_DISCUSSION: _PR_FAST_DISCUSSION_GRAPHQL_QUERY,
+    PullRequestGraphQLView.TIMELINE: _PR_TIMELINE_GRAPHQL_QUERY,
     PullRequestGraphQLView.NODE_ID: _PR_NODE_ID_GRAPHQL_QUERY,
 }
 
 
 def pull_request_query(view: PullRequestGraphQLView) -> str:
     """Return the GraphQL document for a named PR payload shape."""
-    return _PULL_REQUEST_QUERIES[view]
+    query = _PULL_REQUEST_QUERIES[view]
+    if view in {
+        PullRequestGraphQLView.ALL,
+        PullRequestGraphQLView.DISCUSSION,
+        PullRequestGraphQLView.FAST_DISCUSSION,
+        PullRequestGraphQLView.TIMELINE,
+    }:
+        return query + _PR_TIMELINE_GRAPHQL_FRAGMENT
+    return query
 
 
 def pull_request_graphql_request(

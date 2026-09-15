@@ -31,6 +31,30 @@ def make_comment(body: str, *, comment_id: int = 1) -> PRComment:
     )
 
 
+@pytest.mark.parametrize(
+    ("published_at", "expected_date"),
+    [("2020-07-05T11:38:20Z", "Jul 05, 2020"), (None, "Jun 29, 2020")],
+)
+def test_comment_header_prefers_publication_time_with_draft_fallback(
+    published_at: str | None, expected_date: str
+) -> None:
+    comment = PRComment.model_validate(
+        {
+            "author": {"login": "alice"},
+            "body": "Drafted before the review was submitted",
+            "createdAt": "2020-06-29T13:12:45Z",
+            "publishedAt": published_at,
+        }
+    )
+    thread = ReviewThreadCard(comments=[comment], show_diff_hunk=False)
+    card = thread.comment_card_at(0)
+    assert card is not None
+    header = next(iter(card.compose()))
+    assert isinstance(header, Static)
+    assert str(header.content) == f"[bold]alice[/] [#6e738d]{expected_date}[/]"
+    assert comment.created_at == datetime(2020, 6, 29, 13, 12, 45, tzinfo=UTC)
+
+
 def test_sorts_missing_and_aware_comment_dates() -> None:
     missing_date = PRComment.model_validate(
         {

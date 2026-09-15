@@ -1,13 +1,86 @@
 from datetime import UTC, datetime
 
-from rit.state.models import PRComment, PRReview, PRUser, ReviewThreadInfo
+import pytest
+from rich.text import Text
+
+from rit.state.models import (
+    PRComment,
+    PRReview,
+    PRTimelineEvent,
+    PRUser,
+    ReviewThreadInfo,
+)
 from rit.ui.components.pr_timeline_formatting import (
     author_display_name,
     pending_review_summary_header,
     resolved_thread_title,
     thread_title,
+    timeline_event_header,
 )
 from rit.ui.icons import get_file_icon
+
+
+@pytest.mark.parametrize(
+    "kind, fields, expected",
+    [
+        ("ReadyForReviewEvent", {}, "alice ◎ marked ready for review"),
+        ("ConvertToDraftEvent", {}, "alice ◌ converted to draft"),
+        ("ClosedEvent", {}, "alice ⊘ closed this PR"),
+        ("ReopenedEvent", {}, "alice ◎ reopened this PR"),
+        (
+            "MergedEvent",
+            {"merge_ref_name": "release/[red]", "commit_oid": "abcdef1234"},
+            "alice ◉ merged into release/[red] · abcdef1",
+        ),
+        (
+            "HeadRefForcePushedEvent",
+            {"before_oid": "abcdef1234", "after_oid": "1234567abc"},
+            "alice ↺ force-pushed abcdef1 → 1234567",
+        ),
+        ("HeadRefForcePushedEvent", {"actor": None}, "unknown ↺ force-pushed"),
+        (
+            "ReviewRequestedEvent",
+            {"reviewer": "bob"},
+            "alice ○ requested review from @bob",
+        ),
+        (
+            "ReviewRequestedEvent",
+            {"reviewer_team": "Backend [red]"},
+            "alice ○ requested review from Backend [red]",
+        ),
+        (
+            "ReviewRequestRemovedEvent",
+            {"reviewer": "bob"},
+            "alice — removed review request for @bob",
+        ),
+        ("ReviewRequestRemovedEvent", {}, "alice — removed review request for unknown"),
+        (
+            "PullRequestCommit",
+            {
+                "actor": "Guest [red]",
+                "commit_oid": "abcdef1234",
+                "commit_message": "Keep [red]literal[/]",
+            },
+            "Guest [red] committed abcdef1 — Keep [red]literal[/]",
+        ),
+    ],
+)
+def test_activity_labels_keep_state_and_external_text_visible(
+    kind, fields, expected
+) -> None:
+    event = PRTimelineEvent.model_validate(
+        {
+            "id": "event-1",
+            "kind": kind,
+            "actor": "alice",
+            "created_at": datetime(2026, 6, 18, tzinfo=UTC),
+            **fields,
+        }
+    )
+
+    header = timeline_event_header([event], time_str="2h ago")
+
+    assert Text.from_markup(header).plain == f"{expected} · 2h ago"
 
 
 def test_author_display_name_normalizes_missing_and_bot_logins() -> None:

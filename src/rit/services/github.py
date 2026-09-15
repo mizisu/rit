@@ -149,7 +149,7 @@ class GitHubService:
             return self._detected_repo
 
     async def get_pr_all(self, pr_number: int) -> PR:
-        """Fetch all PR data in a single GraphQL request."""
+        """Fetch PR data via GraphQL, including all activity pages."""
         repo = await self.get_repo()
         with translate_pull_request_graphql_errors():
             return await fetch_pull_request_all(
@@ -171,7 +171,7 @@ class GitHubService:
             )
 
     async def get_pr_discussion(self, pr_number: int) -> PRDiscussion:
-        """Fetch the discussion body, reviews, threads, and issue comments."""
+        """Fetch PR discussion and timeline activity."""
         repo = await self.get_repo()
         with translate_pull_request_graphql_errors():
             return await fetch_pr_discussion(

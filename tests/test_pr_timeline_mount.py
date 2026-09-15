@@ -1,27 +1,161 @@
 from datetime import UTC, datetime
+from typing import ClassVar
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.binding import BindingType
 from textual.css.query import NoMatches
 from textual.geometry import Region
 from textual.message_pump import NoActiveAppError
 from textual.widget import Widget
+from textual.widgets import Collapsible, Static
 
 import rit.ui.components.pr_timeline as pr_timeline_module
 from rit.state.models import (
     PR,
     PRIssueComment,
     PRReview,
+    PRTimelineEvent,
     PRUser,
     ReviewState,
     ReviewThreadInfo,
 )
 from rit.state.store import PRStore
+from rit.ui.components.pr_info import PRInfo
 from rit.ui.components.pr_timeline import (
     INITIAL_TIMELINE_BODY_COUNT,
     TIMELINE_BODY_MOUNT_DELAY,
     PRTimeline,
 )
+from tests.conftest import wait_until
+
+
+@pytest.mark.asyncio
+async def test_activity_rows_support_navigation_disclosure_refresh_and_narrow_layout() -> (
+    None
+):
+    def when(hour: int) -> datetime:
+        return datetime(2026, 6, 18, hour, tzinfo=UTC)
+
+    store = PRStore()
+    pr = PR(number=1, body="Description", user=PRUser(login="alice"))
+    pr.timeline_events.extend(
+        [
+            PRTimelineEvent(
+                id=f"commit-{hour}",
+                kind="PullRequestCommit",
+                actor="alice",
+                created_at=when(hour),
+                commit_oid=str(hour) * 40,
+                commit_message="Keep [red]literal[/] text",
+            )
+            for hour in (5, 6)
+        ]
+    )
+    pr.timeline_events.extend(
+        [
+            PRTimelineEvent(
+                id="review-1", kind="PullRequestReview", database_id=1, created_at=when(7)
+            ),
+            PRTimelineEvent(
+                id="issue-1", kind="IssueComment", database_id=1, created_at=when(8)
+            ),
+        ]
+    )
+    pr.timeline_events.append(
+        PRTimelineEvent(
+            id="request-1",
+            kind="ReviewRequestedEvent",
+            actor="alice",
+            created_at=when(9),
+            reviewer_team="Backend [red]",
+        )
+    )
+    store.state.pr = pr
+    store.state.reviews = [
+        PRReview(
+            id=1,
+            state=ReviewState.APPROVED,
+            body=" ",
+            user=PRUser(login="bob"),
+            submitted_at=when(7),
+        )
+    ]
+    store.state.issue_comments = [
+        PRIssueComment(id=1, body="Discussion", created_at=when(8))
+    ]
+
+    class TestApp(App[None]):
+        BINDINGS: ClassVar[list[BindingType]] = [
+            ("j", "next_item"),
+            ("enter", "toggle_item"),
+            ("n", "next_comment"),
+        ]
+
+        def compose(self) -> ComposeResult:
+            yield PRInfo(store)
+
+        def action_next_item(self) -> None:
+            self.query_one(PRTimeline).next_item()
+
+        def action_toggle_item(self) -> None:
+            self.query_one(PRTimeline).toggle_current()
+
+        def action_next_comment(self) -> None:
+            self.query_one(PRTimeline).next_comment()
+
+    app = TestApp()
+    async with app.run_test(size=(120, 40)) as pilot:
+        app.set_focus(None)
+        timeline = app.query_one(PRTimeline)
+        await timeline._build_timeline_async()
+        await pilot.pause()
+        timeline.select_first_item()
+        rows = list(app.query(".timeline-event"))
+        assert len(rows) == 3
+        commits, approval, request = rows
+        assert isinstance(commits, Collapsible)
+        assert isinstance(approval, Static)
+        assert isinstance(request, Static)
+        assert "2 commits" in commits.title
+        assert "approved" in str(approval.visual)
+        assert "Backend [red]" in str(request.visual)
+        assert commits.collapsed
+        assert commits.size.height == approval.size.height == 1
+
+        await pilot.press("j")
+        assert timeline.current_item is commits
+        assert commits.has_class("--selected")
+        assert commits.size.height == 1
+        await pilot.press("enter")
+        assert not commits.collapsed
+        details = commits.query_one("Contents Static", Static)
+        assert "5555555 Keep [red]literal[/] text" in str(details.content)
+        await pilot.press("enter", "j")
+        assert commits.collapsed
+        assert timeline.current_item is approval
+        await pilot.press("n")
+        assert timeline.current_item is app.query_one(".comment-box")
+        timeline.prev_comment()
+        assert timeline.current_item is app.query_one("#pr-description-card")
+
+        await pilot.hover(approval)
+        await pilot.resize_terminal(40, 30)
+        timeline.select_last_item()
+        await pilot.pause()
+        assert request.size.height > 1
+        assert request.region.right <= app.query_one("#main-scroll").region.right
+        assert "Backend [red]" in str(request.visual)
+
+        pr.timeline_events.clear()
+        store.state.reviews.clear()
+        timeline.refresh_timeline()
+        await wait_until(
+            lambda: (
+                not app.query(".timeline-event") and len(app.query(".comment-box")) == 1
+            )
+        )
+        assert not app.query("#comments-container .timeline-loading")
 
 
 class ScrollVector:

@@ -349,6 +349,7 @@ class PRStore:
             reviews=discussion.reviews,
             issue_comments=discussion.issue_comments,
             review_threads=discussion.review_threads,
+            timeline_events=discussion.timeline_events,
         )
         self._state.pr = merged_pr
         return merged_pr

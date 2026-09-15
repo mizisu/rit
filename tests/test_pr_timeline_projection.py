@@ -1,4 +1,6 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+
+import pytest
 
 import rit.ui.components.pr_timeline_projection as timeline_projection_module
 from rit.core.datetime_utils import datetime_min_utc
@@ -7,6 +9,7 @@ from rit.state.models import (
     PRComment,
     PRIssueComment,
     PRReview,
+    PRTimelineEvent,
     PRUser,
     ReviewState,
 )
@@ -17,7 +20,71 @@ from rit.ui.components.pr_timeline_projection import (
 
 
 def _dt(hour: int, minute: int = 0) -> datetime:
-    return datetime(2026, 6, 18, hour, minute, tzinfo=timezone.utc)
+    return datetime(2026, 6, 18, hour, minute, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("state", list(ReviewState))
+def test_blank_reviews_keep_decisions_but_not_empty_pending_or_comment_reviews(
+    state,
+) -> None:
+    review = PRReview(id=1, body=" \n", state=state, submitted_at=_dt(7))
+    items = build_timeline_items(issue_comments=[], reviews=[review], comments=[])
+
+    assert [item.review for item in items] == (
+        [] if state in {ReviewState.PENDING, ReviewState.COMMENTED} else [review]
+    )
+
+
+def test_activity_keeps_github_order_despite_commit_dates_and_appends_local_drafts() -> (
+    None
+):
+    events = [
+        PRTimelineEvent(
+            id="a", kind="PullRequestCommit", actor="alice", created_at=_dt(5)
+        ),
+        PRTimelineEvent(
+            id="b", kind="PullRequestCommit", actor="alice", created_at=_dt(5, 10)
+        ),
+        PRTimelineEvent(
+            id="c", kind="PullRequestCommit", actor="bob", created_at=_dt(5, 20)
+        ),
+        PRTimelineEvent(
+            id="issue-1", kind="IssueComment", database_id=1, created_at=_dt(5, 20)
+        ),
+        PRTimelineEvent(
+            id="d", kind="PullRequestCommit", actor="bob", created_at=_dt(4)
+        ),
+        PRTimelineEvent(id="closed", kind="ClosedEvent", created_at=_dt(8)),
+        PRTimelineEvent(id="reopened", kind="ReopenedEvent", created_at=_dt(9)),
+        PRTimelineEvent(
+            id="review-2", kind="PullRequestReview", database_id=2, created_at=_dt(9, 30)
+        ),
+        PRTimelineEvent(id="merged", kind="MergedEvent", created_at=_dt(10)),
+        PRTimelineEvent(id="merge-closed", kind="ClosedEvent", created_at=_dt(10)),
+    ]
+    items = build_timeline_items(
+        issue_comments=[PRIssueComment(id=1, body="Please update", created_at=_dt(5, 20))],
+        reviews=[
+            PRReview(id=2, state=ReviewState.APPROVED, submitted_at=_dt(9, 30)),
+            PRReview(id=3, body="Local draft", created_at=_dt(3)),
+        ],
+        comments=[],
+        events=events,
+    )
+
+    assert [([event.id for event in item.events] or [item.kind]) for item in items] == [
+        ["a", "b"],
+        ["c"],
+        ["issue_comment"],
+        ["d"],
+        ["closed"],
+        ["reopened"],
+        ["review"],
+        ["merged"],
+        ["review"],
+    ]
+    assert items[-1].review is not None
+    assert items[-1].review.id == 3
 
 
 def test_review_timeline_time_prefers_submitted_then_pending_thread_then_created() -> (

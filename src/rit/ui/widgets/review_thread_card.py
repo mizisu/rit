@@ -137,7 +137,9 @@ class ReviewThreadCard(Vertical):
 
     def _format_comment_meta(self, comment: PRComment, *, is_reply: bool) -> str:
         author = comment.user.login if comment.user else "unknown"
-        formatted = self._format_relative_time(comment.created_at)
+        formatted = self._format_relative_time(
+            comment.published_at or comment.created_at
+        )
         if is_reply:
             return f"[#6e738d]↳[/] [bold]{author}[/] {formatted}"
         return f"[bold]{author}[/] {formatted}"

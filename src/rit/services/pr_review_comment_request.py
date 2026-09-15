@@ -188,6 +188,7 @@ mutation($input: UpdatePullRequestReviewCommentInput!) {
       databaseId
       body
       createdAt
+      publishedAt
       updatedAt
       diffHunk
       path
