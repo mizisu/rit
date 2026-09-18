@@ -130,10 +130,10 @@ class CommentCard(Vertical):
         margin: 0;
     }
 
-    CommentCard.reading .comment-content Markdown > MarkdownParagraph,
-    CommentCard.reading .comment-content Markdown > MarkdownBulletList,
-    CommentCard.reading .comment-content Markdown > MarkdownOrderedList,
-    CommentCard.reading .comment-content Markdown > MarkdownBlockQuote {
+    CommentCard .comment-content Markdown > MarkdownParagraph,
+    CommentCard .comment-content Markdown > MarkdownBulletList,
+    CommentCard .comment-content Markdown > MarkdownOrderedList,
+    CommentCard .comment-content Markdown > MarkdownBlockQuote {
         margin: 0 0 1 0;
     }
 
@@ -287,11 +287,9 @@ class CommentCard(Vertical):
             self.call_after_refresh(mount_body)
 
     def _show_plain_body(self) -> None:
-        body = self._body.strip()
-        if body:
-            self._content_container.mount(
-                Static(body, classes="comment-body-plain", markup=False)
-            )
+        self._content_container.mount(
+            Static(self._body, classes="comment-body-plain", markup=False)
+        )
 
     def _mount_body(self, generation: int | None = None) -> None:
         if generation is not None and generation != self._body_mount_generation:

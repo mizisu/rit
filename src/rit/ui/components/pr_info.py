@@ -18,18 +18,13 @@ from rit.state.models import PRComment
 from rit.state.reviewer_status import ReviewerDisplayState, derive_reviewer_states
 from rit.state.store import PRStore
 from rit.ui.components.pr_timeline import PRTimeline
+from rit.ui.pr_status import PR_STATUS_LABELS as _PR_STATUS_LABELS
 
 __all__ = ("PRInfo",)
 
 
 _CSS_PATH = Path(__file__).parent / "pr_info.tcss"
 _DEFAULT_CSS = _CSS_PATH.read_text() if _CSS_PATH.exists() else ""
-_PR_STATUS_LABELS: dict[str, str] = {
-    "Open": "[#a6da95]◎ Open[/]",
-    "Merged": "[#c6a0f6]◉ Merged[/]",
-    "Closed": "[#ed8796]⊘ Closed[/]",
-    "Draft": "[#6e738d]◌ Draft[/]",
-}
 _DEFAULT_PR_STATUS_LABEL = _PR_STATUS_LABELS["Open"]
 _COMPACT_LAYOUT_BREAKPOINT = 94
 _EDIT_ICON = "\U000f03eb"
@@ -385,6 +380,10 @@ class PRInfo(Container):
 
     def toggle_current(self) -> None:
         self._timeline_widget().toggle_current()
+
+    def center_current(self) -> None:
+        """Center the selected timeline item in the main viewport."""
+        self._timeline_widget().center_current()
 
     def clear_selection(self) -> None:
         self._timeline_widget().clear_selection()

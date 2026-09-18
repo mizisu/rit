@@ -6,12 +6,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
-from rich.markup import escape
 from textual import events
 from textual._context import NoActiveAppError
 from textual.app import ComposeResult
 from textual.containers import Vertical, VerticalScroll
 from textual.css.query import NoMatches
+from textual.geometry import Size
 from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Collapsible, Static
@@ -36,6 +36,7 @@ from rit.ui.components.pr_timeline_formatting import (
     resolved_thread_title,
     thread_title,
     timeline_event_header,
+    timeline_header,
 )
 from rit.ui.components.pr_timeline_projection import (
     build_timeline_items,
@@ -174,13 +175,12 @@ class PRTimeline(Vertical):
     }
 
     PRTimeline .timeline-event {
+        width: 1fr;
         height: auto;
         padding: 0 1;
         margin: 0 0 1 0;
-        border: none;
-        border-left: solid transparent;
-        background: transparent;
-        color: #a5adcb;
+        border: solid #363a4f;
+        background: #1e2030;
     }
 
     PRTimeline .timeline-event:hover {
@@ -188,9 +188,7 @@ class PRTimeline(Vertical):
     }
 
     PRTimeline .timeline-event.--selected {
-        border: none;
-        border-left: solid #8aadf4;
-        background: #24273a;
+        border: solid #8aadf4;
     }
 
     PRTimeline Collapsible.timeline-event {
@@ -199,6 +197,7 @@ class PRTimeline(Vertical):
 
     PRTimeline Collapsible.timeline-event > CollapsibleTitle {
         padding: 0 1;
+        color: $foreground;
     }
 
     PRTimeline Collapsible.timeline-event > Contents {
@@ -387,6 +386,7 @@ class PRTimeline(Vertical):
         container = self._comments_container_widget()
 
         with self.app.batch_update():
+            self.styles.padding = 0
             await container.remove_children()
             self._thread_widget_info.clear()
             self._review_comment_by_widget.clear()
@@ -489,9 +489,11 @@ class PRTimeline(Vertical):
         if body_mount_delay is None:
             body_mount_delay = self._next_body_mount_delay()
 
-        time_str = self._format_time(comment.created_at)
-        user_name = comment.user.login if comment.user else "unknown"
-        header_text = f"[bold]{user_name}[/] [#6e738d]commented {time_str}[/]"
+        header_text = timeline_header(
+            author=author_display_name(comment.user),
+            action="[#6e738d]commented[/]",
+            time_str=self._format_time(comment.created_at),
+        )
 
         card = CommentCard(
             header_text,
@@ -513,11 +515,11 @@ class PRTimeline(Vertical):
         if not review_has_summary(review):
             return
 
-        time_str = self._format_time(review_timeline_time(review, []))
-        state_display = _review_state_display(review.state)
-
-        user_name = escape(author_display_name(review.user))
-        header_text = f"[bold]{user_name}[/] {state_display} {time_str}"
+        header_text = timeline_header(
+            author=author_display_name(review.user),
+            action=_review_state_display(review.state),
+            time_str=self._format_time(review_timeline_time(review, [])),
+        )
         if not _has_body(review.body):
             self._mount_event(container, header_text)
             return
@@ -901,6 +903,35 @@ class PRTimeline(Vertical):
                 self._update_selection(index)
                 return
 
+    def center_current(self) -> None:
+        """Center the selected item, using its header when taller than the viewport."""
+        self._collect_navigable_items()
+        item = self.current_item
+        scroll = self._scroll_container
+        if item is None or scroll is None:
+            return
+
+        viewport = scroll.scrollable_content_region
+        region = item.region
+        if not viewport.height or not region.height:
+            return
+
+        self._preserve_initial_scroll_home = False
+        scroll.anchor(False)
+        center_y = (
+            item.content_region.y
+            if region.height > viewport.height
+            else region.y + region.height // 2
+        )
+        target_y = max(
+            0, scroll.scroll_offset.y + center_y - viewport.y - viewport.height // 2
+        )
+        content_height = scroll.virtual_size.height - self.styles.padding.bottom
+        padding = max(0, target_y + viewport.height - content_height) if target_y else 0
+        self.styles.padding = (0, 0, padding, 0)
+        scroll.virtual_size = Size(scroll.virtual_size.width, content_height + padding)
+        scroll.scroll_to(y=target_y, animate=False)
+
     def clear_selection(self) -> None:
         if 0 <= self._current_index < len(self._navigable_items):
             old_item = self._navigable_items[self._current_index]
@@ -954,12 +985,14 @@ class PRTimeline(Vertical):
                 return
 
     def select_first_item(self) -> None:
+        self.styles.padding = 0
         self._collect_navigable_items()
 
         if self._navigable_items:
             self._update_selection(0)
 
     def select_last_item(self) -> None:
+        self.styles.padding = 0
         self._preserve_initial_scroll_home = False
         self._collect_navigable_items()
 

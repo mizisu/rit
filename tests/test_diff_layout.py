@@ -133,6 +133,18 @@ def test_should_force_unified_only_for_added_or_removed_hunks() -> None:
     )
 
 
+def test_should_force_unified_for_folded_hunk() -> None:
+    assert should_force_unified_for_hunk(
+        DiffHunk(
+            old_start=1,
+            old_count=0,
+            new_start=1,
+            new_count=0,
+            lines=[DiffLine(None, 1, is_folded_file_placeholder=True)],
+        )
+    )
+
+
 def test_code_widths_for_layout_use_display_cell_widths() -> None:
     widths = code_widths_for_layout(
         [

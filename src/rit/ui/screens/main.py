@@ -110,6 +110,7 @@ def _reviewer_candidate_result(
 
 _PR_INFO_BINDINGS = [
     Binding("ctrl+g", "scroll_to_bottom", "Bottom", show=False),
+    Binding("z", "center_current", "Center", show=False),
     Binding("j", "cursor_down", "", group=_NAVIGATION_GROUP),
     Binding("k", "cursor_up", "", group=_NAVIGATION_GROUP),
     Binding("c", "comment", "Comment", group=_COMMENT_GROUP),
@@ -453,6 +454,10 @@ class MainScreen(Screen[None]):
         if self.current_tab == 0:
             self.pr_info.select_last_item()
 
+    def action_center_current(self) -> None:
+        if self.current_tab == 0:
+            self.pr_info.center_current()
+
     def action_toggle_resolve(self) -> None:
         if self.current_tab == 0:
             thread_info = self.pr_info.get_current_thread_info()
@@ -525,6 +530,7 @@ class MainScreen(Screen[None]):
                 pending_comments_count=len(self.store.state.pending_review.comments),
                 pending_comments=list(self.store.state.pending_review.comments),
                 initial_body=self.store.state.pending_review.body,
+                store=self.store,
             ),
             self._handle_review_submit,
         )
@@ -787,8 +793,22 @@ class MainScreen(Screen[None]):
             return
 
         diff_view = self.file_changes.diff_view
+        edit_target = (
+            diff_view.file_comment_edit_target()
+            if event.kind == "file"
+            else diff_view.inline_comment_edit_target()
+        )
+        if edit_target is not None:
+            self.run_worker(
+                self._update_review_comment(event.body, edit_target, kind=event.kind),
+                exclusive=False,
+                name="_update_review_comment",
+            )
+            return
+
         if event.kind == "file":
             target = diff_view.file_comment_target()
+            draft_index = diff_view.file_comment_draft_index()
             if target is None:
                 self.post_message(
                     Flash("No file header selected", style="warning", duration=2.0)
@@ -796,24 +816,19 @@ class MainScreen(Screen[None]):
                 return
             if event.mode == "post":
                 self.run_worker(
-                    self._post_file_comment(event.body, path=target),
+                    self._post_file_comment(
+                        event.body, path=target, draft_index=draft_index
+                    ),
                     exclusive=False,
                     name="_post_file_comment",
                 )
                 return
             self.run_worker(
-                self._save_file_comment_draft(event.body, path=target),
+                self._save_file_comment_draft(
+                    event.body, path=target, draft_index=draft_index
+                ),
                 exclusive=False,
                 name="_save_file_comment_draft",
-            )
-            return
-
-        edit_target = diff_view.inline_comment_edit_target()
-        if edit_target is not None:
-            self.run_worker(
-                self._update_review_comment(event.body, edit_target),
-                exclusive=False,
-                name="_update_review_comment",
             )
             return
 
@@ -968,13 +983,15 @@ class MainScreen(Screen[None]):
         self.pr_info.refresh_comments()
         return True
 
-    async def _post_file_comment(self, body: str, *, path: str) -> bool:
+    async def _post_file_comment(
+        self, body: str, *, path: str, draft_index: int | None = None
+    ) -> bool:
         diff_view = self.file_changes.diff_view
         current_file = diff_view.current_file
         current_line = diff_view.cursor_line
         current_pane = diff_view.active_pane
 
-        await self.store.submit_file_comment(body, path=path)
+        await self.store.post_file_comment(body, path=path, draft_index=draft_index)
         await diff_view.close_file_comment_editor()
         await self.store.refresh_review_data()
         self.pr_info.refresh_comments()
@@ -989,7 +1006,9 @@ class MainScreen(Screen[None]):
             )
         return True
 
-    async def _save_file_comment_draft(self, body: str, *, path: str) -> bool:
+    async def _save_file_comment_draft(
+        self, body: str, *, path: str, draft_index: int | None = None
+    ) -> bool:
         diff_view = self.file_changes.diff_view
         current_file = diff_view.current_file
         current_line = diff_view.cursor_line
@@ -1010,6 +1029,7 @@ class MainScreen(Screen[None]):
             await self.store.queue_pending_file_comment(
                 body,
                 path=path,
+                draft_index=draft_index,
                 after_local_save=refresh_file_drafts,
             )
         except Exception:
@@ -1062,6 +1082,8 @@ class MainScreen(Screen[None]):
         self,
         body: str,
         comment: PRComment,
+        *,
+        kind: Literal["inline", "file"] = "inline",
     ) -> bool:
         diff_view = self.file_changes.diff_view
         current_file = diff_view.current_file
@@ -1069,7 +1091,10 @@ class MainScreen(Screen[None]):
         current_pane = diff_view.active_pane
 
         await self.store.update_review_comment(comment, body)
-        await diff_view.close_inline_comment_editor()
+        if kind == "file":
+            await diff_view.close_file_comment_editor()
+        else:
+            await diff_view.close_inline_comment_editor()
         self.pr_info.refresh_comments()
         self.file_changes.file_tree.refresh_files()
 

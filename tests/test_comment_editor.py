@@ -42,6 +42,13 @@ async def test_inline_comment_editor_submits_trimmed_body_with_ctrl_s() -> None:
     async with app.run_test() as pilot:
         await pilot.pause()
 
+        assert str(app.query_one("#comment-editor-submit", Button).label) == (
+            "Submit  Ctrl+S"
+        )
+        assert str(app.query_one("#comment-editor-cancel", Button).label) == (
+            "Cancel  Esc"
+        )
+
         textarea = app.query_one("#comment-editor-body", TextArea)
         textarea.text = "  hello\nworld  "
 
@@ -190,11 +197,26 @@ async def test_inline_comment_editor_shows_visible_action_buttons() -> None:
             "comment-editor-cancel",
         ]
         assert [str(button.label) for button in buttons] == [
-            "Add to review",
+            "Add to review  Ctrl+S",
             "Post now",
-            "Cancel",
+            "Cancel  Esc",
         ]
         assert buttons[0].variant == "primary"
+
+        actions = app.query_one(".comment-editor-actions")
+        for width in (44, 80):
+            await pilot.resize_terminal(width, 30)
+            await pilot.pause()
+
+            assert all(
+                actions.content_region.contains_region(button.region)
+                for button in buttons
+            )
+            if width == 44:
+                assert buttons[0].region.bottom <= buttons[1].region.y
+                assert buttons[1].region.bottom <= buttons[2].region.y
+            else:
+                assert len({button.region.y for button in buttons}) == 1
 
 
 @pytest.mark.asyncio
@@ -218,6 +240,11 @@ async def test_file_comment_editor_offers_pending_and_post_now_buttons() -> None
             "comment-editor-queue",
             "comment-editor-post",
             "comment-editor-cancel",
+        ]
+        assert [str(button.label) for button in buttons] == [
+            "Add to review  Ctrl+S",
+            "Post now",
+            "Cancel  Esc",
         ]
         assert app.result == ("file", "whole file", "queue")
 
@@ -246,7 +273,10 @@ async def test_existing_comment_editor_shows_update_button() -> None:
             "comment-editor-submit",
             "comment-editor-cancel",
         ]
-        assert [str(button.label) for button in buttons] == ["Update", "Cancel"]
+        assert [str(button.label) for button in buttons] == [
+            "Update  Ctrl+S",
+            "Cancel  Esc",
+        ]
         assert buttons[0].variant == "primary"
 
 

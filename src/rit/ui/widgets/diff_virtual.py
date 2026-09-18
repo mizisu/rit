@@ -18,6 +18,7 @@ from rit.ui.widgets import diff_geometry as _geometry
 if TYPE_CHECKING:
     from rit.core.types import DiffLine
     from rit.state.models import PendingReviewComment
+    from rit.ui.widgets.diff_view import DiffView
 
 __all__ = ()
 
@@ -568,11 +569,9 @@ async def _sync_visible_virtual_file_headers(
             window_start,
             window_end,
         )
-        render_split = view.split and not view._should_force_unified_for_hunk(hunk)
         header_widget = view._create_file_header_widget(
             hunk_index=hunk_index,
             hunk=hunk,
-            split=render_split,
         )
         _mount_before_or_at_end(container, header_widget, anchor=anchor)
         view._register_file_header_widget(hunk_index, header_widget)
@@ -580,7 +579,6 @@ async def _sync_visible_virtual_file_headers(
             view,
             container,
             hunk_index,
-            split=render_split,
             before=anchor,
         )
         view._mount_file_comment_editor(
@@ -612,16 +610,9 @@ async def _sync_visible_virtual_hunk_headers(
         hunk = view._diff.hunks[hunk_index]
         if len(hunk.lines) == 1 and _folding.is_folded_placeholder_line(hunk.lines[0]):
             continue
-        hunk_header = (
-            f"@@ -{hunk.old_start},{hunk.old_count} "
-            f"+{hunk.new_start},{hunk.new_count} @@"
-        )
-        if hunk.header:
-            hunk_header += f" {hunk.header}"
-
         header_widget = view._create_hunk_header_widget(
             hunk_index=hunk_index,
-            hunk_header=hunk_header,
+            hunk=hunk,
         )
         anchor = _virtual_hunk_anchor(
             view,
@@ -722,22 +713,32 @@ def _iter_virtualized_line_groups(
         yield _VirtualLineWindow(view._all_lines, current_group_start, end + 1)
 
 
+def _mount_virtualized_lines(
+    view: DiffView,
+    container: VerticalScroll,
+    start: int,
+    end: int,
+    *,
+    before: Widget | None,
+) -> None:
+    if view._diff is None or start > end:
+        return
+
+    for lines in _iter_virtualized_line_groups(view, start, end):
+        hunk_index = view._hunk_index_by_line[lines[0].line_index]
+        hunk = view._diff.hunks[hunk_index]
+        view._mount_hunk_lines(container, hunk, lines, before=before)
+
+
 def _mount_virtualized_lines_at_bottom(
     view,
     container: VerticalScroll,
     start: int,
     end: int,
 ) -> None:
-    if view._diff is None or start > end:
-        return
-
-    bottom_buffer = view._virt.bottom_buffer
-
-    for lines in _iter_virtualized_line_groups(view, start, end):
-        if view.split:
-            view._mount_split_lines(container, lines, before=bottom_buffer)
-        else:
-            view._mount_unified_lines(container, lines, before=bottom_buffer)
+    _mount_virtualized_lines(
+        view, container, start, end, before=view._virt.bottom_buffer
+    )
 
 
 def _mount_virtualized_lines_at_top(
@@ -756,11 +757,7 @@ def _mount_virtualized_lines_at_top(
         anchor = child
         break
 
-    for lines in _iter_virtualized_line_groups(view, start, end):
-        if view.split:
-            view._mount_split_lines(container, lines, before=anchor)
-        else:
-            view._mount_unified_lines(container, lines, before=anchor)
+    _mount_virtualized_lines(view, container, start, end, before=anchor)
 
 
 def _mount_virtualized_ranges_at_top(
@@ -885,7 +882,10 @@ def _reveal_cursor_after_virtual_render(view, request_token: int) -> None:
         return
     from rit.ui.widgets import diff_cursor as _cursor
 
-    _cursor._scroll_to_cursor(view)
+    pending_scroll = view._virt.pending_scroll
+    view._virt.pending_scroll = None
+    if pending_scroll is not None:
+        pending_scroll()
     _cursor._scroll_to_cursor_horizontal(view)
     _cursor._flush_cursor_ui_now_if_safe(view)
     view._virt.suppress_next_viewport_shift = True

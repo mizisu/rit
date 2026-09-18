@@ -3,6 +3,8 @@ from typing import Any
 
 import pytest
 
+from rit.services.github import GitHubError, GitHubService
+from rit.services.graphql_mutations import GraphQLMutationError
 from rit.services.pr_review_graphql import (
     create_pending_review,
     delete_pending_review,
@@ -373,3 +375,137 @@ async def test_submit_and_delete_pending_review_use_review_node_id() -> None:
         }
     }
     assert calls[3]["variables"] == {"reviewId": "review_node"}
+
+
+@pytest.mark.parametrize("failure", [None, "cli", "graphql", "offline"])
+async def test_body_only_review_creation_and_updates_never_submit(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str | None,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    state = "PENDING"
+
+    async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        assert input_text is not None
+        payload = json.loads(input_text)
+        calls.append(payload)
+        if payload["query"].lstrip().startswith("query"):
+            return json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "id": "PR_node",
+                                "reviews": {
+                                    "nodes": [
+                                        {
+                                            "id": "review_node",
+                                            "databaseId": 80,
+                                            "state": state,
+                                        }
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            )
+        name = (
+            "updatePullRequestReview"
+            if "updatePullRequestReview(" in payload["query"]
+            else "addPullRequestReview"
+        )
+        if name == "updatePullRequestReview" and failure:
+            message = "Could not edit a review with a missing body."
+            if failure == "graphql":
+                return json.dumps({"errors": [{"message": message}]})
+            raise GitHubError("offline" if failure == "offline" else f"gh: {message}")
+        return json.dumps(
+            {
+                "data": {
+                    name: {
+                        "pullRequestReview": {
+                            "databaseId": 80,
+                            "nodeId": "review_node",
+                            "state": "PENDING",
+                            "body": payload["variables"]["input"]["body"],
+                        }
+                    }
+                }
+            }
+        )
+
+    service = GitHubService(owner="owner", repo="repo")
+    monkeypatch.setattr(service, "_run_gh", runner)
+    await service.create_pending_review(123, comments=[], body="draft")
+    assert calls[-1]["variables"]["input"] == {
+        "pullRequestId": "PR_node",
+        "body": "draft",
+    }
+    if failure == "offline":
+        with pytest.raises(GitHubError, match="offline"):
+            await service.update_pending_review(123, 80, body="updated draft")
+    else:
+        updated = await service.update_pending_review(123, 80, body="updated draft")
+        if failure:
+            assert updated is None
+        else:
+            assert updated is not None and updated.body == "updated draft"
+    assert calls[-1]["variables"]["input"] == {
+        "pullRequestReviewId": "review_node",
+        "body": "updated draft",
+    }
+    assert "updatePullRequestReview(" in calls[-1]["query"]
+
+    state = "COMMENTED"
+    with pytest.raises(GraphQLMutationError, match="no longer pending"):
+        await service.update_pending_review(
+            123, 80, body="do not edit a published review"
+        )
+    assert len(calls) == 5
+    assert all("submitPullRequestReview(" not in call["query"] for call in calls)
+
+
+@pytest.mark.parametrize("count", [None, 0, 1])
+async def test_delete_body_only_review_requires_verified_empty_comments(
+    count: int | None,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        assert input_text is not None
+        payload = json.loads(input_text)
+        calls.append(payload)
+        return json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "id": "PR_node",
+                            "reviews": {
+                                "nodes": [
+                                    {
+                                        "id": "review_node",
+                                        "databaseId": 80,
+                                        "comments": {"totalCount": count},
+                                    }
+                                ]
+                            },
+                        }
+                    }
+                }
+            }
+        )
+
+    if count == 0:
+        await delete_pending_review(
+            "owner", "repo", 123, review_id=80, runner=runner, require_empty=True
+        )
+        assert len(calls) == 2
+        assert "deletePullRequestReview(" in calls[-1]["query"]
+    else:
+        with pytest.raises(GraphQLMutationError, match="not replacing pending review"):
+            await delete_pending_review(
+                "owner", "repo", 123, review_id=80, runner=runner, require_empty=True
+            )
+        assert len(calls) == 1

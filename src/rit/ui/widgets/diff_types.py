@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import builtins
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
@@ -287,6 +287,7 @@ class VirtualState:
     rendered_end: int = -1
     render_pending: bool = False
     cursor_shift_pending: bool = False
+    pending_scroll: Callable[[], None] | None = None
     coalesced_center: int | None = None
     suppress_next_viewport_shift: bool = False
     top_buffer: Static | None = None

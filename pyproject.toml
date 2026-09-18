@@ -3,6 +3,8 @@ name = "rit"
 version = "0.1.0"
 description = "Terminal GitHub PR Review CLI"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.14"
 dependencies = [
   "click>=8.4.2",

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal
 from textual.containers import VerticalScroll
 from textual.geometry import Size
 
+from rit.ui.messages import Flash
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets import diff_cursor_update as _cursor_update
@@ -297,6 +298,9 @@ def _step_up_one(view: DiffView) -> bool:
 
 
 def _scroll_home(view: DiffView) -> None:
+    if view._cursor_ui.pending_count:
+        _jump_to_file_line(view, _consume_count(view))
+        return
     rows = view._rows_for_current_mode()
     if rows:
         _jump_to_row_with_anchor(view, rows[0], viewport_offset=0)
@@ -305,20 +309,37 @@ def _scroll_home(view: DiffView) -> None:
 
 
 def _scroll_end(view: DiffView) -> None:
+    if view._cursor_ui.pending_count:
+        _jump_to_file_line(view, _consume_count(view))
+        return
     rows = view._rows_for_current_mode()
-    count_explicit = bool(view._cursor_ui.pending_count)
-    count = _consume_count(view)
     if rows:
-        if count_explicit:
-            target_line = max(0, min(count - 1, len(view._all_lines) - 1))
-            target_row = _first_row_for_line(view, target_line) or rows[-1]
-            _jump_to_row_with_anchor(view, target_row, viewport_offset=0)
-        else:
-            _jump_to_row_with_anchor(view, rows[-1], bottom_align=True)
-            view.scroll_end(animate=False)
+        _jump_to_row_with_anchor(view, rows[-1], bottom_align=True)
         _flush_cursor_ui_now_if_safe(view)
         return
     view.scroll_end(animate=False)
+
+
+def _jump_to_file_line(view: DiffView, line_number: int) -> None:
+    filename = view.file_for_line_index(view.cursor_line)
+    if filename is None:
+        view.post_message(Flash("No file selected", style="warning", duration=2.0))
+        return
+
+    side: Literal["LEFT", "RIGHT"] = (
+        "LEFT" if view._current_cursor_side() == "old" else "RIGHT"
+    )
+    line_index = view.line_index_for_location(filename, line_number, side)
+    if line_index is None:
+        message = (
+            f"Line {line_number} is not in this file"
+            if view._showing_full_file
+            else f"Line {line_number} is not in this diff; press p for full file"
+        )
+        view.post_message(Flash(message, style="warning", duration=3.0))
+        return
+
+    view.jump_to_line_index(line_index, side=side, only_if_hidden=True)
 
 
 async def _half_page_down(view: DiffView) -> None:
@@ -366,10 +387,7 @@ def _jump_half_page(view: DiffView, direction: int) -> None:
     if not moved:
         return
 
-    if viewport_offset is not None:
-        _scroll_row_to_viewport_offset(view, row, viewport_offset)
-    else:
-        _scroll_to_cursor(view)
+    _scroll_to_row(view, row, viewport_offset=viewport_offset)
     _scroll_to_cursor_horizontal(view)
     _flush_cursor_ui_now_if_safe(view)
 
@@ -633,7 +651,20 @@ def _half_page_step(view: DiffView) -> int:
     return max(1, view.scrollable_content_region.height // 2)
 
 
-def _row_vertical_bounds(view: DiffView, row: RenderedRow) -> tuple[int, int] | None:
+def _row_vertical_bounds(
+    view: DiffView, row: RenderedRow, *, mounted: bool = True
+) -> tuple[int, int] | None:
+    if mounted and view.is_mounted:
+        widget = _target_widget_for_row(view, row)
+        if widget is not None and widget.region.height > 0:
+            top = (
+                int(view.scroll_y) + widget.region.y - view.scrollable_content_region.y
+            )
+            return top, top + widget.region.height
+        bounds = _mounted_block_row_vertical_bounds(view, row)
+        if bounds is not None:
+            return bounds
+
     return _geometry.row_vertical_bounds(
         row,
         all_lines=view._all_lines,
@@ -673,38 +704,59 @@ def _current_cursor_viewport_offset(view: DiffView) -> int | None:
     return _geometry.cursor_viewport_offset(bounds, _viewport_geometry(view))
 
 
-def _scroll_row_to_viewport_offset(
-    view: DiffView,
-    row: RenderedRow,
-    viewport_offset: int,
-    *,
-    animate: bool = False,
-) -> None:
-    bounds = _row_vertical_bounds(view, row)
-    if bounds is None:
-        return
-    target_scroll = _geometry.scroll_target_for_row_viewport_offset(
-        bounds,
-        _viewport_geometry(view),
-        viewport_offset,
-    )
-    view.scroll_to(y=target_scroll, animate=animate)
-
-
-def _scroll_row_to_viewport_bottom(
+def _scroll_to_row(
     view: DiffView,
     row: RenderedRow,
     *,
+    viewport_offset: int | None = None,
+    bottom_align: bool = False,
+    only_if_hidden: bool = False,
     animate: bool = False,
 ) -> None:
+    if not view.is_mounted:
+        return
     bounds = _row_vertical_bounds(view, row)
     if bounds is None:
         return
-    target_scroll = _geometry.scroll_target_for_row_bottom(
-        bounds,
-        _viewport_geometry(view),
-    )
-    view.scroll_to(y=target_scroll, animate=animate)
+    viewport = _viewport_geometry(view)
+    if only_if_hidden and _geometry.row_is_visible(bounds, viewport):
+        viewport_offset = _geometry.cursor_viewport_offset(bounds, viewport)
+
+    if view._virt.active:
+        if not view._is_line_rendered(row.line_index):
+            _virtual._maybe_update_virtual_window(view, row.line_index)
+        if view._virt.render_pending:
+            revision = view.view_revision
+            pane = view.cursor_pane if row.side == "auto" else row.side
+
+            def reapply_scroll() -> None:
+                if not view._is_current_view_revision(revision):
+                    return
+                target = view._row_for_line_and_pane(row.line_index, pane)
+                if target is not None:
+                    _scroll_to_row(
+                        view,
+                        target,
+                        viewport_offset=viewport_offset,
+                        bottom_align=bottom_align,
+                    )
+
+            view._virt.coalesced_center = row.line_index
+            view._virt.cursor_shift_pending = True
+            view._virt.pending_scroll = reapply_scroll
+
+    saved = view._suspend_scroll_virtual_window_watch
+    view._suspend_scroll_virtual_window_watch = True
+    try:
+        _scroll_to_vertical_span(
+            view,
+            *bounds,
+            viewport_offset=viewport_offset,
+            bottom_align=bottom_align,
+            animate=animate,
+        )
+    finally:
+        view._suspend_scroll_virtual_window_watch = saved
 
 
 def _row_is_visible(view: DiffView, row: RenderedRow) -> bool:
@@ -733,25 +785,34 @@ def _scroll_to_vertical_span(
     animate: bool = False,
     top_align: bool = False,
     scrolloff: int | None = None,
+    viewport_offset: int | None = None,
+    bottom_align: bool = False,
 ) -> None:
-    target_scroll = _geometry.scroll_target_for_span(
-        top=top,
-        bottom=bottom,
-        viewport=_viewport_geometry(view),
-        top_align=top_align,
-        scrolloff=view.LAYOUT.vertical_scrolloff if scrolloff is None else scrolloff,
+    if bottom_align:
+        view.scroll_end(animate=animate, immediate=True)
+        return
+    viewport = _viewport_geometry(view)
+    target_scroll = (
+        _geometry.scroll_target_for_row_viewport_offset(
+            (top, bottom), viewport, viewport_offset
+        )
+        if viewport_offset is not None
+        else _geometry.scroll_target_for_span(
+            top=top,
+            bottom=bottom,
+            viewport=viewport,
+            top_align=top_align,
+            scrolloff=view.LAYOUT.vertical_scrolloff
+            if scrolloff is None
+            else scrolloff,
+        )
     )
     if target_scroll is not None:
-        view.scroll_to(y=target_scroll, animate=animate)
+        view.scroll_to(y=target_scroll, animate=animate, immediate=True)
 
 
 def _target_widget_for_row(view: DiffView, row: RenderedRow):
-    """Return the most specific mounted widget for a rendered row, if any.
-
-    Estimated line offsets diverge from real heights when inline comments,
-    pending drafts, or the inline editor are present. Callers should prefer
-    `scroll_to_widget` on this widget over geometry-based scrolling.
-    """
+    """Return a mounted, non-block widget anchoring a rendered row."""
     target = view._row_anchor_widgets.get(row.anchor_id)
     if target is None or not target.is_mounted:
         target = view._line_widgets_by_index.get(row.line_index)
@@ -766,17 +827,14 @@ def _mounted_block_row_vertical_bounds(
     view: DiffView,
     row: RenderedRow,
 ) -> tuple[int, int] | None:
-    block = (
-        view._split_blocks_by_line.get(row.line_index)
-        if view.split
-        else view._unified_blocks_by_line.get(row.line_index)
-    )
-    if block is None or not block.is_mounted:
+    split_block = view._split_blocks_by_line.get(row.line_index)
+    block = split_block or view._unified_blocks_by_line.get(row.line_index)
+    if block is None or not block.is_mounted or block.region.height <= 0:
         return None
 
     line_indices = block.line_indices
     block_top = int(view.scroll_y) + (block.region.y - view.scrollable_content_region.y)
-    if view.split:
+    if split_block is not None:
         for row_offset, line_index in enumerate(line_indices):
             if line_index == row.line_index:
                 top = block_top + row_offset
@@ -798,43 +856,12 @@ def _mounted_block_row_vertical_bounds(
     return None
 
 
-def _has_height_estimate_drift(view: DiffView) -> bool:
-    """Return True when extras (comments, drafts, inline editor) make height estimates unreliable."""
-    if view._inline_comment_editor_line_index is not None:
-        return True
-    if view._comment_threads_by_line:
-        return True
-    return bool(view._pending_comment_drafts_by_line)
-
-
 def _scroll_to_cursor(view: DiffView) -> None:
     if not view._all_lines or not view.is_mounted:
         return
     row = view._current_row()
-    if row is None:
-        return
-
-    saved = view._suspend_scroll_virtual_window_watch
-    view._suspend_scroll_virtual_window_watch = True
-    try:
-        if _has_height_estimate_drift(view):
-            target_widget = _target_widget_for_row(view, row)
-            if target_widget is not None:
-                view.scroll_to_widget(target_widget, animate=False)
-                return
-            bounds = _mounted_block_row_vertical_bounds(view, row)
-            if bounds is not None:
-                top, bottom = bounds
-                _scroll_to_vertical_span(view, top, bottom, animate=False)
-                return
-
-        bounds = _row_vertical_bounds(view, row)
-        if bounds is None:
-            return
-        top, bottom = bounds
-        _scroll_to_vertical_span(view, top, bottom, animate=False)
-    finally:
-        view._suspend_scroll_virtual_window_watch = saved
+    if row is not None:
+        _scroll_to_row(view, row)
 
 
 def _scroll_to_cursor_horizontal(view: DiffView) -> None:
@@ -879,6 +906,7 @@ def _jump_to_row_with_anchor(
     column: int | None = None,
     viewport_offset: int | None = None,
     bottom_align: bool = False,
+    only_if_hidden: bool = False,
     animate: bool = False,
     reveal_horizontal: bool = False,
     update_active_pane: bool = False,
@@ -887,6 +915,7 @@ def _jump_to_row_with_anchor(
     if target_pane is None and row.side != "auto":
         target_pane = "old" if row.side == "old" else "new"
 
+    suppress_scroll = view._cursor_ui.suppress_scroll
     view._cursor_ui.suppress_scroll = True
     try:
         _move_cursor(
@@ -898,14 +927,16 @@ def _jump_to_row_with_anchor(
             update_active_pane=update_active_pane,
         )
     finally:
-        view._cursor_ui.suppress_scroll = False
+        view._cursor_ui.suppress_scroll = suppress_scroll
 
-    if bottom_align:
-        _scroll_row_to_viewport_bottom(view, row, animate=animate)
-    elif viewport_offset is not None:
-        _scroll_row_to_viewport_offset(view, row, viewport_offset, animate=animate)
-    else:
-        _scroll_to_cursor(view)
+    _scroll_to_row(
+        view,
+        row,
+        viewport_offset=viewport_offset,
+        bottom_align=bottom_align,
+        only_if_hidden=only_if_hidden,
+        animate=animate,
+    )
 
     if reveal_horizontal:
         _scroll_to_cursor_horizontal(view)
@@ -1355,4 +1386,4 @@ def _center_cursor(view: DiffView) -> None:
         vs = view.virtual_size
         view.virtual_size = Size(vs.width, max(0, vs.height + delta))
 
-    view.scroll_to(y=target_y, animate=False)
+    _scroll_to_row(view, row, viewport_offset=viewport_height // 2 - (mid - top))

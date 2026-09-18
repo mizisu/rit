@@ -62,7 +62,7 @@ class PendingReviewSyncPlan:
 
     @property
     def should_create(self) -> bool:
-        return bool(self.comments)
+        return bool(self.comments or (self.body and self.body.strip()))
 
 
 @dataclass(frozen=True)
@@ -258,7 +258,9 @@ def plan_review_submission(
 
     return ReviewSubmissionPlan(
         event=event,
-        body=normalized_body or None,
+        body=normalized_body
+        if pending_review_id is not None
+        else normalized_body or None,
         comments=pending_comments,
         pending_review_id=pending_review_id,
     )
@@ -337,7 +339,7 @@ def plan_pending_review_sync(
     return PendingReviewSyncPlan(
         delete_review_id=pending_review_id,
         comments=syncable,
-        body=pending_review_body or None,
+        body=pending_review_body if pending_review_body.strip() else None,
         commit_id=head_sha or None,
     )
 
@@ -830,24 +832,21 @@ def _remember_server_comment_id(
     comments: list[PendingReviewComment],
     server_comment: PendingReviewComment,
 ) -> None:
+    """Keep rendered draft references valid when attaching server IDs."""
     if (
         not server_comment.review_comment_id
         and not server_comment.review_comment_node_id
     ):
         return
     server_key = _comment_content_key(server_comment)
-    for index, comment in enumerate(comments):
+    for comment in comments:
         if _comment_content_key(comment) != server_key:
             continue
-        comments[index] = comment.model_copy(
-            update={
-                "review_comment_id": server_comment.review_comment_id,
-                "review_comment_node_id": server_comment.review_comment_node_id,
-            }
-        )
+        comment.review_comment_id = server_comment.review_comment_id
+        comment.review_comment_node_id = server_comment.review_comment_node_id
         return
 
-    for index, comment in enumerate(comments):
+    for comment in comments:
         if not _server_comment_matches_local_when_range_missing(
             comment,
             server_comment,
@@ -855,12 +854,8 @@ def _remember_server_comment_id(
             continue
         if comment.review_comment_id or comment.review_comment_node_id:
             return
-        comments[index] = comment.model_copy(
-            update={
-                "review_comment_id": server_comment.review_comment_id,
-                "review_comment_node_id": server_comment.review_comment_node_id,
-            }
-        )
+        comment.review_comment_id = server_comment.review_comment_id
+        comment.review_comment_node_id = server_comment.review_comment_node_id
         return
 
 

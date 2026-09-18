@@ -5,13 +5,16 @@ from typing import ClassVar, Literal
 from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import HorizontalGroup, Vertical, VerticalScroll
+from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
+from textual.timer import Timer
 from textual.widget import Widget
 from textual.widgets import Button, OptionList, Static, TextArea
 from textual.widgets.option_list import Option
 
 from rit.state.models import PendingReviewComment
+from rit.state.store import PRStore
+from rit.ui.widgets.action_buttons import ActionButtons
 from rit.ui.widgets.comment_card import CommentCard
 from rit.ui.widgets.emoji_picker import EMOJI_PICKER_BINDINGS, EmojiPicker
 
@@ -39,6 +42,7 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
         pending_comments_count: int = 0,
         pending_comments: list[PendingReviewComment] | None = None,
         initial_body: str = "",
+        store: PRStore | None = None,
     ) -> None:
         super().__init__()
         self._pending_comments = pending_comments or []
@@ -46,7 +50,10 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
             pending_comments_count,
             len(self._pending_comments),
         )
-        self._initial_body = initial_body
+        self._store = store
+        self._initial_body = store.state.pending_review.body if store else initial_body
+        self._save_timer: Timer | None = None
+        self._saving_to_close = False
 
     DEFAULT_CSS = """
     ReviewSubmitScreen {
@@ -105,7 +112,7 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
     }
 
     #review-submit-buttons {
-        height: 3;
+        height: auto;
         align-horizontal: right;
     }
 
@@ -121,7 +128,8 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
         Binding("k", "cursor_up", "Prev", show=False),
         Binding("tab", "focus_next", "Next Field", show=False),
         Binding("shift+tab", "focus_prev", "Prev Field", show=False),
-        Binding("ctrl+s", "submit", "Submit", show=False),
+        Binding("ctrl+s", "save_draft", "Save draft", show=False),
+        Binding("ctrl+enter", "submit", "Submit", show=False),
         Binding("escape", "cancel", "Cancel", show=False),
     ]
 
@@ -129,6 +137,7 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
         with Vertical(id="review-submit-dialog"):
             yield Static("Submit review", id="review-submit-title")
             yield TextArea(
+                self._initial_body,
                 id="review-submit-body",
                 soft_wrap=True,
                 show_line_numbers=False,
@@ -161,24 +170,84 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
                                 f"{self._pending_comments_count} pending comments ready to submit",
                                 classes="review-submit-pending-empty",
                             )
-            with HorizontalGroup(id="review-submit-buttons"):
+            with ActionButtons(id="review-submit-buttons"):
                 yield Button(
-                    "Submit review",
+                    "Submit review  [dim]Ctrl+Enter[/]",
                     id="review-submit-confirm",
                     variant="primary",
                 )
-                yield Button("Cancel", id="review-submit-cancel")
+                yield Button("Cancel  [dim]Esc[/]", id="review-submit-cancel")
 
     def on_mount(self) -> None:
         options = self.query_one("#review-submit-actions", OptionList)
         options.action_first()
-        body = self.query_one("#review-submit-body", TextArea)
-        body.text = self._initial_body
-        body.focus()
+        self.query_one("#review-submit-body", TextArea).focus()
 
     @on(TextArea.Changed, "#review-submit-body")
     def _on_body_changed(self, event: TextArea.Changed) -> None:
         self._emoji_picker().refresh_for(event.text_area)
+        if self._store is None or self._saving_to_close:
+            return
+        if not self._store.set_pending_review_body(event.text_area.text):
+            return
+        self._stop_save_timer()
+        self._save_timer = self.set_timer(0.8, self.action_save_draft)
+
+    def _stop_save_timer(self) -> None:
+        if self._save_timer is not None:
+            self._save_timer.stop()
+            self._save_timer = None
+
+    def on_unmount(self) -> None:
+        self._stop_save_timer()
+
+    def action_save_draft(self) -> None:
+        if self._saving_to_close or self._store is None:
+            return
+        self._stop_save_timer()
+        self._store.set_pending_review_body(
+            self.query_one("#review-submit-body", TextArea).text
+        )
+        self.run_worker(
+            self._save_draft(), group="review-autosave", exit_on_error=False
+        )
+
+    async def _save_draft(self) -> bool:
+        if self._store is None:
+            return True
+        try:
+            await self._store.save_pending_review_body()
+        except (RuntimeError, ValueError, OSError) as error:
+            self.notify(
+                f"Failed to save review draft: {error}",
+                severity="error",
+                markup=False,
+            )
+            return False
+        return True
+
+    def _finish(self, result: tuple[ReviewEvent, str] | None) -> None:
+        if self._saving_to_close:
+            return
+        self._stop_save_timer()
+        self._saving_to_close = True
+        body = self.query_one("#review-submit-body", TextArea)
+        if self._store is not None:
+            self._store.set_pending_review_body(body.text)
+        body.read_only = True
+        self.query(Button).set(disabled=True)
+        self.run_worker(
+            self._save_and_dismiss(result), group="review-close", exit_on_error=False
+        )
+
+    async def _save_and_dismiss(self, result: tuple[ReviewEvent, str] | None) -> None:
+        if result is None:
+            await self._save_draft()
+        else:
+            for worker in list(self.workers):
+                if worker.node is self and worker.group == "review-autosave":
+                    await worker.wait()
+        self.dismiss(result)
 
     @on(TextArea.SelectionChanged, "#review-submit-body")
     def _on_body_selection_changed(self, event: TextArea.SelectionChanged) -> None:
@@ -253,10 +322,10 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
         if event == "COMMENT" and not body and self._pending_comments_count == 0:
             self.notify("Review body cannot be empty", severity="warning")
             return
-        self.dismiss((event, body))
+        self._finish((event, body))
 
     def action_cancel(self) -> None:
-        self.dismiss(None)
+        self._finish(None)
 
     @on(Button.Pressed, "#review-submit-confirm")
     def on_submit_pressed(self, event: Button.Pressed) -> None:

@@ -44,31 +44,37 @@ async def test_comment_card_defers_markdown_until_body_delay(
 
 
 @pytest.mark.asyncio
-async def test_markdown_comment_card_preserves_github_line_breaks() -> None:
-    body = "[단순 질문]\n아래의 prefetch도 is_done 기준으로 가져오나요?"
+async def test_markdown_comment_card_preserves_line_breaks_and_paragraph_gaps() -> None:
+    first_paragraph = "[단순 질문]\n아래의 prefetch도 is_done 기준으로 가져오나요?"
+    body = f"{first_paragraph}\n\n**추가 질문**\n다음 줄도 유지되나요?"
 
     class TestApp(App[None]):
         def compose(self) -> ComposeResult:
-            yield CommentCard("Header", body)
+            yield CommentCard("Header", body, classes="thread-comment")
 
     app = TestApp()
     async with app.run_test():
-        await wait_until(lambda: len(app.query("MarkdownParagraph")) == 1)
+        await wait_until(lambda: len(app.query("MarkdownParagraph")) == 2)
 
-        paragraph = app.query_one("MarkdownParagraph", Static)
-        await wait_until(lambda: paragraph.size.height == 2)
-        text = str(getattr(paragraph.content, "plain", paragraph.content))
+        first, second = app.query("MarkdownParagraph").results(Static)
+        await wait_until(lambda: first.size.height == second.size.height == 2)
 
-        assert text == body
+        assert str(getattr(first.content, "plain", first.content)) == first_paragraph
+        assert str(getattr(second.content, "plain", second.content)) == (
+            "추가 질문\n다음 줄도 유지되나요?"
+        )
+        assert second.region.y == first.region.bottom + 1
 
 
 @pytest.mark.asyncio
-async def test_plain_comment_card_uses_single_static_body() -> None:
+async def test_plain_comment_card_preserves_whitespace_in_single_static_body() -> None:
+    content = "  Plain body() text\n\n    indented  content\nlast line  "
+
     class TestApp(App[None]):
         def compose(self) -> ComposeResult:
             yield CommentCard(
                 "Header",
-                "Plain body() text",
+                content,
                 body_mount_delay=0.01,
             )
 
@@ -80,7 +86,8 @@ async def test_plain_comment_card_uses_single_static_body() -> None:
         body = app.query_one(".comment-body-plain", Static)
         text = str(getattr(body.content, "plain", body.content))
 
-        assert text == "Plain body() text"
+        assert text == content
+        await wait_until(lambda: body.size.height == 4)
         assert len(app.query(".comment-body-preview")) == 0
         assert len(app.query("Markdown")) == 0
 

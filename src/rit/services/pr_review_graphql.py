@@ -108,6 +108,16 @@ mutation($reviewId: ID!) {{
 }}
 """
 
+_UPDATE_REVIEW_MUTATION = f"""
+mutation($input: UpdatePullRequestReviewInput!) {{
+  updatePullRequestReview(input: $input) {{
+    pullRequestReview {{
+      {_REVIEW_FIELDS}
+    }}
+  }}
+}}
+"""
+
 _SUBMIT_REVIEW_MUTATION = f"""
 mutation($input: SubmitPullRequestReviewInput!) {{
   submitPullRequestReview(input: $input) {{
@@ -127,6 +137,8 @@ query($owner: String!, $repo: String!, $number: Int!) {
         nodes {
           id
           databaseId
+          state
+          comments { totalCount }
         }
       }
     }
@@ -169,6 +181,8 @@ _PRReviewCommentListAdapter: TypeAdapter[list[PRComment]] = TypeAdapter(list[PRC
 class _PullRequestReviewIdentity:
     pull_request_node_id: str
     review_node_id_by_database_id: dict[int, str]
+    review_comment_counts: dict[int, int]
+    pending_review_ids: set[int]
 
 
 @dataclass(frozen=True)
@@ -279,6 +293,37 @@ async def submit_pending_review(
     )
 
 
+async def update_pending_review(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    *,
+    review_id: int,
+    body: str,
+    runner: GitHubInputRunner,
+) -> PRReview | None:
+    """Update a draft, returning None if its summary must be recreated."""
+    identity = await _fetch_pr_review_identity(owner, repo, pr_number, runner=runner)
+    if review_id not in identity.pending_review_ids:
+        raise GraphQLMutationError("Review is no longer pending; draft was not saved")
+    try:
+        data = await _run_graphql(
+            _UPDATE_REVIEW_MUTATION,
+            {
+                "input": {
+                    "pullRequestReviewId": _review_node_id(identity, review_id),
+                    "body": body,
+                }
+            },
+            runner=runner,
+        )
+    except (RuntimeError, GraphQLMutationError) as error:
+        if "Could not edit a review with a missing body" in str(error):
+            return None
+        raise
+    return _parse_review_payload(data, mutation_name="updatePullRequestReview")
+
+
 async def delete_pending_review(
     owner: str,
     repo: str,
@@ -286,14 +331,19 @@ async def delete_pending_review(
     *,
     review_id: int,
     runner: GitHubInputRunner,
+    require_empty: bool = False,
 ) -> None:
-    """Delete a pending PR review via GraphQL."""
+    """Delete a pending PR review, optionally verifying it has no comments."""
     identity = await _fetch_pr_review_identity(
         owner,
         repo,
         pr_number,
         runner=runner,
     )
+    if require_empty and identity.review_comment_counts.get(review_id) != 0:
+        raise GraphQLMutationError(
+            "Could not verify existing pending review comments; not replacing pending review"
+        )
     await _run_graphql(
         _DELETE_REVIEW_MUTATION,
         {"reviewId": _review_node_id(identity, review_id)},
@@ -400,6 +450,8 @@ async def _fetch_pr_review_identity(
         raise GraphQLMutationError(f"PR #{pr_number} node ID not found")
 
     review_ids: dict[int, str] = {}
+    comment_counts: dict[int, int] = {}
+    pending_ids: set[int] = set()
     for review in _connection_nodes(pr.get("reviews")):
         if not isinstance(review, Mapping):
             continue
@@ -407,9 +459,16 @@ async def _fetch_pr_review_identity(
         review_node_id = review.get("id")
         if isinstance(database_id, int) and isinstance(review_node_id, str):
             review_ids[database_id] = review_node_id
+            if review.get("state") == "PENDING":
+                pending_ids.add(database_id)
+            count = _mapping(review.get("comments")).get("totalCount")
+            if type(count) is int and count >= 0:
+                comment_counts[database_id] = count
     return _PullRequestReviewIdentity(
         pull_request_node_id=node_id,
         review_node_id_by_database_id=review_ids,
+        review_comment_counts=comment_counts,
+        pending_review_ids=pending_ids,
     )
 
 

@@ -28,7 +28,13 @@ class PendingReviewAdapter(Protocol):
         self, pr_number: int, review_id: int
     ) -> list[PRComment]: ...
 
-    async def delete_pending_review(self, pr_number: int, review_id: int) -> None: ...
+    async def delete_pending_review(
+        self, pr_number: int, review_id: int, *, require_empty: bool = False
+    ) -> None: ...
+
+    async def update_pending_review(
+        self, pr_number: int, review_id: int, *, body: str
+    ) -> PRReview | None: ...
 
     async def create_pending_review(
         self,
@@ -82,6 +88,7 @@ class PendingReviewWorkspace:
     drafts_are_canonical: bool = False
     obsolete_review_ids: set[int] = field(default_factory=set)
     _revision: int = field(default=0, init=False, repr=False)
+    _body_dirty: bool = field(default=False, init=False, repr=False)
     _sync_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock, init=False, repr=False
     )
@@ -90,23 +97,44 @@ class PendingReviewWorkspace:
     def revision(self) -> int:
         return self._revision
 
-    def save_file_comment(self, body: str, *, path: str) -> PendingReviewComment:
+    def set_body(self, body: str) -> bool:
+        """Keep the latest editor text until GitHub confirms it was saved."""
+        if body == self.body:
+            return False
+        self.body = body
+        self._body_dirty = True
+        self._revision += 1
+        return True
+
+    def save_file_comment(
+        self, body: str, *, path: str, draft_index: int | None = None
+    ) -> PendingReviewComment:
         normalized = body.strip()
         if not normalized:
             raise ValueError("Comment cannot be empty")
         if not path:
             raise ValueError("Comment file path is unavailable")
-        draft = PendingReviewComment(
-            body=normalized,
-            path=path,
-            line=0,
-            side="RIGHT",
-            is_diff_line=True,
-            subject_type="file",
-        )
-        self.comments = [*self.comments, draft]
-        if len(self.comments) > 1:
-            self.comments.sort(key=_sort_key)
+        if draft_index is not None:
+            if not 0 <= draft_index < len(self.comments):
+                raise ValueError("Selected file comment draft no longer exists")
+            original = self.comments[draft_index]
+            if original.path != path or not original.is_file_level:
+                raise ValueError("Selected file comment draft no longer exists")
+            draft = original.model_copy(update={"body": normalized})
+            self.comments = list(self.comments)
+            self.comments[draft_index] = draft
+        else:
+            draft = PendingReviewComment(
+                body=normalized,
+                path=path,
+                line=0,
+                side="RIGHT",
+                is_diff_line=True,
+                subject_type="file",
+            )
+            self.comments = [*self.comments, draft]
+            if len(self.comments) > 1:
+                self.comments.sort(key=_sort_key)
         self.drafts_are_canonical = True
         self._revision += 1
         return draft
@@ -183,7 +211,8 @@ class PendingReviewWorkspace:
         if snapshot is None or rollback_if_version != self._revision:
             return
         self.review_id = snapshot.review_id
-        self.body = snapshot.body
+        if not self._body_dirty:
+            self.body = snapshot.body
         self.comments = list(snapshot.comments)
         self.drafts_are_canonical = bool(self.comments)
         self._revision += 1
@@ -206,7 +235,7 @@ class PendingReviewWorkspace:
         )
         if expected_revision != self._revision:
             return pr
-        if self.comments:
+        if self.comments or self.body or self._body_dirty:
             comments = merge_pending_review_drafts(self.comments, projection.comments)
             review_id = projection.review_id or self.review_id
             body = projection.body or self.body
@@ -221,7 +250,8 @@ class PendingReviewWorkspace:
             review_id = projection.review_id
             body = projection.body
         self.review_id = review_id
-        self.body = body
+        if not self._body_dirty:
+            self.body = body
         self.comments = comments
         self.drafts_are_canonical = bool(comments)
         self._revision += 1
@@ -254,21 +284,23 @@ class PendingReviewWorkspace:
         pr_number: int,
         head_sha: Callable[[], str],
         on_sync: ReviewSyncObserver,
+        draft_index: int | None = None,
         after_local_save: Callable[[], Awaitable[None]] | None = None,
     ) -> PendingReviewComment:
         snapshot = self._snapshot()
-        draft = self.save_file_comment(body, path=path)
-        if after_local_save is not None:
-            await after_local_save()
-        await self._sync(
+        draft = self.save_file_comment(body, path=path, draft_index=draft_index)
+        return await self._sync_saved_comment(
+            draft,
+            snapshot=snapshot,
+            removed_comment=(
+                snapshot.comments[draft_index] if draft_index is not None else None
+            ),
             adapter=adapter,
             pr_number=pr_number,
             head_sha=head_sha,
             on_sync=on_sync,
-            rollback_to=snapshot,
-            rollback_if_version=self._revision,
+            after_local_save=after_local_save,
         )
-        return draft
 
     async def queue_inline_comment(
         self,
@@ -306,6 +338,29 @@ class PendingReviewWorkspace:
             start_side=start_side,
             draft_index=draft_index,
         )
+        return await self._sync_saved_comment(
+            draft,
+            snapshot=snapshot,
+            removed_comment=removed_comment,
+            adapter=adapter,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            on_sync=on_sync,
+            after_local_save=after_local_save,
+        )
+
+    async def _sync_saved_comment(
+        self,
+        draft: PendingReviewComment,
+        *,
+        snapshot: _PendingReviewSnapshot,
+        removed_comment: PendingReviewComment | None,
+        adapter: PendingReviewAdapter,
+        pr_number: int,
+        head_sha: Callable[[], str],
+        on_sync: ReviewSyncObserver,
+        after_local_save: Callable[[], Awaitable[None]] | None,
+    ) -> PendingReviewComment:
         saved_version = self._revision
         if after_local_save is not None:
             await after_local_save()
@@ -314,7 +369,7 @@ class PendingReviewWorkspace:
                 async with self._sync_lock:
                     await adapter.update_review_comment(
                         removed_comment.review_comment_node_id,
-                        normalized,
+                        draft.body,
                     )
             except Exception:
                 self._restore_if_current(snapshot, saved_version)
@@ -338,6 +393,7 @@ class PendingReviewWorkspace:
         pr_number: int,
         head_sha: Callable[[], str],
         on_sync: ReviewSyncObserver,
+        body_only: bool = False,
     ) -> PRReview | None:
         """Reconcile local drafts with the verified server workspace."""
         return await self._sync(
@@ -345,7 +401,18 @@ class PendingReviewWorkspace:
             pr_number=pr_number,
             head_sha=head_sha,
             on_sync=on_sync,
+            body_only=body_only,
         )
+
+    def _retain_deleted_review_drafts(
+        self, comments: list[PendingReviewComment]
+    ) -> None:
+        if self.review_id is not None:
+            self.obsolete_review_ids.add(self.review_id)
+        self.review_id = None
+        self.comments = merge_pending_review_drafts(self.comments, comments)
+        self.drafts_are_canonical = bool(self.comments)
+        self._revision += 1
 
     async def _sync(
         self,
@@ -357,24 +424,39 @@ class PendingReviewWorkspace:
         rollback_to: _PendingReviewSnapshot | None = None,
         rollback_if_version: int | None = None,
         removed_comment: PendingReviewComment | None = None,
+        body_only: bool = False,
     ) -> PRReview | None:
         try:
             async with self._sync_lock:
+                if body_only and not self._body_dirty:
+                    return None
                 previous_review_id = self.review_id
-                replacement = await _replace_pending_review(
-                    adapter=adapter,
-                    pr_number=pr_number,
-                    comments=list(self.comments),
-                    pending_review_id=self.review_id,
-                    pending_review_body=self.body,
-                    head_sha=head_sha(),
-                    removed_comment=removed_comment,
-                )
-                self.comments = replacement.comments
-                self.drafts_are_canonical = bool(replacement.comments)
-                review = replacement.review
+                body = self.body
+                review = None
+                if body_only and previous_review_id is not None and body.strip():
+                    review = await adapter.update_pending_review(
+                        pr_number, previous_review_id, body=body
+                    )
+                if review is None:
+                    replacement = await _replace_pending_review(
+                        adapter=adapter,
+                        pr_number=pr_number,
+                        comments=list(self.comments),
+                        pending_review_id=previous_review_id,
+                        pending_review_body=body,
+                        head_sha=head_sha(),
+                        removed_comment=removed_comment,
+                        on_deleted=self._retain_deleted_review_drafts
+                        if body_only
+                        else None,
+                    )
+                    self.comments = replacement.comments
+                    self.drafts_are_canonical = bool(replacement.comments)
+                    review = replacement.review
                 self.review_id = (review.id or None) if review is not None else None
-                self.body = (review.body or self.body) if review is not None else ""
+                if self.body == body:
+                    self.body = (review.body or body) if review is not None else ""
+                    self._body_dirty = False
                 self._revision += 1
                 if previous_review_id and previous_review_id != self.review_id:
                     self.obsolete_review_ids.add(previous_review_id)
@@ -469,34 +551,36 @@ class PendingReviewWorkspace:
         pr_number: int,
         remember_submitted: Callable[[PRReview | None], Awaitable[None]],
     ) -> None:
-        """Submit and remember discussion before clearing drafts, without the sync lock."""
-        plan = plan_review_submission(
-            event,
-            body,
-            self.comments,
-            pending_review_id=self.review_id,
-        )
-        if plan.uses_pending_review:
-            assert plan.pending_review_id is not None
-            review = await adapter.submit_pending_review(
-                pr_number,
-                plan.pending_review_id,
-                event=plan.event,
-                body=plan.body,
+        """Finish outstanding saves before submitting and clearing the draft."""
+        async with self._sync_lock:
+            plan = plan_review_submission(
+                event,
+                body,
+                self.comments,
+                pending_review_id=self.review_id,
             )
-        else:
-            review = await adapter.submit_review(
-                pr_number,
-                event=plan.event,
-                body=plan.body,
-                comments=plan.comments,
-            )
-        await remember_submitted(review)
-        self.review_id = None
-        self.body = ""
-        self.comments = []
-        self.drafts_are_canonical = False
-        self._revision += 1
+            if plan.uses_pending_review:
+                assert plan.pending_review_id is not None
+                review = await adapter.submit_pending_review(
+                    pr_number,
+                    plan.pending_review_id,
+                    event=plan.event,
+                    body=plan.body,
+                )
+            else:
+                review = await adapter.submit_review(
+                    pr_number,
+                    event=plan.event,
+                    body=plan.body,
+                    comments=plan.comments,
+                )
+            await remember_submitted(review)
+            self.review_id = None
+            self.body = ""
+            self._body_dirty = False
+            self.comments = []
+            self.drafts_are_canonical = False
+            self._revision += 1
 
 
 @dataclass(frozen=True)
@@ -514,21 +598,18 @@ async def _replace_pending_review(
     pending_review_body: str,
     head_sha: str,
     removed_comment: PendingReviewComment | None = None,
+    on_deleted: Callable[[list[PendingReviewComment]], None] | None = None,
 ) -> _PendingReviewReplacement:
     """Replace GitHub's pending review without dropping unverified server drafts."""
     replacement_comments = list(comments)
+    require_empty = False
     if pending_review_id is not None:
         server_comments = await adapter.list_review_comments(
             pr_number, pending_review_id
         )
-        if (
-            not server_comments
-            and replacement_comments
-            and not any(comment.review_comment_id for comment in replacement_comments)
-        ):
-            raise RuntimeError(
-                "Could not verify existing pending review comments; not replacing pending review"
-            )
+        require_empty = not server_comments and not any(
+            comment.review_comment_id for comment in replacement_comments
+        )
         replacement_comments = merge_pending_review_comments(
             replacement_comments,
             server_comments,
@@ -542,7 +623,14 @@ async def _replace_pending_review(
         head_sha=head_sha,
     )
     if plan.delete_review_id is not None:
-        await adapter.delete_pending_review(pr_number, plan.delete_review_id)
+        if require_empty:
+            await adapter.delete_pending_review(
+                pr_number, plan.delete_review_id, require_empty=True
+            )
+        else:
+            await adapter.delete_pending_review(pr_number, plan.delete_review_id)
+        if on_deleted is not None:
+            on_deleted(replacement_comments)
     if not plan.should_create:
         return _PendingReviewReplacement(review=None, comments=replacement_comments)
     review = await adapter.create_pending_review(
@@ -551,7 +639,7 @@ async def _replace_pending_review(
         body=plan.body,
         commit_id=plan.commit_id,
     )
-    if review.id and hasattr(adapter, "list_review_comments"):
+    if review.id and plan.comments and hasattr(adapter, "list_review_comments"):
         created_comments = await adapter.list_review_comments(pr_number, review.id)
         replacement_comments = merge_pending_review_comments(
             replacement_comments,

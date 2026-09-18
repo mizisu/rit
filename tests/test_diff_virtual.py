@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 
 import pytest
@@ -7,10 +8,14 @@ from textual.app import App, ComposeResult
 
 from rit.core.diff import parse_patch
 from rit.core.types import DiffHunk, DiffLine, FileDiff
+from rit.state.models import PRFile, ReviewThread
+from rit.state.store import PRStore
+from rit.ui.components.combined_diff import build_combined_diff_document
 from rit.ui.widgets import diff_blocks, diff_comments, diff_highlight, diff_virtual
 from rit.ui.widgets.diff_plan import build_diff_plan
 from rit.ui.widgets.diff_types import VirtualState
 from rit.ui.widgets.diff_view import DiffView
+from tests.conftest import wait_until
 
 
 class VirtualLineGroupView:
@@ -204,6 +209,120 @@ async def test_virtual_window_shift_preserves_file_headers() -> None:
         assert first_header.region.y < first_file_lines.region.y
 
 
+@pytest.mark.asyncio
+async def test_virtual_scroll_preserves_per_file_layout_for_code_and_comments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    files = [
+        PRFile(filename="added.py", status="added", additions=40),
+        PRFile(filename="removed.py", status="removed", deletions=40),
+        PRFile(filename="modified.py", additions=1, deletions=1),
+    ]
+    patches = {
+        "added.py": "@@ -0,0 +1,40 @@\n"
+        + "\n".join(f"+value_{number} = {number}" for number in range(1, 41)),
+        "removed.py": "@@ -1,40 +0,0 @@\n"
+        + "\n".join(f"-value_{number} = {number}" for number in range(1, 41)),
+        "modified.py": "@@ -1,40 +1,40 @@\n-old_value\n+new_value\n"
+        + "\n".join(f" value_{number} = {number}" for number in range(2, 41)),
+    }
+    document = build_combined_diff_document(
+        files,
+        {path: parse_patch(patch, path) for path, patch in patches.items()},
+    )
+    assert document is not None
+    document.diff.show_hunk_headers = True
+
+    store = PRStore()
+    for index, file in enumerate(files):
+        side = "LEFT" if file.status == "removed" else "RIGHT"
+        store.save_pending_file_comment("file draft", path=file.filename)
+        store.save_pending_inline_comment(
+            "line draft", path=file.filename, line=23, side=side
+        )
+        store.state.review_threads.append(
+            ReviewThread.model_validate(
+                {
+                    "path": file.filename,
+                    "line": 23,
+                    "originalLine": 23,
+                    "diffSide": side,
+                    "isResolved": True,
+                    "comments": {
+                        "nodes": [
+                            {
+                                "databaseId": index + 1,
+                                "body": "review comment",
+                                "path": file.filename,
+                                "line": 23,
+                                "originalLine": 23,
+                                "side": side,
+                            }
+                        ]
+                    },
+                }
+            )
+        )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(store=store, mode="auto", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test(size=(160, 16)) as pilot:
+        view = app.query_one(DiffView)
+        monkeypatch.setattr(view, "VIRTUALIZE_LINE_THRESHOLD", 10)
+        monkeypatch.setattr(view, "VIRTUAL_WINDOW_RADIUS", 10)
+        monkeypatch.setattr(view, "VIRTUAL_WINDOW_SHIFT_MARGIN", 2)
+        await view.show_diff("All files", document.diff)
+        await pilot.pause()
+        assert view.split and view._virt.active
+
+        def assert_layout() -> None:
+            for line_index in range(
+                view._virt.rendered_start, view._virt.rendered_end + 1
+            ):
+                line = view._all_lines[line_index]
+                split = line.file_path == "modified.py"
+                widget = view._line_widgets_by_index[line_index]
+                assert widget.has_class("split-container") is split, (
+                    line.file_path,
+                    line.old_line_no,
+                    line.new_line_no,
+                )
+                if (line.new_line_no or line.old_line_no) != 23:
+                    continue
+                for layouts in (
+                    view._comment_layout_widgets_by_line[line_index],
+                    view._pending_comment_layout_widgets_by_line[line_index],
+                ):
+                    assert layouts
+                    assert all(
+                        layout.has_class("diff-comment-row-split") is split
+                        for layout in layouts
+                    )
+            for (
+                hunk_index,
+                layouts,
+            ) in view._file_comment_annotation_widgets_by_hunk.items():
+                split = files[hunk_index].status == "modified"
+                assert all(
+                    layout.has_class("diff-comment-row-split") is split
+                    for layout in layouts
+                )
+            for hunk_index, header in view._hunk_header_widgets.items():
+                assert header.has_class("split-hunk-header-scroll") is (
+                    files[hunk_index].status == "modified"
+                )
+
+        assert_layout()
+        for center in (15, 30, 45, 60, 75, 90, 105, 90, 75, 60, 45, 30, 15, 5):
+            diff_virtual._set_virtual_window_around(view, center)
+            assert await diff_virtual._try_shift_virtual_window_incremental(view)
+            await pilot.pause()
+            assert_layout()
+
+
 def test_mount_virtualized_ranges_at_bottom_uses_sorted_repair_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -383,3 +502,68 @@ async def test_cursor_driven_virtual_render_stays_pending_until_revealed(
 
     assert view.revealed is True
     assert view._virt.render_pending is False
+
+
+@pytest.mark.asyncio
+async def test_latest_placement_survives_virtual_render(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(DiffView, "VIRTUALIZE_LINE_THRESHOLD", 20)
+    patch = "@@ -1,300 +1,300 @@\n" + "\n".join(
+        f" line{number}" for number in range(1, 301)
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified")
+
+    app = TestApp()
+    async with app.run_test(size=(100, 12)) as pilot:
+        view = app.query_one(DiffView)
+        await view.show_diff("test.py", parse_patch(patch, "test.py"))
+        await pilot.pause()
+        started, release = asyncio.Event(), asyncio.Event()
+        shift = diff_virtual._try_shift_virtual_window_incremental
+
+        async def delayed_shift(view: DiffView) -> bool:
+            started.set()
+            await release.wait()
+            return await shift(view)
+
+        monkeypatch.setattr(
+            diff_virtual, "_try_shift_virtual_window_incremental", delayed_shift
+        )
+        view.jump_to_line_index(230, side="RIGHT", viewport_offset=7)
+        await wait_until(started.is_set, timeout=5.0)
+        view.jump_to_line_index(70, side="RIGHT", viewport_offset=0)
+        release.set()
+        await wait_until(
+            lambda: not view._virt.render_pending and view._is_line_rendered(70),
+            timeout=5.0,
+        )
+        await pilot.pause()
+        assert view.cursor_line == 70
+        assert (
+            "line71"
+            in app.screen._compositor.render_strips()[
+                view.scrollable_content_region.y
+            ].text
+        )
+
+        view.action_scroll_end()
+        await wait_until(
+            lambda: not view._virt.render_pending and view._is_line_rendered(299),
+            timeout=5.0,
+        )
+        await pilot.pause()
+        assert view.scroll_y == view.max_scroll_y
+        view.action_center_cursor()
+        center = (
+            view.scrollable_content_region.y
+            + view.scrollable_content_region.height // 2
+        )
+        await wait_until(
+            lambda: "line300"
+            in app.screen._compositor.render_strips()[center].text,
+            timeout=5.0,
+        )

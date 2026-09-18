@@ -15,7 +15,6 @@ FlashStyle = Literal["default", "warning", "success", "error"]
 SearchJumpAction = Literal["inactive", "no_matches", "activate"]
 SearchStartAction = Literal["ignore", "open"]
 SearchCloseAction = Literal["ignore", "close"]
-SearchRevealAction = Literal["ignore", "scroll_widget", "scroll_row"]
 SearchActivationPlacementAction = Literal["jump_anchor", "move_cursor"]
 
 __all__ = (
@@ -32,8 +31,6 @@ __all__ = (
     "SearchMatchRefresh",
     "SearchPane",
     "SearchRefreshUpdate",
-    "SearchRevealAction",
-    "SearchRevealUpdate",
     "SearchSide",
     "SearchStartAction",
     "SearchStartUpdate",
@@ -154,11 +151,3 @@ class SearchSubmittedInputUpdate:
     close_bar: bool
     focus_view: bool
     submit_query: str
-
-
-@dataclass(frozen=True)
-class SearchRevealUpdate:
-    """Search reveal action for scrolling a match into view."""
-
-    action: SearchRevealAction
-    viewport_offset: int

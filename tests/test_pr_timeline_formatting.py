@@ -132,7 +132,7 @@ def test_pending_review_summary_header_includes_count_and_optional_time() -> Non
 
     assert (
         pending_review_summary_header(review, thread_count=1, time_str="2h ago")
-        == "[bold]alice[/] [#eed49f]pending[/] [#6e738d]1 thread[/] 2h ago"
+        == "[bold]alice[/] [#eed49f]pending[/] [#6e738d]1 thread[/] [#6e738d]· 2h ago[/]"
     )
     assert (
         pending_review_summary_header(review, thread_count=2, time_str="")

@@ -6,13 +6,14 @@ from typing import ClassVar, Literal
 from textual import events, on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import HorizontalGroup, Vertical
+from textual.containers import Vertical
 from textual.geometry import Region
 from textual.message import Message
 from textual.strip import Strip
 from textual.widget import Widget
 from textual.widgets import Button, OptionList, Static, TextArea
 
+from rit.ui.widgets.action_buttons import ActionButtons
 from rit.ui.widgets.emoji_picker import EMOJI_PICKER_BINDINGS, EmojiPicker
 
 EditorKind = Literal["issue", "inline", "file"]
@@ -69,7 +70,7 @@ class InlineCommentEditor(Vertical):
     }
 
     InlineCommentEditor .comment-editor-actions {
-        height: 3;
+        height: auto;
         align-horizontal: right;
     }
 
@@ -143,27 +144,27 @@ class InlineCommentEditor(Vertical):
             placeholder=self._placeholder,
         )
         yield EmojiPicker(id="comment-editor-emoji-options")
-        with HorizontalGroup(classes="comment-editor-actions"):
+        with ActionButtons(classes="comment-editor-actions"):
             if self._update_existing:
                 yield Button(
-                    "Update",
+                    "Update  [dim]Ctrl+S[/]",
                     id="comment-editor-submit",
                     variant="primary",
                 )
             elif self._kind in {"inline", "file"}:
                 yield Button(
-                    "Add to review",
+                    "Add to review  [dim]Ctrl+S[/]",
                     id="comment-editor-queue",
                     variant="primary",
                 )
                 yield Button("Post now", id="comment-editor-post")
             else:
                 yield Button(
-                    "Submit",
+                    "Submit  [dim]Ctrl+S[/]",
                     id="comment-editor-submit",
                     variant="primary",
                 )
-            yield Button("Cancel", id="comment-editor-cancel")
+            yield Button("Cancel  [dim]Esc[/]", id="comment-editor-cancel")
 
     def on_mount(self) -> None:
         if self._pending_focus:

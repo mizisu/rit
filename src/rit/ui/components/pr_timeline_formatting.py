@@ -34,16 +34,22 @@ _EVENT_LABELS = {
 }
 
 
+def timeline_header(*, author: str, action: str, time_str: str) -> str:
+    """Format shared comment, review, and activity header metadata."""
+    header = f"[bold]{escape(author)}[/] {action}"
+    return f"{header} [#6e738d]· {time_str}[/]" if time_str else header
+
+
 def timeline_event_header(events: Sequence[PRTimelineEvent], *, time_str: str) -> str:
     """Format an activity row, escaping GitHub-provided text as literal content."""
     event = events[-1]
-    actor = escape((event.actor or "unknown").removesuffix("[bot]"))
+    actor = (event.actor or "unknown").removesuffix("[bot]")
     if event.kind == "PullRequestCommit":
         if len(events) > 1:
             action = f"[#8aadf4]{len(events)} commits[/]"
         else:
             action = (
-                f"[#8aadf4]committed {escape(event.commit_oid[:7])}[/]"
+                f"[#6e738d]committed[/] [#8aadf4]{escape(event.commit_oid[:7])}[/]"
                 f" — {escape(event.commit_message)}"
             )
     else:
@@ -66,8 +72,7 @@ def timeline_event_header(events: Sequence[PRTimelineEvent], *, time_str: str) -
                 else event.reviewer_team or "unknown"
             )
             action += f" {escape(target)}"
-    header = f"[bold]{actor}[/] {action}"
-    return f"{header} · {time_str}" if time_str else header
+    return timeline_header(author=actor, action=action, time_str=time_str)
 
 
 def author_display_name(user: PRUser | None) -> str:
@@ -132,10 +137,8 @@ def pending_review_summary_header(
 ) -> str:
     """Return the header for a pending review summary card."""
     label = "thread" if thread_count == 1 else "threads"
-    title = (
-        f"[bold]{author_display_name(review.user)}[/] "
-        f"[#eed49f]pending[/] [#6e738d]{thread_count} {label}[/]"
+    return timeline_header(
+        author=author_display_name(review.user),
+        action=f"[#eed49f]pending[/] [#6e738d]{thread_count} {label}[/]",
+        time_str=time_str,
     )
-    if time_str:
-        return f"{title} {time_str}"
-    return title

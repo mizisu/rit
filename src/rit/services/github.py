@@ -72,6 +72,9 @@ from rit.services.pr_review_graphql import (
 from rit.services.pr_review_graphql import (
     submit_review as submit_review_via_graphql,
 )
+from rit.services.pr_review_graphql import (
+    update_pending_review as update_pending_review_via_graphql,
+)
 from rit.services.pr_reviewer_request import (
     add_assignees as add_assignees_via_graphql,
 )
@@ -407,7 +410,23 @@ class GitHubService:
             runner=self._run_gh,
         )
 
-    async def delete_pending_review(self, pr_number: int, review_id: int) -> None:
+    async def update_pending_review(
+        self, pr_number: int, review_id: int, *, body: str
+    ) -> PRReview | None:
+        """Update a pending summary, or return None when it needs recreation."""
+        repo = await self.get_repo()
+        return await update_pending_review_via_graphql(
+            repo.owner,
+            repo.name,
+            pr_number,
+            review_id=review_id,
+            body=body,
+            runner=self._run_gh,
+        )
+
+    async def delete_pending_review(
+        self, pr_number: int, review_id: int, *, require_empty: bool = False
+    ) -> None:
         repo = await self.get_repo()
         await delete_pending_review_via_graphql(
             repo.owner,
@@ -415,6 +434,7 @@ class GitHubService:
             pr_number,
             review_id=review_id,
             runner=self._run_gh,
+            require_empty=require_empty,
         )
 
     async def submit_pending_review(

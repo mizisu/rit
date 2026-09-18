@@ -626,7 +626,6 @@ def mount_file_comments_for_hunk(
     container: VerticalScroll,
     hunk_index: int,
     *,
-    split: bool | None = None,
     before: Widget | None = None,
 ) -> None:
     if hunk_index in view._file_comment_annotation_widgets_by_hunk:
@@ -645,45 +644,39 @@ def mount_file_comments_for_hunk(
     pending_widgets: list[Widget] = []
     comment_widgets: list[Widget] = []
     layout_widgets: list[Widget] = []
-    previous_split = view._comment_layout_split_override
-    if split is not None:
-        view._comment_layout_split_override = split
-    try:
-        for index, draft in enumerate(
-            view._pending_file_comment_drafts_by_path.get(path, ())
-        ):
-            widget, item = _build_pending_draft_item(
-                draft,
-                line_index=line_index or 0,
-                index=index,
-                view=view,
-                widget_id=f"pending-file-draft-{hunk_index}-{index}",
-            )
-            layout_widget = mount_side_aware_widget(
-                view,
-                container,
-                item,
-                side="new",
-                line_index=line_index,
-                before=before,
-            )
-            pending_widgets.append(widget)
-            layout_widgets.append(layout_widget)
+    for index, draft in enumerate(
+        view._pending_file_comment_drafts_by_path.get(path, ())
+    ):
+        widget, item = _build_pending_draft_item(
+            draft,
+            line_index=line_index or 0,
+            index=index,
+            view=view,
+            widget_id=f"pending-file-draft-{hunk_index}-{index}",
+        )
+        layout_widget = mount_side_aware_widget(
+            view,
+            container,
+            item,
+            side="new",
+            line_index=line_index,
+            before=before,
+        )
+        pending_widgets.append(widget)
+        layout_widgets.append(layout_widget)
 
-        for thread in view._file_comment_threads_by_path.get(path, ()):
-            item = _build_inline_thread_widget(thread)
-            layout_widget = mount_side_aware_widget(
-                view,
-                container,
-                item,
-                side="new",
-                line_index=line_index,
-                before=before,
-            )
-            comment_widgets.append(item)
-            layout_widgets.append(layout_widget)
-    finally:
-        view._comment_layout_split_override = previous_split
+    for thread in view._file_comment_threads_by_path.get(path, ()):
+        item = _build_inline_thread_widget(thread)
+        layout_widget = mount_side_aware_widget(
+            view,
+            container,
+            item,
+            side="new",
+            line_index=line_index,
+            before=before,
+        )
+        comment_widgets.append(item)
+        layout_widgets.append(layout_widget)
 
     if pending_widgets:
         view._pending_file_comment_widgets_by_hunk[hunk_index] = pending_widgets
@@ -778,10 +771,7 @@ def _build_side_aware_layout(
 ) -> Widget:
     widget.styles.width = "1fr"
     widget.styles.max_width = INLINE_COMMENT_MAX_WIDTH
-    use_split = view._comment_layout_split_override
-    if use_split is None:
-        use_split = view.split
-    if use_split:
+    if view._split_for_line(line_index):
         return _build_split_comment_layout(view, widget, side=side)
     return _build_unified_comment_layout(view, widget, line_index=line_index)
 

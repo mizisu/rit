@@ -14,7 +14,6 @@ from rit.ui.widgets.diff_search_types import (
     SearchJumpUpdate,
     SearchMatchRefresh,
     SearchRefreshUpdate,
-    SearchRevealUpdate,
     SearchSide,
     SearchStartUpdate,
     SearchSubmissionRequest,
@@ -36,7 +35,6 @@ __all__ = (
     "search_match_index_at_cursor",
     "search_match_refresh",
     "search_refresh_update",
-    "search_reveal_update",
     "search_start_update",
     "search_submission_request",
     "search_submit_update",
@@ -56,22 +54,6 @@ def _line_pair_set(first: int, second: int) -> frozenset[int]:
     if first == second:
         return _single_line_set(first)
     return frozenset((first, second))
-
-
-def search_reveal_update(
-    *,
-    target_exists: bool,
-    has_target_widget: bool,
-    target_visible: bool,
-) -> SearchRevealUpdate:
-    """Return scroll policy for revealing a search match."""
-    if not target_exists:
-        return SearchRevealUpdate(action="ignore", viewport_offset=0)
-    if has_target_widget:
-        return SearchRevealUpdate(action="scroll_widget", viewport_offset=0)
-    if target_visible:
-        return SearchRevealUpdate(action="ignore", viewport_offset=0)
-    return SearchRevealUpdate(action="scroll_row", viewport_offset=0)
 
 
 def search_refresh_update(

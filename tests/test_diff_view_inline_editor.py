@@ -100,6 +100,73 @@ async def test_file_headers_are_cursor_targets_for_file_comments() -> None:
 
 
 @pytest.mark.asyncio
+async def test_file_editor_tracks_selected_draft_reply_and_new_comment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = PRStore()
+    store.save_pending_inline_comment("other file", path="a.py", line=1, side="RIGHT")
+    store.save_pending_file_comment("first draft", path="one.py")
+    store.save_pending_file_comment("second draft", path="one.py")
+    root = PRComment(
+        id=501, node_id="PRRC_501", body="root", path="one.py", subject_type="file"
+    )
+    reply = PRComment(
+        id=502,
+        node_id="PRRC_502",
+        body="reply",
+        path="one.py",
+        subject_type="file",
+        in_reply_to_id=501,
+    )
+    store.state.review_threads = [
+        ReviewThread.model_validate(
+            {
+                "id": "thread-501",
+                "path": "one.py",
+                "subjectType": "FILE",
+                "comments": {"nodes": [root, reply]},
+            }
+        )
+    ]
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield DiffView(store=store, mode="unified", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        view = app.query_one(DiffView)
+        monkeypatch.setattr(view, "VIRTUALIZE_LINE_THRESHOLD", 0)
+        await view.show_diff("All files", _combined_two_file_diff())
+        await pilot.pause()
+        assert view._set_file_header_selection(0)
+
+        for cursor, text, draft_index, edit_target in (
+            (2, "second draft", 2, None),
+            (4, "reply", None, reply),
+            (0, "", None, None),
+        ):
+            view._comment_cursor_index = cursor
+            assert await view.open_file_comment_editor()
+            editor = view.query_one("#diff-file-comment-editor", InlineCommentEditor)
+            body = editor.query_one(TextArea)
+            await wait_until(lambda body=body: body.has_focus)
+            assert body.text == text
+            assert view.file_comment_draft_index() == draft_index
+            assert view.file_comment_edit_target() == edit_target
+            assert bool(editor.query("#comment-editor-post")) == (edit_target is None)
+            body.text = "unsaved edit"
+
+            await view.close_file_comment_editor()
+            assert view.file_comment_draft_index() is None
+            assert view.file_comment_edit_target() is None
+            await wait_until(lambda: view.has_focus)
+
+        assert store.state.pending_review.comments[2].body == "second draft"
+        assert reply.body == "reply"
+
+
+@pytest.mark.asyncio
 async def test_editor_buttons_keep_keys_from_diff_and_file_navigation() -> None:
     store = PRStore()
     store.state.files = [PRFile(filename="one.py"), PRFile(filename="two.py")]
@@ -150,16 +217,22 @@ async def test_editor_buttons_keep_keys_from_diff_and_file_navigation() -> None:
                 assert body.text == "keep this draft"
 
             await pilot.press("enter")
-            await wait_until(lambda kind=kind: len(submitted) == (1 if kind == "inline" else 3))
+            await wait_until(
+                lambda kind=kind: len(submitted) == (1 if kind == "inline" else 3)
+            )
             assert submitted[-1].body == "keep this draft"
             assert submitted[-1].kind == kind
             assert submitted[-1].mode == "queue"
 
             await pilot.press("tab", "enter")
-            await wait_until(lambda kind=kind: len(submitted) == (2 if kind == "inline" else 4))
+            await wait_until(
+                lambda kind=kind: len(submitted) == (2 if kind == "inline" else 4)
+            )
             assert submitted[-1].mode == "post"
             await pilot.press("tab", "enter")
-            await wait_until(lambda kind=kind: len(cancelled) == (1 if kind == "inline" else 2))
+            await wait_until(
+                lambda kind=kind: len(cancelled) == (1 if kind == "inline" else 2)
+            )
             assert cancelled[-1].kind == kind
             assert not view._folded_file_paths
             assert not view._manually_folded_files

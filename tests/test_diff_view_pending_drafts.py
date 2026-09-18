@@ -271,7 +271,7 @@ async def test_virtualized_pending_draft_keeps_collapsed_state_after_remount() -
 
 
 @pytest.mark.asyncio
-async def test_pending_draft_keeps_collapsed_state_when_sync_replaces_model() -> None:
+async def test_pending_draft_keeps_selection_and_collapsed_state_after_sync() -> None:
     patch = "@@ -1,1 +1,1 @@\n-old\n+new"
     diff = parse_patch(patch, "test.py")
     store = PRStore()
@@ -304,9 +304,9 @@ async def test_pending_draft_keeps_collapsed_state_when_sync_replaces_model() ->
 
         server_copy = original.model_copy(update={"review_comment_id": 91001})
         replacement = merge_pending_review_drafts([original], [server_copy])[0]
-        assert replacement is not original
         assert replacement.review_comment_id == 91001
         store.state.pending_review.comments = [replacement]
+        assert diff_view.active_pending_draft_index() == 0
 
         await diff_view.show_diff("test.py", diff)
         await wait_until(

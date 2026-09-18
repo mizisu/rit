@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from contextlib import nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -49,7 +49,6 @@ from rit.ui.widgets.diff_search import DiffSearchSession, SearchCursor, SearchRe
 from rit.ui.widgets.diff_search_policy import (
     search_activation_placement_update,
     search_close_update,
-    search_reveal_update,
     search_start_update,
     search_submitted_input_update,
 )
@@ -350,11 +349,13 @@ class DiffView(VerticalScroll):
         self._inline_comment_editor_start_side: Literal["LEFT", "RIGHT"] | None = None
         self._file_comment_editor_hunk_index: int | None = None
         self._file_comment_editor_target: str | None = None
+        self._file_comment_editor_initial_body = ""
+        self._file_comment_editor_draft_index: int | None = None
+        self._file_comment_editor_edit_target: PRComment | None = None
         self._file_comment_editor_widget: InlineCommentEditor | None = None
         self._file_comment_editor_mounted_hunk_index: int | None = None
         self._file_comment_editor_layout_height = 0
         self._pending_comment_jump: str | None = None  # "first" or "last"
-        self._comment_layout_split_override: bool | None = None
 
         self.mode = mode
 
@@ -724,6 +725,7 @@ class DiffView(VerticalScroll):
             "w",
             "b",
             "$",
+            "g",
             "G",
             "{",
             "}",
@@ -887,22 +889,9 @@ class DiffView(VerticalScroll):
     def _reveal_search_match(self, match: DiffSearchMatch) -> None:
         rows = self._rows_for_current_mode()
         target_row = rows[match.row_index] if 0 <= match.row_index < len(rows) else None
-        if target_row is None:
-            return
-        target_widget = _cursor._target_widget_for_row(self, target_row)
-        update = search_reveal_update(
-            target_exists=True,
-            has_target_widget=target_widget is not None,
-            target_visible=False
-            if target_widget is not None
-            else self._row_is_visible(target_row),
-        )
-        if update.action == "scroll_widget":
-            assert target_widget is not None
-            self.scroll_to_widget(target_widget, animate=False, top=True)
-        elif update.action == "scroll_row":
-            _cursor._scroll_row_to_viewport_offset(
-                self, target_row, update.viewport_offset
+        if target_row is not None:
+            _cursor._scroll_to_row(
+                self, target_row, viewport_offset=0, only_if_hidden=True
             )
 
     def _activate_search_match(self, activation: SearchActivationUpdate) -> None:
@@ -992,15 +981,9 @@ class DiffView(VerticalScroll):
         line: DiffLine,
         pane: Literal["old", "new"] | None = None,
     ) -> Literal["old", "new", "auto"]:
-        split = self.split
-        hunk_index = self._get_hunk_index_for_line(line.line_index)
-        if self._diff is not None and hunk_index is not None:
-            split = split and not _layout.should_force_unified_for_hunk(
-                self._diff.hunks[hunk_index]
-            )
         return _cursor_side.cursor_side_for_line(
             line,
-            split=split,
+            split=self._split_for_line(line.line_index),
             cursor_pane=self.cursor_pane if pane is None else pane,
         )
 
@@ -1385,6 +1368,7 @@ class DiffView(VerticalScroll):
         focus: bool = False,
         viewport_offset: int = 2,
         preserve_scroll_if_near_center: bool = False,
+        only_if_hidden: bool = False,
     ) -> None:
         self._set_file_header_selection(None)
         target_pane: Literal["old", "new"] = "old" if side == "LEFT" else "new"
@@ -1400,14 +1384,14 @@ class DiffView(VerticalScroll):
                 target_row,
                 pane=target_pane,
                 viewport_offset=anchor_offset,
+                only_if_hidden=only_if_hidden,
             )
         else:
-            self.cursor_line = line_index
-            if 0 <= line_index < len(self._line_top_offsets):
-                self.scroll_to(
-                    y=max(0, self._line_top_offsets[line_index] - viewport_offset),
-                    animate=False,
-                )
+            self._move_cursor(
+                line=line_index,
+                pane=target_pane,
+                scroll_in_visual=self.visual_mode,
+            )
 
         if focus:
             self.focus()
@@ -1525,6 +1509,12 @@ class DiffView(VerticalScroll):
     def file_comment_target(self) -> str | None:
         return self._file_comment_editor_target
 
+    def file_comment_draft_index(self) -> int | None:
+        return self._file_comment_editor_draft_index
+
+    def file_comment_edit_target(self) -> PRComment | None:
+        return self._file_comment_editor_edit_target
+
     def _mount_file_comment_editor(
         self,
         container: VerticalScroll,
@@ -1538,11 +1528,16 @@ class DiffView(VerticalScroll):
         if target is None:
             return
 
+        edit_target = self._file_comment_editor_edit_target
         widget = InlineCommentEditor(
             kind="file",
-            title="Add file comment",
+            title=(
+                "Edit file comment" if edit_target is not None else "Add file comment"
+            ),
             placeholder="Write a comment for the entire file...",
+            initial_text=self._file_comment_editor_initial_body,
             context=f"Entire file: {target}",
+            update_existing=edit_target is not None,
             id="diff-file-comment-editor",
         )
         if before is None:
@@ -1554,7 +1549,9 @@ class DiffView(VerticalScroll):
 
     def _focus_file_comment_editor(self) -> None:
         if self._file_comment_editor_widget is not None:
-            self._file_comment_editor_widget.open()
+            self._file_comment_editor_widget.open(
+                self._file_comment_editor_initial_body
+            )
 
     async def open_file_comment_editor(self) -> bool:
         hunk_index = self._selected_file_header_hunk
@@ -1562,20 +1559,23 @@ class DiffView(VerticalScroll):
         if hunk_index is None or target is None:
             return False
 
+        selected_draft = _comments.active_file_pending_draft(self, hunk_index)
+        selected_comment = _comments.active_file_review_comment(self, hunk_index)
+        self._file_comment_editor_draft_index = self._pending_draft_index(
+            selected_draft
+        )
+        self._file_comment_editor_edit_target = selected_comment
+        selected = selected_draft or selected_comment
+        self._file_comment_editor_initial_body = (
+            selected.body if selected is not None else ""
+        )
         self._file_comment_editor_hunk_index = hunk_index
         self._file_comment_editor_target = target
+        self._file_editor_state = None
+        self._file_comment_editor_widget = None
         _virtual._rebuild_virtual_layout(self)
-        if (
-            self._file_comment_editor_widget is not None
-            and self._file_comment_editor_widget.is_mounted
-            and self._file_comment_editor_mounted_hunk_index == hunk_index
-        ):
-            self._file_comment_editor_widget.open()
-        else:
-            self._file_editor_state = None
-            self._file_comment_editor_widget = None
-            await self._render_diff()
-            self.call_after_refresh(self._focus_file_comment_editor)
+        await self._render_diff()
+        self.call_after_refresh(self._focus_file_comment_editor)
         return True
 
     async def close_file_comment_editor(self) -> None:
@@ -1590,6 +1590,10 @@ class DiffView(VerticalScroll):
         self.focus()
         self._file_comment_editor_hunk_index = None
         self._file_comment_editor_target = None
+        self._file_comment_editor_initial_body = ""
+        self._file_comment_editor_draft_index = None
+        self._file_comment_editor_edit_target = None
+        self._file_editor_state = None
         _virtual._rebuild_virtual_layout(self)
 
     def _mount_inline_comment_editor(
@@ -2281,6 +2285,9 @@ class DiffView(VerticalScroll):
                 self._inline_comment_editor_start_side = None
                 self._file_comment_editor_hunk_index = None
                 self._file_comment_editor_target = None
+                self._file_comment_editor_initial_body = ""
+                self._file_comment_editor_draft_index = None
+                self._file_comment_editor_edit_target = None
                 self._file_comment_editor_widget = None
                 self._file_comment_editor_mounted_hunk_index = None
                 self._selected_file_header_hunk = None
@@ -2952,8 +2959,15 @@ class DiffView(VerticalScroll):
     def _create_file_header_widget(self, *args, **kwargs):
         return _render._create_file_header_widget(self, *args, **kwargs)
 
-    def _should_force_unified_for_hunk(self, hunk: DiffHunk) -> bool:
-        return _render._should_force_unified_for_hunk(hunk)
+    def _split_for_hunk(self, hunk: DiffHunk) -> bool:
+        return self.split and not _layout.should_force_unified_for_hunk(hunk)
+
+    def _split_for_line(self, line_index: int | None) -> bool:
+        if line_index is not None:
+            hunk_index = self._get_hunk_index_for_line(line_index)
+            if self._diff is not None and hunk_index is not None:
+                return self._split_for_hunk(self._diff.hunks[hunk_index])
+        return self.split
 
     def _create_hunk_header_widget(self, *args, **kwargs):
         return _render._create_hunk_header_widget(self, *args, **kwargs)
@@ -2997,11 +3011,15 @@ class DiffView(VerticalScroll):
     def _split_line_style(self, line: DiffLine, **kwargs) -> str:
         return _render._split_line_style(self, line, **kwargs)
 
-    def _mount_split_lines(self, *args, **kwargs) -> None:
-        _render._mount_split_lines(self, *args, **kwargs)
-
-    def _mount_unified_lines(self, *args, **kwargs) -> None:
-        _render._mount_unified_lines(self, *args, **kwargs)
+    def _mount_hunk_lines(
+        self,
+        container: VerticalScroll,
+        hunk: DiffHunk,
+        lines: Sequence[DiffLine],
+        *,
+        before: Widget | None = None,
+    ) -> None:
+        _render._mount_hunk_lines(self, container, hunk, lines, before=before)
 
     def _base_code_content(self, line: DiffLine, **kwargs) -> Content:
         return _render._base_code_content(self, line, **kwargs)

@@ -93,7 +93,12 @@ def test_build_matches_does_not_import_rendered_row_per_call(
 
     monkeypatch.setattr(builtins, "__import__", blocked_import)
 
-    assert diff_search_match_index.build_matches_from_rows(View._all_lines, [row], "missing") == []
+    assert (
+        diff_search_match_index.build_matches_from_rows(
+            View._all_lines, [row], "missing"
+        )
+        == []
+    )
 
 
 def test_build_matches_appends_casefolded_matches_without_tuple_return_helper(
@@ -150,12 +155,19 @@ def test_build_matches_appends_casefolded_matches_without_tuple_return_helper(
         raising=False,
     )
 
-    assert diff_search_match_index.build_matches_from_rows(View._all_lines, rows, "Needle") == []
+    assert (
+        diff_search_match_index.build_matches_from_rows(View._all_lines, rows, "Needle")
+        == []
+    )
     assert seen_queries == ["needle", "needle", "needle"]
 
 
 def test_search_match_columns_finds_case_insensitive_non_overlapping_matches() -> None:
-    assert diff_search_matching.search_match_columns("Alpha alpha ALPHA", "alpha") == (0, 6, 12)
+    assert diff_search_matching.search_match_columns("Alpha alpha ALPHA", "alpha") == (
+        0,
+        6,
+        12,
+    )
 
 
 def test_search_match_columns_advances_by_query_length() -> None:
@@ -248,50 +260,6 @@ def test_search_matches_for_text_casefolded_builds_matches_without_column_tuple(
     ) == (
         DiffSearchMatch(row_index=7, line_index=3, side="new", column=0),
         DiffSearchMatch(row_index=7, line_index=3, side="new", column=8),
-    )
-
-
-def test_search_reveal_update_ignores_missing_target_row() -> None:
-    assert diff_search_policy.search_reveal_update(
-        target_exists=False,
-        has_target_widget=False,
-        target_visible=False,
-    ) == diff_search_types.SearchRevealUpdate(
-        action="ignore",
-        viewport_offset=0,
-    )
-
-
-def test_search_reveal_update_scrolls_to_target_widget_first() -> None:
-    assert diff_search_policy.search_reveal_update(
-        target_exists=True,
-        has_target_widget=True,
-        target_visible=True,
-    ) == diff_search_types.SearchRevealUpdate(
-        action="scroll_widget",
-        viewport_offset=0,
-    )
-
-
-def test_search_reveal_update_ignores_visible_row_without_widget() -> None:
-    assert diff_search_policy.search_reveal_update(
-        target_exists=True,
-        has_target_widget=False,
-        target_visible=True,
-    ) == diff_search_types.SearchRevealUpdate(
-        action="ignore",
-        viewport_offset=0,
-    )
-
-
-def test_search_reveal_update_scrolls_hidden_row_without_widget() -> None:
-    assert diff_search_policy.search_reveal_update(
-        target_exists=True,
-        has_target_widget=False,
-        target_visible=False,
-    ) == diff_search_types.SearchRevealUpdate(
-        action="scroll_row",
-        viewport_offset=0,
     )
 
 

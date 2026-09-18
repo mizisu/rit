@@ -56,7 +56,9 @@ def should_force_unified_for_file(
 
 def should_force_unified_for_hunk(hunk: DiffHunk) -> bool:
     """Return whether a combined-file hunk cannot use a two-sided layout."""
-    return hunk.file_status in {"added", "removed"}
+    return hunk.file_status in {"added", "removed"} or (
+        len(hunk.lines) == 1 and hunk.lines[0].is_folded_file_placeholder
+    )
 
 
 def code_widths_for_layout(lines: Sequence[DiffLine]) -> tuple[int, int, int]:

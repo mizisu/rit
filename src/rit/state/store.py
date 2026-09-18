@@ -578,8 +578,11 @@ class PRStore:
         body: str,
         *,
         path: str,
+        draft_index: int | None = None,
     ) -> PendingReviewComment:
-        return self._state.pending_review.save_file_comment(body, path=path)
+        return self._state.pending_review.save_file_comment(
+            body, path=path, draft_index=draft_index
+        )
 
     def save_pending_inline_comment(
         self,
@@ -773,11 +776,13 @@ class PRStore:
         body: str,
         *,
         path: str,
+        draft_index: int | None = None,
         after_local_save: Callable[[], Awaitable[None]] | None = None,
     ) -> PendingReviewComment:
         return await self._state.pending_review.queue_file_comment(
             body,
             path=path,
+            draft_index=draft_index,
             after_local_save=after_local_save,
             adapter=self._service,
             pr_number=self.pr_number,
@@ -833,6 +838,28 @@ class PRStore:
             draft_index=self._pending_review_comment_index(path, line, side),
         )
 
+    async def post_file_comment(
+        self,
+        body: str,
+        *,
+        path: str,
+        draft_index: int | None = None,
+    ) -> PRComment:
+        """Post a file comment and remove only its selected pending draft."""
+        draft: PendingReviewComment | None = None
+        if draft_index is not None:
+            drafts = self._state.pending_review.comments
+            if not 0 <= draft_index < len(drafts):
+                raise ValueError("Selected file comment draft no longer exists")
+            draft = drafts[draft_index]
+            if draft.path != path or not draft.is_file_level:
+                raise ValueError("Selected file comment draft no longer exists")
+        comment = await self.submit_file_comment(body, path=path)
+        current_index = self.review_annotations().index_for_comment(draft)
+        if current_index is not None:
+            await self.remove_pending_review_comment_at(current_index)
+        return comment
+
     async def post_inline_comment(
         self,
         body: str,
@@ -860,6 +887,25 @@ class PRStore:
                 draft_index=draft_index,
             )
         return comment
+
+    def set_pending_review_body(self, body: str) -> bool:
+        return self._state.pending_review.set_body(body)
+
+    async def save_pending_review_body(self) -> None:
+        """Save the latest review summary without submitting its review."""
+        previous_review_id = self._state.pending_review.review_id
+        review = await self._state.pending_review.sync(
+            adapter=self._service,
+            pr_number=self.pr_number,
+            head_sha=self._pending_review_head_sha,
+            on_sync=self._remember_pending_review_sync_review,
+            body_only=True,
+        )
+        if (
+            review is not None
+            or self._state.pending_review.review_id != previous_review_id
+        ):
+            self._post_message(self.ReviewsLoaded(reviews=self._state.reviews))
 
     async def sync_pending_review(self) -> PRReview | None:
         return await self._state.pending_review.sync(

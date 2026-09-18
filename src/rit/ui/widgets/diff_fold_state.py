@@ -89,18 +89,7 @@ class LineAnchor:
         row = view._row_for_line_and_pane(index, "old" if self.side == "old" else "new")
         if row is None:
             return None
-        if mounted:
-            widget = _cursor._target_widget_for_row(view, row)
-            if widget is not None and widget.region.height:
-                return (
-                    int(view.scroll_y)
-                    + widget.region.y
-                    - view.scrollable_content_region.y
-                )
-            bounds = _cursor._mounted_block_row_vertical_bounds(view, row)
-            if bounds is not None:
-                return bounds[0]
-        bounds = _cursor._row_vertical_bounds(view, row)
+        bounds = _cursor._row_vertical_bounds(view, row, mounted=mounted)
         return bounds[0] if bounds else None
 
 

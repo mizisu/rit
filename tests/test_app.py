@@ -192,7 +192,7 @@ class TestRitApp:
             await pilot.pause()
             last = list(screen.query(".comment-box"))[-1]
             assert isinstance(last, CommentCard)
-            assert last.size.height > scroll.size.height
+            await wait_until(lambda: last.size.height > scroll.size.height, timeout=1)
 
             for key in ("ctrl+g", "G"):
                 await pilot.press("g", key)
@@ -220,6 +220,101 @@ class TestRitApp:
             )
             await wait_until(lambda: last.size.height > 100)
             await pilot.pause()
+            assert scroll.scroll_y == position
+
+    async def test_pr_info_z_centers_selection_and_preserves_text_entry(
+        self, app: RitApp
+    ) -> None:
+        from textual.containers import VerticalScroll
+        from textual.widget import Widget
+
+        from rit.ui.components.pr_timeline import PRTimeline
+        from rit.ui.screens.main import MainScreen
+        from rit.ui.widgets.comment_card import CommentCard
+
+        async with app.run_test(size=(100, 26)) as pilot:
+            screen = cast(MainScreen, app.screen)
+            app.set_focus(None)
+            screen.store.state.pr = PR(number=123, body="Description")
+            screen.store.state.issue_comments = [
+                PRIssueComment(id=index, body=f"Comment {index}")
+                for index in range(1, 9)
+            ]
+            screen.pr_info.refresh_pr_data()
+            timeline = screen.query_one(PRTimeline)
+            scroll = screen.pr_info.query_one("#main-scroll", VerticalScroll)
+            await timeline._build_timeline_async()
+            await pilot.pause()
+
+            def centered(widget: Widget) -> bool:
+                return (
+                    abs(
+                        widget.region.center[1]
+                        - scroll.scrollable_content_region.center[1]
+                    )
+                    <= 1
+                )
+
+            await pilot.press("j", "j", "j")
+            selected = timeline.current_item
+            assert selected is not None
+            await pilot.press("z")
+            await wait_until(lambda: centered(selected))
+            assert timeline.current_item is selected
+            assert selected.has_class("--selected")
+
+            await pilot.press("G", "z")
+            last = list(screen.query(".comment-box"))[-1]
+            assert isinstance(last, CommentCard)
+            await wait_until(lambda: centered(last))
+            assert timeline.current_item is last
+            position = scroll.scroll_y
+            maximum = scroll.max_scroll_y
+            await pilot.press("z", "z")
+            assert scroll.scroll_y == position
+            assert scroll.max_scroll_y == maximum
+            timeline._restore_scroll_home()
+            await pilot.pause()
+            assert scroll.scroll_y == position
+
+            height = last.region.height
+            last.set_content("Last comment", "First line\nSecond line")
+            await wait_until(lambda: last.region.height > height)
+            await pilot.pause()
+            assert scroll.scroll_y == position
+
+            await pilot.press("G")
+            await pilot.pause()
+            assert scroll.scroll_y == scroll.max_scroll_y
+            assert (
+                0 <= scroll.scrollable_content_region.bottom - last.region.bottom <= 3
+            )
+
+            last.set_content("Long comment", "\n".join("Line" for _ in range(50)))
+            await wait_until(
+                lambda: last.region.height > scroll.scrollable_content_region.height
+            )
+            await pilot.press("z")
+            header = last.query_one(".comment-header")
+            await wait_until(lambda: centered(header))
+            assert timeline.current_item is last
+            assert not last.collapsed
+
+            await pilot.resize_terminal(100, 70)
+            await pilot.press("g", "z")
+            assert scroll.scroll_y == 0
+            timeline.clear_selection()
+            await pilot.press("z")
+            assert timeline.current_item is None
+            assert scroll.scroll_y == 0
+
+            await pilot.press("c")
+            body = screen.pr_info.query_one("#comment-editor-body", TextArea)
+            await wait_until(lambda: body.has_focus)
+            await pilot.pause()
+            position = scroll.scroll_y
+            await pilot.press("z")
+            assert body.text == "z"
             assert scroll.scroll_y == position
 
     async def test_header_branches_are_shared_across_tabs_and_reuse_copy_picker(
@@ -260,8 +355,10 @@ class TestRitApp:
             assert branch_segment.style.color is not None
             assert branch_segment.style.color.name == "#8aadf4"
             title = screen.header.query_one("#header-title")
-            assert branches.region.y == title.region.bottom
-            assert branches.region.x == title.region.x
+            status = screen.header.query_one("#header-status")
+            assert status.region.y == branches.region.y == title.region.bottom
+            assert status.region.x == title.region.x
+            assert branches.region.x == status.region.right + 2
             assert branches.region.height == 1
             assert branches.region.bottom <= screen.tabbed_content.region.y
             assert files.file_tree.region.y == files.region.y
@@ -318,7 +415,7 @@ class TestRitApp:
             files.toggle_file_tree()
             await pilot.resize_terminal(80, 24)
             await pilot.pause()
-            assert branches.region.width == screen.header.content_region.width
+            assert branches.region.right == screen.header.content_region.right
             assert files.diff_view.region.x == files.region.x
             assert files.diff_view.region.y == files.region.y
             assert copy_button.region.right <= branches.content_region.right
@@ -840,7 +937,7 @@ class TestRitApp:
         source_diff = parse_patch("@@ -1 +1 @@\n-old\n+new", path)
         source_diff.hunks[0].starts_file = True
         source_diff.hunks[0].file_path = path
-        queued: list[tuple[str, str]] = []
+        queued: list[tuple[str, str, int | None]] = []
         posted: list[tuple[str, str]] = []
 
         async with app.run_test() as pilot:
@@ -852,16 +949,13 @@ class TestRitApp:
                 body: str,
                 *,
                 path: str,
+                draft_index: int | None = None,
                 after_local_save=None,
             ) -> PendingReviewComment:
-                queued.append((body, path))
-                draft = PendingReviewComment(
-                    body=body,
-                    path=path,
-                    line=0,
-                    subject_type="file",
+                queued.append((body, path, draft_index))
+                draft = screen.store.save_pending_file_comment(
+                    body, path=path, draft_index=draft_index
                 )
-                screen.store.state.pending_review.comments.append(draft)
                 if after_local_save is not None:
                     await after_local_save()
                 return draft
@@ -900,11 +994,34 @@ class TestRitApp:
                 )
             )
 
-            assert queued == [("whole file", path)]
+            assert queued == [("whole file", path, None)]
             assert posted == []
             assert diff_view.file_comment_target() is None
 
             diff_view.focus()
+            await pilot.press("j")
+            assert diff_view.active_pending_draft_index() == 0
+
+            await pilot.press("c")
+            await wait_until(
+                lambda: diff_view.query_one("#comment-editor-body", TextArea).has_focus
+            )
+            body = diff_view.query_one("#comment-editor-body", TextArea)
+            assert body.text == "whole file"
+            body.text = "edited file draft"
+            await pilot.press("ctrl+s")
+            await wait_until(
+                lambda: (
+                    diff_view.file_comment_target() is None
+                    and diff_view.has_focus
+                    and len(queued) == 2
+                )
+            )
+            assert queued[-1] == ("edited file draft", path, 0)
+            assert [
+                draft.body for draft in screen.store.state.pending_review.comments
+            ] == ["edited file draft"]
+            assert posted == []
             await pilot.press("j")
             assert diff_view.active_pending_draft_index() == 0
 
@@ -1162,29 +1279,36 @@ class TestRitApp:
             assert await task is True
             assert refresh_calls == 1
 
+    @pytest.mark.parametrize("file_level", [False, True])
     async def test_update_submitted_comment_from_diff_view(
         self,
         app: RitApp,
+        file_level: bool,
     ) -> None:
         from rit.ui.screens.main import MainScreen
 
         patch = "@@ -1,2 +1,2 @@\n line 1\n line 2"
         source_diff = parse_patch(patch, "preview.py")
+        if file_level:
+            source_diff.hunks[0].starts_file = True
+            source_diff.hunks[0].file_path = "preview.py"
         comment = PRComment(
             id=501,
             node_id="PRRC_501",
             body="before",
             path="preview.py",
-            line=1,
+            line=None if file_level else 1,
             side="RIGHT",
+            subject_type="file" if file_level else "line",
             pull_request_review_id=91,
         )
         thread = ReviewThread.model_validate(
             {
                 "id": "thread-501",
                 "path": "preview.py",
-                "line": 1,
+                "line": None if file_level else 1,
                 "diffSide": "RIGHT",
+                "subjectType": "FILE" if file_level else "LINE",
                 "comments": {"nodes": [comment]},
             }
         )
@@ -1216,17 +1340,25 @@ class TestRitApp:
             screen.switch_tab(1)
             diff_view = screen.file_changes.diff_view
             await diff_view.show_diff("preview.py", source_diff)
+            if file_level:
+                diff_view._set_file_header_selection(0)
             diff_view.focus()
             await pilot.press("j")
             assert diff_view.active_review_comment() == comment
 
+            kind = "file" if file_level else "inline"
             await pilot.press("c")
             await wait_until(
-                lambda: diff_view.inline_comment_edit_target() == comment,
+                lambda: len(diff_view.query(f"#diff-{kind}-comment-editor")) == 1,
                 timeout=1,
             )
             body = diff_view.query_one("#comment-editor-body", TextArea)
+            await wait_until(lambda: body.has_focus)
             assert body.text == "before"
+            assert str(
+                diff_view.query_one(".comment-editor-title", Static).content
+            ) == (f"Edit {kind} comment")
+            assert not diff_view.query("#comment-editor-post")
             body.text = "after"
 
             await pilot.press("ctrl+s")
@@ -1236,8 +1368,12 @@ class TestRitApp:
                 timeout=1,
             )
 
+            await wait_until(lambda: diff_view.has_focus)
             assert service.updated == [("PRRC_501", "after")]
+            assert screen.store.state.comments[0].subject_type == comment.subject_type
             assert diff_view.inline_comment_edit_target() is None
+            assert diff_view.file_comment_edit_target() is None
+            assert diff_view.file_comment_target() is None
 
     async def test_delete_inline_comment_draft_requires_selected_draft(
         self,

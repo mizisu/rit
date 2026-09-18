@@ -70,9 +70,12 @@ async def test_search_bar_moves_between_matches_with_n_and_N() -> None:
 
 
 @pytest.mark.asyncio
-async def test_far_search_jump_anchors_match_near_top_of_viewport() -> None:
-    """Far search jumps should place the destination near the top of the viewport."""
-
+@pytest.mark.parametrize("block_threshold", [40, 1000])
+async def test_search_placement_survives_virtual_render(
+    block_threshold: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(DiffView, "VIRTUALIZE_LINE_THRESHOLD", 20)
+    monkeypatch.setattr(DiffView, "BLOCK_RENDER_LINE_THRESHOLD", block_threshold)
     lines = [f" line{i}" for i in range(1, 81)]
     lines[2] = " alpha match"
     lines[59] = " beta match"
@@ -84,31 +87,29 @@ async def test_far_search_jump_anchors_match_near_top_of_viewport() -> None:
 
     app = TestApp()
     async with app.run_test(size=(100, 8)) as pilot:
-        diff_view = app.query_one(DiffView)
-        diff = parse_patch(patch, "test.py")
-
-        await diff_view.show_diff("test.py", diff)
-        await pilot.pause()
-        diff_view.focus()
-        await pilot.pause()
-
+        view = app.query_one(DiffView)
+        await view.show_diff("test.py", parse_patch(patch, "test.py"))
+        view.focus()
         await pilot.press("/")
+        scroll_y = view.scroll_y
+        view.query_one("#diff-search-input", Input).value = "match"
+        await wait_until(lambda: view._search.matches, timeout=1.0)
         await pilot.pause()
-        search_input = diff_view.query_one("#diff-search-input", Input)
-        search_input.value = "match"
-        await pilot.press("enter")
-        await pilot.pause()
-        await pilot.pause()
+        assert view.scroll_y == scroll_y
 
-        await pilot.press("n")
+        await pilot.press("enter", "n")
+        await wait_until(
+            lambda: not view._virt.render_pending and view._is_line_rendered(59),
+            timeout=5.0,
+        )
         await pilot.pause()
-        await pilot.pause()
-
-        row = diff_view._current_row()
-        assert row is not None
-        top, _ = diff_view._row_vertical_bounds(row) or (None, None)
-        assert top is not None
-        assert abs(top - int(diff_view.scroll_y)) <= 1
+        assert view.cursor_line == 59
+        assert (
+            "beta match"
+            in app.screen._compositor.render_strips()[
+                view.scrollable_content_region.y
+            ].text
+        )
 
 
 @pytest.mark.asyncio

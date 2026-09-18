@@ -5,11 +5,13 @@ from typing import TYPE_CHECKING, Literal
 
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical
+from textual.content import Content
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import reactive, var
 from textual.widgets import Static
 
+from rit.ui.pr_status import PR_STATUS_LABELS
 from rit.ui.widgets.branch_info import BranchInfo
 
 if TYPE_CHECKING:
@@ -25,18 +27,19 @@ __all__ = (
 
 
 class Header(Vertical):
-    """Application header showing PR identity and comparison branches."""
+    """Application header showing PR identity, status, and comparison branches."""
 
     DEFAULT_CSS = """
     Header {
         dock: top;
         height: auto;
-        padding: 1 1 0 1;
+        padding: 1 2 0 2;
         background: $surface;
         border-bottom: solid $primary;
     }
 
-    Header #header-title-row {
+    Header #header-title-row,
+    Header #header-meta-row {
         height: 1;
     }
 
@@ -50,7 +53,14 @@ class Header(Vertical):
 
     Header .pr-status {
         width: auto;
-        padding: 0 1;
+        height: 1;
+        margin-right: 2;
+        text-style: bold;
+        text-wrap: nowrap;
+    }
+
+    Header #header-branch-row {
+        width: 1fr;
     }
 
     Header .status-open {
@@ -105,13 +115,16 @@ class Header(Vertical):
                 f"PR #{self.pr_number} - {repo_str}",
                 classes="pr-title",
                 id="header-title",
+                markup=False,
             )
+        with Horizontal(id="header-meta-row"):
             yield Static(
-                f"[{self.pr_status}]",
-                classes="pr-status status-open",
+                Content.from_markup(PR_STATUS_LABELS[self.pr_status]),
+                classes=f"pr-status status-{self.pr_status.lower()}",
                 id="header-status",
+                markup=False,
             )
-        yield self._branch_info
+            yield self._branch_info
 
     def watch_pr_status(self, new_status: PRStatus) -> None:
         self._status_open = new_status == "Open"
@@ -121,7 +134,7 @@ class Header(Vertical):
 
         try:
             status_widget = self.query_one("#header-status", Static)
-            status_widget.update(f"[{new_status}]")
+            status_widget.update(Content.from_markup(PR_STATUS_LABELS[new_status]))
             status_widget.remove_class(
                 "status-open", "status-merged", "status-closed", "status-draft"
             )

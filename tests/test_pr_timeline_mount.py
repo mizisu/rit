@@ -31,7 +31,7 @@ from tests.conftest import wait_until
 
 
 @pytest.mark.asyncio
-async def test_activity_rows_support_navigation_disclosure_refresh_and_narrow_layout() -> (
+async def test_activity_cards_share_comment_styles_and_preserve_navigation_and_layout() -> (
     None
 ):
     def when(hour: int) -> datetime:
@@ -55,7 +55,10 @@ async def test_activity_rows_support_navigation_disclosure_refresh_and_narrow_la
     pr.timeline_events.extend(
         [
             PRTimelineEvent(
-                id="review-1", kind="PullRequestReview", database_id=1, created_at=when(7)
+                id="review-1",
+                kind="PullRequestReview",
+                database_id=1,
+                created_at=when(7),
             ),
             PRTimelineEvent(
                 id="issue-1", kind="IssueComment", database_id=1, created_at=when(8)
@@ -121,21 +124,46 @@ async def test_activity_rows_support_navigation_disclosure_refresh_and_narrow_la
         assert "approved" in str(approval.visual)
         assert "Backend [red]" in str(request.visual)
         assert commits.collapsed
-        assert commits.size.height == approval.size.height == 1
+        assert (
+            commits.outer_size.height
+            == approval.outer_size.height
+            == request.outer_size.height
+            == 3
+        )
+
+        comment = app.query_one(".comment-box")
+        comment_header = comment.query_one(".comment-header")
+        normal_border = comment.styles.border
+        selected_border = app.query_one("#pr-description-card").styles.border
+        assert selected_border != normal_border
+        for row in rows:
+            assert row.styles.background == comment.styles.background
+            assert row.styles.border == normal_border
+            assert row.region.x == comment.region.x
+            assert row.outer_size.width == comment.outer_size.width
+            header = row.query_one("CollapsibleTitle") if row is commits else row
+            assert header.content_region.x == comment_header.content_region.x
 
         await pilot.press("j")
         assert timeline.current_item is commits
         assert commits.has_class("--selected")
-        assert commits.size.height == 1
+        assert commits.styles.border == selected_border
+        assert commits.styles.background == comment.styles.background
+        assert commits.outer_size.height == 3
         await pilot.press("enter")
         assert not commits.collapsed
+        assert commits.outer_size.height > 3
         details = commits.query_one("Contents Static", Static)
         assert "5555555 Keep [red]literal[/] text" in str(details.content)
         await pilot.press("enter", "j")
         assert commits.collapsed
+        assert commits.styles.border == normal_border
         assert timeline.current_item is approval
+        assert approval.styles.border == selected_border
+        assert approval.outer_size.height == 3
         await pilot.press("n")
-        assert timeline.current_item is app.query_one(".comment-box")
+        assert timeline.current_item is comment
+        assert approval.styles.border == normal_border
         timeline.prev_comment()
         assert timeline.current_item is app.query_one("#pr-description-card")
 
@@ -143,7 +171,7 @@ async def test_activity_rows_support_navigation_disclosure_refresh_and_narrow_la
         await pilot.resize_terminal(40, 30)
         timeline.select_last_item()
         await pilot.pause()
-        assert request.size.height > 1
+        assert request.outer_size.height > 3
         assert request.region.right <= app.query_one("#main-scroll").region.right
         assert "Backend [red]" in str(request.visual)
 

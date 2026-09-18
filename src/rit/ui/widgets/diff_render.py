@@ -58,12 +58,6 @@ def _should_force_unified_for_current_file(view: DiffView) -> bool:
     )
 
 
-def _should_force_unified_for_hunk(hunk: DiffHunk) -> bool:
-    return any(
-        _folding.is_folded_placeholder_line(line) for line in hunk.lines
-    ) or _layout.should_force_unified_for_hunk(hunk)
-
-
 def _split_prefix_width_for_layout(
     view: DiffView,
     side: Literal["old", "new"],
@@ -699,9 +693,7 @@ def _create_file_header_widget(
     *,
     hunk_index: int,
     hunk: DiffHunk,
-    split: bool | None = None,
 ) -> Widget:
-    use_split = view.split if split is None else split
     text, width = _file_header_text_and_width(view, hunk)
 
     classes = "file-diff-header"
@@ -717,7 +709,7 @@ def _create_file_header_widget(
     header_widget.styles.height = _geometry.FILE_DIFF_HEADER_HEIGHT
     header_widget.styles.min_height = _geometry.FILE_DIFF_HEADER_HEIGHT
     header_widget.styles.width = max(1, width)
-    if not use_split:
+    if not view._split_for_hunk(hunk):
         return header_widget
     header_scroll = SyncedCodeScroll(
         header_widget,
@@ -733,10 +725,14 @@ def _create_hunk_header_widget(
     view: DiffView,
     *,
     hunk_index: int,
-    hunk_header: str,
-    split: bool | None = None,
+    hunk: DiffHunk,
 ) -> Widget:
-    use_split = view.split if split is None else split
+    hunk_header = (
+        f"@@ -{hunk.old_start},{hunk.old_count} "
+        f"+{hunk.new_start},{hunk.new_count} @@"
+    )
+    if hunk.header:
+        hunk_header += f" {hunk.header}"
     classes = "hunk-header"
     if view._showing_full_file:
         classes += " preview-hunk-boundary"
@@ -745,7 +741,7 @@ def _create_hunk_header_widget(
         classes=classes,
         id=f"hunk-{hunk_index}",
     )
-    if not view.split:
+    if not view._split_for_hunk(hunk):
         header_widget.styles.width = max(
             1,
             len(hunk_header) + 2,
@@ -753,13 +749,6 @@ def _create_hunk_header_widget(
         )
         return header_widget
     header_widget.styles.width = max(1, len(hunk_header) + 2)
-    if not use_split:
-        header_widget.styles.width = max(
-            1,
-            len(hunk_header) + 2,
-            _unified_content_width_for_layout(view),
-        )
-        return header_widget
     return SyncedCodeScroll(
         header_widget,
         classes="split-hunk-header-scroll",
@@ -790,53 +779,31 @@ def _render_hunk(
         return
 
     is_folded_file = len(lines) == 1 and _folding.is_folded_placeholder_line(lines[0])
-    render_split = view.split and not _should_force_unified_for_hunk(hunk)
 
     if show_header and hunk.starts_file:
         file_header_widget = _create_file_header_widget(
             view,
             hunk_index=hunk_index,
             hunk=hunk,
-            split=render_split,
         )
         container.mount(file_header_widget)
         view._register_file_header_widget(hunk_index, file_header_widget)
-        _comments.mount_file_comments_for_hunk(
-            view,
-            container,
-            hunk_index,
-            split=render_split,
-        )
+        _comments.mount_file_comments_for_hunk(view, container, hunk_index)
         view._mount_file_comment_editor(container, hunk_index)
 
     if is_folded_file:
         return
 
     if show_header and (view._diff is None or view._diff.show_hunk_headers):
-        hunk_header = (
-            f"@@ -{hunk.old_start},{hunk.old_count} "
-            f"+{hunk.new_start},{hunk.new_count} @@"
-        )
-        if hunk.header:
-            hunk_header += f" {hunk.header}"
         hunk_header_widget = _create_hunk_header_widget(
             view,
             hunk_index=hunk_index,
-            hunk_header=hunk_header,
-            split=render_split,
+            hunk=hunk,
         )
         container.mount(hunk_header_widget)
         view._register_hunk_header_widget(hunk_index, hunk_header_widget)
 
-    previous_comment_layout = view._comment_layout_split_override
-    view._comment_layout_split_override = render_split
-    try:
-        if render_split:
-            _render_hunk_split(view, container, lines)
-        else:
-            _render_hunk_unified(view, container, lines)
-    finally:
-        view._comment_layout_split_override = previous_comment_layout
+    _mount_hunk_lines(view, container, hunk, lines)
 
 
 PREVIEW_PREFIX_WIDTH = 9
@@ -1257,20 +1224,18 @@ def _mount_unified_lines(
             )
 
 
-def _render_hunk_unified(
+def _mount_hunk_lines(
     view: DiffView,
     container: VerticalScroll,
+    hunk: DiffHunk,
     lines: Sequence[DiffLine],
+    *,
+    before: Widget | None = None,
 ) -> None:
-    _mount_unified_lines(view, container, lines)
-
-
-def _render_hunk_split(
-    view: DiffView,
-    container: VerticalScroll,
-    lines: Sequence[DiffLine],
-) -> None:
-    _mount_split_lines(view, container, lines)
+    if view._split_for_hunk(hunk):
+        _mount_split_lines(view, container, lines, before=before)
+    else:
+        _mount_unified_lines(view, container, lines, before=before)
 
 
 def _get_hunk_index_for_line(view: DiffView, line_index: int) -> int | None:
