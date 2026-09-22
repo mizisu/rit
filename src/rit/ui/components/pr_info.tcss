@@ -160,6 +160,7 @@ PRInfo .placeholder {
 
 PRInfo #pr-reviewers {
     text-wrap: nowrap;
+    text-overflow: ellipsis;
     overflow: hidden;
 }
 

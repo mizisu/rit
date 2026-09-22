@@ -317,6 +317,7 @@ class PRInfo(Container):
         if not reviewers:
             reviewers_text = "[#6e738d]None yet[/]"
             reviewers_widget.update(reviewers_text)
+            reviewers_widget.tooltip = None
             self._reviewers_render_signature = signature
             self._reviewers_render_text = reviewers_text
             return
@@ -329,6 +330,7 @@ class PRInfo(Container):
                 self._format_reviewer_line(reviewer) for reviewer in reviewers
             )
         reviewers_widget.update(reviewers_text)
+        reviewers_widget.tooltip = reviewers_text
         self._reviewers_render_signature = signature
         self._reviewers_render_text = reviewers_text
 

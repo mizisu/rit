@@ -7,12 +7,21 @@ from rich.cells import cell_len
 from textual import on
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll
+from textual.content import Content
 from textual.css.query import NoMatches
 from textual.css.styles import Styles
 from textual.widgets import Button, Static
 
 import rit.ui.components.pr_info as pr_info_module
-from rit.state.models import PR, PRLabel, PRUser
+from rit.state.models import (
+    PR,
+    PRLabel,
+    PRReview,
+    PRTeam,
+    PRUser,
+    ReviewRequest,
+    ReviewState,
+)
 from rit.state.reviewer_status import ReviewerDisplayState
 from rit.state.store import PRStore
 from rit.ui.components.pr_info import PRInfo
@@ -138,6 +147,63 @@ async def test_pr_info_stacks_sidebar_below_main_when_compact() -> None:
         await pilot.pause()
 
         assert sidebar.region.x >= main_scroll.region.right
+
+
+@pytest.mark.asyncio
+async def test_pr_info_keeps_long_reviewers_on_one_line_with_full_tooltip() -> None:
+    long_login = "copilot-pull-request-reviewer"
+    long_team = "플랫폼 인프라 리뷰어 팀 with spaces"
+    store = PRStore()
+    pr = PR(number=1)
+    pr.review_requests_connection.nodes = [
+        ReviewRequest(requested_reviewer=PRUser(login=long_login)),
+        ReviewRequest(requested_reviewer=PRTeam(name=long_team)),
+        ReviewRequest(requested_reviewer=PRUser(login="alice")),
+    ]
+    store.state.pr = pr
+    store.state.reviews = [
+        PRReview(user=PRUser(login="alice"), state=ReviewState.APPROVED)
+    ]
+    full_lines = [f"● @{long_login}", f"● {long_team}", "✓ @alice"]
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield PRInfo(store)
+
+    app = TestApp()
+    async with app.run_test(size=(120, 30)) as pilot:
+        reviewers = app.query_one("#pr-reviewers", Static)
+        for width in (120, 80, 40, 120):
+            await pilot.resize_terminal(width, 30)
+            await pilot.pause()
+
+            assert reviewers.size.height == len(full_lines)
+            rendered = [
+                reviewers.render_line(index).text.rstrip()
+                for index in range(len(full_lines))
+            ]
+            assert rendered == [
+                Content(line)
+                .truncate(reviewers.content_size.width, ellipsis=True)
+                .plain
+                for line in full_lines
+            ]
+            assert rendered[0].endswith("…")
+            assert rendered[1].endswith("…")
+            assert rendered[2] == "✓ @alice"
+            assert isinstance(reviewers.tooltip, str)
+            assert (
+                Content.from_markup(reviewers.tooltip).plain.splitlines() == full_lines
+            )
+
+        pr.review_requests_connection.nodes = []
+        store.state.reviews = []
+        app.query_one(PRInfo).refresh_reviewers()
+        await pilot.pause()
+
+        assert reviewers.size.height == 1
+        assert reviewers.render_line(0).text.strip() == "None yet"
+        assert reviewers.tooltip is None
 
 
 @pytest.mark.asyncio
