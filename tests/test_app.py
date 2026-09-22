@@ -5,8 +5,6 @@ import threading
 from typing import cast
 
 import pytest
-from textual.widgets import Button, Static, TextArea
-
 from rit.app import RitApp
 from rit.cli import parse_pr_reference
 from rit.core.diff import parse_patch
@@ -25,6 +23,8 @@ from rit.state.models import (
     ReviewThread,
 )
 from rit.ui.screens.settings import SettingsScreen
+from textual.widgets import Button, Static, TextArea
+
 from tests.conftest import wait_until
 
 
@@ -167,11 +167,10 @@ class TestRitApp:
     async def test_timeline_bottom_keys_follow_late_content_without_overriding_navigation(
         self, app: RitApp
     ) -> None:
-        from textual.containers import VerticalScroll
-
         from rit.ui.components.pr_timeline import PRTimeline
         from rit.ui.screens.main import MainScreen
         from rit.ui.widgets.comment_card import CommentCard
+        from textual.containers import VerticalScroll
 
         async with app.run_test(size=(100, 26)) as pilot:
             screen = cast(MainScreen, app.screen)
@@ -225,12 +224,11 @@ class TestRitApp:
     async def test_pr_info_z_centers_selection_and_preserves_text_entry(
         self, app: RitApp
     ) -> None:
-        from textual.containers import VerticalScroll
-        from textual.widget import Widget
-
         from rit.ui.components.pr_timeline import PRTimeline
         from rit.ui.screens.main import MainScreen
         from rit.ui.widgets.comment_card import CommentCard
+        from textual.containers import VerticalScroll
+        from textual.widget import Widget
 
         async with app.run_test(size=(100, 26)) as pilot:
             screen = cast(MainScreen, app.screen)
