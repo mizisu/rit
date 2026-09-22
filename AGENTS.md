@@ -38,6 +38,7 @@
 
 ## Code style and implementation rules
 
+- Use class-based design. Keep classes focused and reuse existing classes where possible.
 - Keep strong typing throughout (Python 3.14 type syntax is used).
 - Keep concise docstrings for public classes/functions.
 - No comments that restate what code does. Use descriptive names and small functions instead. If a comment is needed, the code isn't clear enough. Only comment on *why*, never on *what*.
