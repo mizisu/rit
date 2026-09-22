@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -9,7 +10,26 @@ from rit.services.pr_file_request import (
     parse_pr_files_page,
 )
 from rit.state.file_projection import diff_from_file_patch
-from rit.state.models import FileViewedState
+from rit.state.models import PR, FileViewedState
+from rit.state.store import PRStore
+from rit.ui.widgets.diff_full_file_preview import build_full_file_diff
+
+CANONICAL_DIFF_ARGS = [
+    "api",
+    "repos/owner/repo/pulls/123",
+    "-H",
+    "Accept: application/vnd.github.v3.diff",
+]
+
+MODIFIED_PATCH = (
+    "diff --git a/a.py b/a.py\n"
+    "--- a/a.py\n+++ b/a.py\n"
+    "@@ -2,2 +2,2 @@\n-old\n+new\n keep\n"
+)
+ADDED_PATCH = (
+    "diff --git a/b.py b/b.py\nnew file mode 100644\n"
+    "--- /dev/null\n+++ b/b.py\n@@ -0,0 +1 @@\n+added\n"
+)
 
 
 def _files_page(
@@ -63,28 +83,23 @@ def test_parse_pr_files_page_projects_graphql_metadata() -> None:
     assert page.files[0].viewer_viewed_state is FileViewedState.VIEWED
 
 
-async def test_fetch_pr_files_uses_graphql_cursor_pagination() -> None:
+async def test_fetch_pr_files_uses_graphql_cursor_pagination_and_canonical_patch() -> (
+    None
+):
     calls: list[dict[str, object]] = []
+    diff_calls: list[list[str]] = []
 
     async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        if args == CANONICAL_DIFF_ARGS:
+            assert input_text is None
+            diff_calls.append(args)
+            return ADDED_PATCH + MODIFIED_PATCH
         assert args == ["api", "graphql", "--input", "-"]
         assert input_text is not None
         payload = json.loads(input_text)
+        assert "files(first:" in payload["query"]
         calls.append(payload)
-        if "fragment BlobText" in payload["query"]:
-            return json.dumps(
-                {
-                    "data": {
-                        "repository": {
-                            "base0": {"text": "old", "isBinary": False},
-                            "head0": {"text": "new", "isBinary": False},
-                            "head1": {"text": "added", "isBinary": False},
-                        }
-                    }
-                }
-            )
-        after = payload["variables"]["after"]
-        if after is None:
+        if payload["variables"]["after"] is None:
             return json.dumps(
                 _files_page(
                     [{"path": "a.py", "changeType": "MODIFIED"}],
@@ -97,13 +112,39 @@ async def test_fetch_pr_files_uses_graphql_cursor_pagination() -> None:
     files = await fetch_pr_files("owner", "repo", 123, runner=runner)
 
     assert [file.filename for file in files] == ["a.py", "b.py"]
-    file_calls = [call for call in calls if "files(first:" in str(call["query"])]
-    assert [mapping(call["variables"])["after"] for call in file_calls] == [
+    assert [mapping(call["variables"])["after"] for call in calls] == [
         None,
         "cursor-1",
     ]
-    assert files[0].patch.startswith("diff --git a/a.py b/a.py")
-    assert files[1].patch.startswith("diff --git a/b.py b/b.py\nnew file mode")
+    assert files[0].patch == MODIFIED_PATCH.rstrip("\n")
+    assert files[1].patch == ADDED_PATCH.rstrip("\n")
+    assert diff_calls == [CANONICAL_DIFF_ARGS]
+
+
+@pytest.mark.parametrize("field", ["baseRefOid", "headRefOid"])
+async def test_fetch_pr_files_rejects_revision_changes_between_pages(
+    field: str,
+) -> None:
+    async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        if args == CANONICAL_DIFF_ARGS:
+            return MODIFIED_PATCH + ADDED_PATCH
+        assert input_text is not None
+        after = json.loads(input_text)["variables"]["after"]
+        page = _files_page(
+            [{"path": "a.py" if after is None else "b.py", "changeType": "MODIFIED"}],
+            has_next_page=after is None,
+            end_cursor="next" if after is None else None,
+        )
+        if after is not None:
+            pr = dict(
+                mapping(mapping(mapping(page["data"])["repository"])["pullRequest"])
+            )
+            pr[field] = "different-revision"
+            page = {"data": {"repository": {"pullRequest": pr}}}
+        return json.dumps(page)
+
+    with pytest.raises(RuntimeError, match="PR changed while loading"):
+        await fetch_pr_files("owner", "repo", 123, runner=runner)
 
 
 async def test_fetch_pr_files_stops_at_known_total() -> None:
@@ -112,18 +153,10 @@ async def test_fetch_pr_files_stops_at_known_total() -> None:
     async def runner(args: list[str], *, input_text: str | None = None) -> str:
         nonlocal calls
         calls += 1
+        if args == CANONICAL_DIFF_ARGS:
+            return MODIFIED_PATCH + ADDED_PATCH
         assert input_text is not None
-        if "fragment BlobText" in json.loads(input_text)["query"]:
-            return json.dumps(
-                {
-                    "data": {
-                        "repository": {
-                            "base0": {"text": "old"},
-                            "head0": {"text": "new"},
-                        }
-                    }
-                }
-            )
+        assert "files(first:" in json.loads(input_text)["query"]
         return json.dumps(
             _files_page(
                 [{"path": "a.py", "changeType": "MODIFIED"}],
@@ -136,6 +169,60 @@ async def test_fetch_pr_files_stops_at_known_total() -> None:
 
     assert [file.filename for file in files] == ["a.py"]
     assert calls == 2
+
+
+async def test_fetch_pr_files_starts_patch_and_metadata_concurrently() -> None:
+    metadata_started = asyncio.Event()
+    patch_started = asyncio.Event()
+
+    async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        if args == CANONICAL_DIFF_ARGS:
+            patch_started.set()
+            await metadata_started.wait()
+            return MODIFIED_PATCH
+        metadata_started.set()
+        await patch_started.wait()
+        return json.dumps(_files_page([{"path": "a.py", "changeType": "MODIFIED"}]))
+
+    files = await asyncio.wait_for(
+        fetch_pr_files("owner", "repo", 123, runner=runner), timeout=2
+    )
+
+    assert files[0].patch == MODIFIED_PATCH.rstrip("\n")
+
+
+@pytest.mark.parametrize("failed_request", ["metadata", "patch", None])
+async def test_fetch_pr_files_cleans_up_requests_on_failure_or_cancellation(
+    failed_request: str | None,
+) -> None:
+    started = {name: asyncio.Event() for name in ("metadata", "patch")}
+    finished: set[str] = set()
+
+    async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        name = "patch" if args == CANONICAL_DIFF_ARGS else "metadata"
+        started[name].set()
+        try:
+            await asyncio.gather(*(event.wait() for event in started.values()))
+            if name == failed_request:
+                raise RuntimeError("request failed")
+            await asyncio.Future()
+        finally:
+            finished.add(name)
+        raise AssertionError("blocked request should be cancelled")
+
+    task = asyncio.create_task(fetch_pr_files("owner", "repo", 123, runner=runner))
+    if failed_request is None:
+        await asyncio.wait_for(
+            asyncio.gather(*(event.wait() for event in started.values())), timeout=2
+        )
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+    else:
+        with pytest.raises(RuntimeError, match="request failed"):
+            await asyncio.wait_for(task, timeout=2)
+
+    assert finished == {"metadata", "patch"}
 
 
 @pytest.mark.parametrize(
@@ -173,18 +260,11 @@ async def test_fetch_pr_files_preserves_renamed_file_patch(
 
     async def runner(args: list[str], *, input_text: str | None = None) -> str:
         calls.append(args)
-        if args[:2] == ["pr", "diff"]:
-            return patch
+        if args == CANONICAL_DIFF_ARGS:
+            return patch + ADDED_PATCH
         assert args == ["api", "graphql", "--input", "-"]
         assert input_text is not None
-        payload = json.loads(input_text)
-        if "fragment BlobText" in payload["query"]:
-            assert payload["variables"] == {
-                "owner": "owner",
-                "repo": "repo",
-                "head0Expression": "head-sha:added.py",
-            }
-            return json.dumps({"data": {"repository": {"head0": {"text": "added"}}}})
+        assert "files(first:" in json.loads(input_text)["query"]
         return json.dumps(
             _files_page(
                 [
@@ -195,7 +275,7 @@ async def test_fetch_pr_files_preserves_renamed_file_patch(
                         "deletions": counts[1],
                         "viewerViewedState": "VIEWED",
                     },
-                    {"path": "added.py", "changeType": "ADDED"},
+                    {"path": "b.py", "changeType": "ADDED"},
                 ]
             )
         )
@@ -211,10 +291,8 @@ async def test_fetch_pr_files_preserves_renamed_file_patch(
     assert diff.old_filename == "src/old.py"
     assert diff.change_counts == counts
     assert not diff.is_new
-    assert "new file mode" in files[1].patch
-    assert [call for call in calls if call[:2] == ["pr", "diff"]] == [
-        ["pr", "diff", "123", "--repo", "owner/repo", "--color", "never"]
-    ]
+    assert files[1].patch == ADDED_PATCH.rstrip("\n")
+    assert len(calls) == 2
 
 
 @pytest.mark.parametrize(
@@ -223,7 +301,7 @@ async def test_fetch_pr_files_preserves_renamed_file_patch(
 )
 async def test_fetch_pr_files_rejects_missing_rename_source(raw_diff: str) -> None:
     async def runner(args: list[str], *, input_text: str | None = None) -> str:
-        if args[:2] == ["pr", "diff"]:
+        if args == CANONICAL_DIFF_ARGS:
             return raw_diff
         assert input_text is not None
         assert "files(first:" in json.loads(input_text)["query"]
@@ -233,6 +311,96 @@ async def test_fetch_pr_files_rejects_missing_rename_source(raw_diff: str) -> No
 
     with pytest.raises(RuntimeError, match="source path for 'src/new.py'"):
         await fetch_pr_files("owner", "repo", 123, runner=runner)
+
+
+@pytest.mark.parametrize("raw_diff", ["", ADDED_PATCH])
+async def test_fetch_pr_files_rejects_missing_canonical_patch(raw_diff: str) -> None:
+    async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        if args == CANONICAL_DIFF_ARGS:
+            return raw_diff
+        return json.dumps(_files_page([{"path": "a.py", "changeType": "MODIFIED"}]))
+
+    with pytest.raises(RuntimeError, match="did not include 'a.py'"):
+        await fetch_pr_files("owner", "repo", 123, runner=runner)
+
+
+@pytest.mark.parametrize(
+    ("path", "change_type", "patch"),
+    [
+        (
+            "asset.bin",
+            "MODIFIED",
+            "diff --git a/asset.bin b/asset.bin\nBinary files a/asset.bin and b/asset.bin differ\n",
+        ),
+        (
+            "empty.py",
+            "ADDED",
+            "diff --git a/empty.py b/empty.py\nnew file mode 100644\nindex 0000000..e69de29\n",
+        ),
+        (
+            "run.sh",
+            "MODIFIED",
+            "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n",
+        ),
+        (
+            "gone.py",
+            "DELETED",
+            "diff --git a/gone.py b/gone.py\ndeleted file mode 100644\n--- a/gone.py\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n",
+        ),
+        (
+            "한글.py",
+            "ADDED",
+            'diff --git "a/\\355\\225\\234\\352\\270\\200.py" "b/\\355\\225\\234\\352\\270\\200.py"\nnew file mode 100644\n--- /dev/null\n+++ "b/\\355\\225\\234\\352\\270\\200.py"\n@@ -0,0 +1 @@\n+added\n',
+        ),
+    ],
+)
+async def test_fetch_pr_files_keeps_canonical_file_kinds(
+    path: str, change_type: str, patch: str
+) -> None:
+    async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        if args == CANONICAL_DIFF_ARGS:
+            return patch
+        return json.dumps(_files_page([{"path": path, "changeType": change_type}]))
+
+    files = await fetch_pr_files("owner", "repo", 123, runner=runner)
+
+    assert files[0].filename == path
+    assert files[0].patch == patch.rstrip("\n")
+
+
+async def test_preview_loads_source_on_demand_without_changing_comment_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = PRStore(owner="owner", repo="repo", pr_number=123)
+    store.state.pr = PR(number=123, head_sha="head-sha")
+    blob_requests: list[str] = []
+    content = "first\nnew\nkeep\nextra context\nlast\n"
+
+    async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        if args == CANONICAL_DIFF_ARGS:
+            return MODIFIED_PATCH
+        assert input_text is not None
+        payload = json.loads(input_text)
+        if "files(first:" in payload["query"]:
+            return json.dumps(_files_page([{"path": "a.py", "changeType": "MODIFIED"}]))
+        blob_requests.append(payload["variables"]["expression"])
+        return json.dumps({"data": {"repository": {"object": {"text": content}}}})
+
+    monkeypatch.setattr(store._service, "_run_gh", runner)
+    await store.load_files()
+    canonical = await store.get_file_diff_async("a.py")
+    assert canonical is not None
+    assert blob_requests == []
+
+    full_text = await store.get_file_content("a.py")
+    assert full_text == content
+    assert await store.get_file_content("a.py") == content
+    assert blob_requests == ["head-sha:a.py"]
+    preview = build_full_file_diff("a.py", full_text, source_diff=canonical)
+    assert preview.hunks[-1].lines[-1].new_line_no == 5
+    assert store.is_inline_comment_diff_line(path="a.py", line=2, side="RIGHT")
+    assert not store.is_inline_comment_diff_line(path="a.py", line=5, side="RIGHT")
+    assert store.get_file_diff("a.py") is canonical
 
 
 async def test_fetch_file_content_reads_graphql_blob_text() -> None:

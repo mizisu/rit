@@ -1,7 +1,6 @@
 import ast
 from pathlib import Path
 
-
 SERVICES_DIR = Path(__file__).parents[1] / "src" / "rit" / "services"
 STANDALONE_REVIEW_COMMENT_MODULES = {
     "pr_file_comment_request.py",
@@ -9,7 +8,14 @@ STANDALONE_REVIEW_COMMENT_MODULES = {
 }
 
 
-def test_rest_is_limited_to_standalone_review_comment_modules() -> None:
+CANONICAL_DIFF_REQUEST = ast.parse(
+    '["api", f"repos/{owner}/{repo}/pulls/{pr_number}", '
+    '"-H", "Accept: application/vnd.github.v3.diff"]',
+    mode="eval",
+).body
+
+
+def test_rest_is_limited_to_standalone_comments_and_canonical_diff() -> None:
     violations: list[str] = []
     for path in SERVICES_DIR.glob("*.py"):
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -24,16 +30,20 @@ def test_rest_is_limited_to_standalone_review_comment_modules() -> None:
                 continue
             if path.name in STANDALONE_REVIEW_COMMENT_MODULES:
                 continue
+            if path.name == "pr_file_request.py" and ast.dump(node) == ast.dump(
+                CANONICAL_DIFF_REQUEST
+            ):
+                continue
             violations.append(f"{path.name}:{node.lineno}")
 
     assert violations == []
 
 
-def test_only_standalone_review_comment_modules_contain_rest_paths() -> None:
+def test_only_comment_and_canonical_diff_modules_contain_rest_paths() -> None:
     modules_with_rest_paths = {
-        path.name
-        for path in SERVICES_DIR.glob("*.py")
-        if "/repos/" in path.read_text()
+        path.name for path in SERVICES_DIR.glob("*.py") if "repos/" in path.read_text()
     }
 
-    assert modules_with_rest_paths == STANDALONE_REVIEW_COMMENT_MODULES
+    assert modules_with_rest_paths == STANDALONE_REVIEW_COMMENT_MODULES | {
+        "pr_file_request.py"
+    }

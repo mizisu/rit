@@ -109,7 +109,7 @@ class PRStoreState:
     thread_info_cache: dict[int, ReviewThreadInfo] = field(default_factory=dict)
     thread_cache: dict[int, ReviewThread] = field(default_factory=dict)
 
-    file_contents: dict[str, str] = field(default_factory=dict)
+    file_contents: dict[tuple[str, str], str] = field(default_factory=dict)
 
     selected_file: str | None = None
     files_loaded_count: int = 0
@@ -420,16 +420,27 @@ class PRStore:
             self._state.files_by_filename,
         )
 
-    async def get_file_content(self, filename: str) -> str | None:
-        """Fetch full file content at the PR's head ref. Cached after first call."""
+    async def get_file_content(
+        self, filename: str, *, ref: str | None = None
+    ) -> str | None:
+        """Load source text lazily at the PR head or an explicit immutable ref."""
         pr = self._state.pr
-        head_sha = pr.head_sha if pr is not None else ""
-        return await load_cached_file_content(
+        uses_current_head = ref is None
+        if ref is None:
+            ref = pr.head_sha if pr is not None else ""
+        content = await load_cached_file_content(
             self._state.file_contents,
             filename=filename,
-            head_sha=head_sha,
+            ref=ref,
             fetch=getattr(self._service, "get_file_content", None),
         )
+        current = self._state.pr
+        if (
+            uses_current_head
+            and (current.head_sha if current is not None else "") != ref
+        ):
+            return None
+        return content
 
     async def get_reviewer_candidates(self) -> tuple[list[PRUser], list[PRTeam]]:
         """Fetch user and team candidates for review requests."""

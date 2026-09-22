@@ -1,5 +1,6 @@
 """Diff parsing and word-level diff computation."""
 
+import codecs
 import re
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
@@ -114,6 +115,15 @@ def parse_multi_file_patch(
     return parsed
 
 
+def parse_multi_file_patch_summaries(patch: str) -> list[ParsedFilePatchSummary]:
+    """Split a canonical patch without allocating or refining diff lines."""
+    return [
+        summary
+        for section in _iter_multi_file_patch_sections(patch)
+        if (summary := parse_file_patch_summary(section)) is not None
+    ]
+
+
 def parse_file_patch_summary(section: str) -> ParsedFilePatchSummary | None:
     """Parse file metadata and line counts without building diff line objects."""
     (
@@ -172,8 +182,7 @@ def _iter_patch_lines(text: str) -> Iterator[str]:
         else:
             line = text[start:end]
             start = end + 1
-        if line.endswith("\r"):
-            line = line[:-1]
+        line = line.removesuffix("\r")
         yield line
 
 
@@ -194,10 +203,10 @@ def _parse_file_metadata(section: str) -> tuple[str, str | None, bool, bool, boo
             old_filename = None
         elif line.startswith("deleted file mode"):
             is_deleted = True
-        elif line.startswith("rename from "):
-            old_filename = line.removeprefix("rename from ")
-        elif line.startswith("rename to "):
-            filename = line.removeprefix("rename to ")
+        elif line.startswith(("rename from ", "copy from ")):
+            old_filename = _decode_git_path(line.split(" ", 2)[2])
+        elif line.startswith(("rename to ", "copy to ")):
+            filename = _decode_git_path(line.split(" ", 2)[2])
         elif line.startswith("Binary files ") or line.startswith("GIT binary patch"):
             is_binary = True
         elif line.startswith("--- "):
@@ -272,10 +281,10 @@ def _parse_file_summary_metadata(
             old_filename = None
         elif line.startswith("deleted file mode"):
             is_deleted = True
-        elif line.startswith("rename from "):
-            old_filename = line.removeprefix("rename from ")
-        elif line.startswith("rename to "):
-            filename = line.removeprefix("rename to ")
+        elif line.startswith(("rename from ", "copy from ")):
+            old_filename = _decode_git_path(line.split(" ", 2)[2])
+        elif line.startswith(("rename to ", "copy to ")):
+            filename = _decode_git_path(line.split(" ", 2)[2])
         elif line.startswith("Binary files ") or line.startswith("GIT binary patch"):
             is_binary = True
 
@@ -300,9 +309,13 @@ def _count_patch_changes(section: str) -> tuple[int, int]:
 def _parse_diff_git_paths(line: str) -> tuple[str, str]:
     rest = line.removeprefix(DIFF_GIT_PREFIX)
     if rest.startswith("a/"):
-        separator = rest.find(" b/")
-        if separator >= 0:
-            return rest[2:separator], rest[separator + 3 :]
+        midpoint = len(rest) // 2
+        same_path = rest[2:midpoint]
+        if rest[midpoint:] == f" b/{same_path}":
+            return same_path, same_path
+    match = re.fullmatch(r'("(?:\\.|[^"\\])*"|a/.*?) ("(?:\\.|[^"\\])*"|b/.*)', rest)
+    if match:
+        return _strip_diff_prefix(match[1]), _strip_diff_prefix(match[2])
     parts = rest.split(" ", 1)
     if len(parts) == 2:
         return _strip_diff_prefix(parts[0]), _strip_diff_prefix(parts[1])
@@ -316,7 +329,16 @@ def _normalize_patch_path(path: str) -> str | None:
     return _strip_diff_prefix(path)
 
 
+def _decode_git_path(path: str) -> str:
+    if path.startswith('"') and path.endswith('"'):
+        return codecs.escape_decode(path[1:-1].encode())[0].decode(
+            "utf-8", errors="surrogateescape"
+        )
+    return path
+
+
 def _strip_diff_prefix(path: str) -> str:
+    path = _decode_git_path(path)
     if path.startswith("a/") or path.startswith("b/"):
         return path[2:]
     return path
@@ -678,13 +700,14 @@ def _align_replace_lines(
             insert_cost = costs[old_index][new_index - 1] + 1.0
 
             if (
-                old_text == new_text
-                and pair_cost <= delete_cost
-                and pair_cost <= insert_cost
+                (
+                    old_text == new_text
+                    and pair_cost <= delete_cost
+                    and pair_cost <= insert_cost
+                )
+                or pair_cost < delete_cost
+                and pair_cost < insert_cost
             ):
-                costs[old_index][new_index] = pair_cost
-                choices[old_index][new_index] = "pair"
-            elif pair_cost < delete_cost and pair_cost < insert_cost:
                 costs[old_index][new_index] = pair_cost
                 choices[old_index][new_index] = "pair"
             elif insert_cost <= delete_cost:
@@ -842,9 +865,7 @@ def _compute_token_diff(
         0: _TokenDiffPath(old_position=-1, last_component=None)
     }
 
-    new_position = _extend_token_diff_match(
-        best_paths[0], new_tokens, old_tokens, 0
-    )
+    new_position = _extend_token_diff_match(best_paths[0], new_tokens, old_tokens, 0)
     if best_paths[0].old_position + 1 >= old_length and new_position + 1 >= new_length:
         return _build_token_diff_segments(
             best_paths[0].last_component,
@@ -867,8 +888,7 @@ def _compute_token_diff(
                 added_new_position = add_path.old_position - diagonal
                 can_add = 0 <= added_new_position < new_length
             can_remove = (
-                remove_path is not None
-                and remove_path.old_position + 1 < old_length
+                remove_path is not None and remove_path.old_position + 1 < old_length
             )
             if not can_add and not can_remove:
                 best_paths.pop(diagonal, None)
@@ -1007,7 +1027,9 @@ def compute_word_diff(
     return _build_word_alt_segments(changes)
 
 
-def compute_line_diff(old_lines: Sequence[str], new_lines: Sequence[str]) -> list[DiffLine]:
+def compute_line_diff(
+    old_lines: Sequence[str], new_lines: Sequence[str]
+) -> list[DiffLine]:
     if old_lines is new_lines:
         return _context_diff_lines(old_lines)
 

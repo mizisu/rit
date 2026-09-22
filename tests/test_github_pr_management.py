@@ -16,11 +16,14 @@ from rit.services.pr_graphql_response import (
 
 
 class CaptureGitHubService(GitHubService):
-    def __init__(self, outputs: list[str | Exception] | None = None) -> None:
+    def __init__(
+        self, outputs: list[str | Exception] | None = None, *, diff: str | None = None
+    ) -> None:
         super().__init__(owner="owner", repo="repo")
         self.calls: list[tuple[list[str], str | None]] = []
         self.repo_calls = 0
         self.outputs = outputs or []
+        self.diff = diff
 
     async def get_repo(self) -> GitHubRepo:
         self.repo_calls += 1
@@ -28,6 +31,8 @@ class CaptureGitHubService(GitHubService):
 
     async def _run_gh(self, args: list[str], *, input_text: str | None = None) -> str:
         self.calls.append((args, input_text))
+        if args[:2] == ["api", "repos/owner/repo/pulls/123"] and self.diff is not None:
+            return self.diff
         if self.outputs:
             output = self.outputs.pop(0)
             if isinstance(output, Exception):
@@ -148,9 +153,7 @@ async def test_get_pr_discussion_fast_uses_graphql_review_threads() -> None:
 
 @pytest.mark.asyncio
 async def test_get_pr_files_paginates_graphql_connection() -> None:
-    first_page = [
-        {"path": "file-0.py", "changeType": "MODIFIED"}
-    ]
+    first_page = [{"path": "file-0.py", "changeType": "MODIFIED"}]
     second_page = [{"path": "file-1.py", "changeType": "ADDED"}]
     service = CaptureGitHubService(
         outputs=[
@@ -192,18 +195,13 @@ async def test_get_pr_files_paginates_graphql_connection() -> None:
                     }
                 }
             ),
-            json.dumps(
-                {
-                    "data": {
-                        "repository": {
-                            "base0": {"text": "old"},
-                            "head0": {"text": "new"},
-                            "head1": {"text": "added"},
-                        }
-                    }
-                }
-            ),
-        ]
+        ],
+        diff=(
+            "diff --git a/file-0.py b/file-0.py\n"
+            "--- a/file-0.py\n+++ b/file-0.py\n@@ -1 +1 @@\n-old\n+new\n"
+            "diff --git a/file-1.py b/file-1.py\nnew file mode 100644\n"
+            "--- /dev/null\n+++ b/file-1.py\n@@ -0,0 +1 @@\n+added\n"
+        ),
     )
 
     files = await service.get_pr_files(123, total_count=2)
@@ -211,8 +209,21 @@ async def test_get_pr_files_paginates_graphql_connection() -> None:
     assert len(files) == 2
     assert files[0].filename == "file-0.py"
     assert files[-1].filename == "file-1.py"
-    assert all(call[0] == ["api", "graphql", "--input", "-"] for call in service.calls)
-    assert json.loads(service.calls[1][1] or "{}")["variables"]["after"] == "cursor-1"
+    metadata_calls = [
+        call for call in service.calls if call[0][:2] == ["api", "graphql"]
+    ]
+    assert [
+        json.loads(call[1] or "{}")["variables"]["after"] for call in metadata_calls
+    ] == [None, "cursor-1"]
+    assert [call[0] for call in service.calls if call not in metadata_calls] == [
+        [
+            "api",
+            "repos/owner/repo/pulls/123",
+            "-H",
+            "Accept: application/vnd.github.v3.diff",
+        ]
+    ]
+    assert len(service.calls) == 3
 
 
 @pytest.mark.asyncio
@@ -239,40 +250,27 @@ async def test_get_pr_files_stops_on_graphql_page_info() -> None:
                     }
                 }
             ),
-            json.dumps(
-                {
-                    "data": {
-                        "repository": {
-                            "base0": {"text": "old"},
-                            "head0": {"text": "new"},
-                        }
-                    }
-                }
-            ),
-        ]
+        ],
+        diff=(
+            "diff --git a/file.py b/file.py\n"
+            "--- a/file.py\n+++ b/file.py\n@@ -1 +1 @@\n-old\n+new\n"
+        ),
     )
 
     files = await service.get_pr_files(123)
 
     assert len(files) == 1
-    assert all(call[0] == ["api", "graphql", "--input", "-"] for call in service.calls)
+    assert files[0].patch == (service.diff or "").rstrip("\n")
+    assert len(service.calls) == 2
 
 
 @pytest.mark.asyncio
 async def test_request_reviewers_posts_user_and_team_payload() -> None:
     service = CaptureGitHubService(
         outputs=[
+            json.dumps({"data": {"repository": {"pullRequest": {"id": "PR_node"}}}}),
             json.dumps(
-                {"data": {"repository": {"pullRequest": {"id": "PR_node"}}}}
-            ),
-            json.dumps(
-                {
-                    "data": {
-                        "requestReviewsByLogin": {
-                            "pullRequest": {"id": "PR_node"}
-                        }
-                    }
-                }
+                {"data": {"requestReviewsByLogin": {"pullRequest": {"id": "PR_node"}}}}
             ),
         ]
     )
@@ -305,9 +303,7 @@ async def test_remove_assignees_uses_graphql_actor_id() -> None:
                             "pullRequest": {
                                 "id": "PR_node",
                                 "assignedActors": {
-                                    "nodes": [
-                                        {"id": "U_alice", "login": "alice"}
-                                    ]
+                                    "nodes": [{"id": "U_alice", "login": "alice"}]
                                 },
                             }
                         }

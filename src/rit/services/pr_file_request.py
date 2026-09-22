@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import difflib
 from dataclasses import dataclass
 
-from rit.core.diff import parse_multi_file_patch
+from rit.core.diff import parse_multi_file_patch_summaries
 from rit.services.gh_request import GitHubInputRunner
 from rit.services.graphql_request import connection_nodes, mapping, run_graphql
 from rit.state.models import FileViewedState, PRFile
@@ -108,7 +107,48 @@ async def fetch_pr_files(
     per_page: int = 100,
     runner: GitHubInputRunner,
 ) -> list[PRFile]:
-    """Fetch all changed-file metadata through GraphQL cursor pagination."""
+    """Load metadata and GitHub's canonical patch concurrently, without blobs."""
+    metadata = asyncio.create_task(
+        _fetch_pr_file_metadata(
+            owner,
+            repo,
+            pr_number,
+            total_count=total_count,
+            per_page=per_page,
+            runner=runner,
+        )
+    )
+    patch = asyncio.ensure_future(
+        runner(
+            [
+                "api",
+                f"repos/{owner}/{repo}/pulls/{pr_number}",
+                "-H",
+                "Accept: application/vnd.github.v3.diff",
+            ]
+        )
+    )
+    try:
+        files, raw_diff = await asyncio.gather(metadata, patch)
+    finally:
+        for task in (metadata, patch):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(metadata, patch, return_exceptions=True)
+
+    await asyncio.to_thread(_populate_file_patches, files, raw_diff)
+    return files
+
+
+async def _fetch_pr_file_metadata(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    *,
+    total_count: int | None,
+    per_page: int,
+    runner: GitHubInputRunner,
+) -> list[PRFile]:
     files: list[PRFile] = []
     after: str | None = None
     base_ref_oid = ""
@@ -127,8 +167,16 @@ async def fetch_pr_files(
                 runner=runner,
             )
         )
-        base_ref_oid = page.base_ref_oid or base_ref_oid
-        head_ref_oid = page.head_ref_oid or head_ref_oid
+        if page.files and (not page.base_ref_oid or not page.head_ref_oid):
+            raise ValueError(
+                "GitHub GraphQL response did not include PR base/head refs"
+            )
+        if head_ref_oid and (
+            page.base_ref_oid != base_ref_oid or page.head_ref_oid != head_ref_oid
+        ):
+            raise RuntimeError("PR changed while loading files; refresh and try again")
+        base_ref_oid = page.base_ref_oid
+        head_ref_oid = page.head_ref_oid
         files.extend(page.files)
         if total_count is not None and len(files) >= total_count:
             files = files[:total_count]
@@ -141,15 +189,6 @@ async def fetch_pr_files(
 
     if files and (not base_ref_oid or not head_ref_oid):
         raise ValueError("GitHub GraphQL response did not include PR base/head refs")
-    await _populate_file_patches(
-        owner,
-        repo,
-        files,
-        pr_number=pr_number,
-        base_ref_oid=base_ref_oid,
-        head_ref_oid=head_ref_oid,
-        runner=runner,
-    )
     return files
 
 
@@ -213,157 +252,18 @@ def _integer(value: object) -> int:
     return value if isinstance(value, int) else 0
 
 
-async def _populate_file_patches(
-    owner: str,
-    repo: str,
-    files: list[PRFile],
-    *,
-    pr_number: int,
-    base_ref_oid: str,
-    head_ref_oid: str,
-    runner: GitHubInputRunner,
-) -> None:
-    files_with_old_paths = [
-        file for file in files if file.status in {"renamed", "copied"}
-    ]
-    if files_with_old_paths:
-        # GraphQL omits rename/copy source paths; use GitHub's canonical patch.
-        raw_diff = await runner(
-            [
-                "pr",
-                "diff",
-                str(pr_number),
-                "--repo",
-                f"{owner}/{repo}",
-                "--color",
-                "never",
-            ]
-        )
-        parsed_files = await asyncio.to_thread(
-            parse_multi_file_patch, raw_diff, refine="never"
-        )
-        patches_by_filename = {parsed.diff.filename: parsed for parsed in parsed_files}
-        for file in files_with_old_paths:
-            parsed = patches_by_filename.get(file.filename)
-            if parsed is None or not parsed.diff.old_filename:
-                raise RuntimeError(
-                    f"GitHub diff did not include the source path for {file.filename!r}"
-                )
-            file.previous_filename = parsed.diff.old_filename
-            file.patch = parsed.patch
-        files = [file for file in files if file.status not in {"renamed", "copied"}]
-
-    semaphore = asyncio.Semaphore(4)
-
-    async def populate_batch(batch: list[PRFile]) -> None:
-        async with semaphore:
-            await _populate_file_patch_batch(
-                owner,
-                repo,
-                batch,
-                base_ref_oid=base_ref_oid,
-                head_ref_oid=head_ref_oid,
-                runner=runner,
+def _populate_file_patches(files: list[PRFile], raw_diff: str) -> None:
+    summaries = parse_multi_file_patch_summaries(raw_diff)
+    patches_by_filename = {summary.filename: summary for summary in summaries}
+    for file in files:
+        summary = patches_by_filename.get(file.filename)
+        if file.status in {"renamed", "copied"} and (
+            summary is None or not summary.old_filename
+        ):
+            raise RuntimeError(
+                f"GitHub diff did not include the source path for {file.filename!r}"
             )
-
-    await asyncio.gather(
-        *(
-            populate_batch(files[index : index + 40])
-            for index in range(0, len(files), 40)
-        )
-    )
-
-
-async def _populate_file_patch_batch(
-    owner: str,
-    repo: str,
-    files: list[PRFile],
-    *,
-    base_ref_oid: str,
-    head_ref_oid: str,
-    runner: GitHubInputRunner,
-) -> None:
-    fields: list[str] = []
-    variables: dict[str, object] = {"owner": owner, "repo": repo}
-    variable_definitions = ["$owner: String!", "$repo: String!"]
-    for index, file in enumerate(files):
-        if file.status != "added":
-            name = f"base{index}"
-            variable = f"{name}Expression"
-            variable_definitions.append(f"${variable}: String!")
-            variables[variable] = f"{base_ref_oid}:{file.filename}"
-            fields.append(f"{name}: object(expression: ${variable}) {{ ...BlobText }}")
-        if file.status != "removed":
-            name = f"head{index}"
-            variable = f"{name}Expression"
-            variable_definitions.append(f"${variable}: String!")
-            variables[variable] = f"{head_ref_oid}:{file.filename}"
-            fields.append(f"{name}: object(expression: ${variable}) {{ ...BlobText }}")
-
-    query = f"""
-query({", ".join(variable_definitions)}) {{
-  repository(owner: $owner, name: $repo) {{
-    {" ".join(fields)}
-  }}
-}}
-fragment BlobText on Blob {{
-  text
-  isBinary
-  isTruncated
-}}
-"""
-    data = await run_graphql(query, variables, runner=runner)
-    repository = mapping(mapping(data.get("data")).get("repository"))
-    patches = await asyncio.to_thread(_build_file_patches, files, repository)
-    for file, patch in zip(files, patches, strict=True):
-        file.patch = patch
-
-
-def _build_file_patches(files: list[PRFile], repository: object) -> list[str]:
-    blobs = mapping(repository)
-    return [
-        _build_file_patch(
-            file,
-            old_blob=mapping(blobs.get(f"base{index}")),
-            new_blob=mapping(blobs.get(f"head{index}")),
-        )
-        for index, file in enumerate(files)
-    ]
-
-
-def _build_file_patch(
-    file: PRFile,
-    *,
-    old_blob: object,
-    new_blob: object,
-) -> str:
-    old = mapping(old_blob)
-    new = mapping(new_blob)
-    old_path = file.previous_filename or file.filename
-    header = f"diff --git a/{old_path} b/{file.filename}\n"
-    if file.status == "added":
-        header += "new file mode 100644\n"
-    elif file.status == "removed":
-        header += "deleted file mode 100644\n"
-
-    if old.get("isBinary") is True or new.get("isBinary") is True:
-        return header + f"Binary files a/{old_path} and b/{file.filename} differ"
-    if old.get("isTruncated") is True or new.get("isTruncated") is True:
-        return header
-
-    old_text = old.get("text")
-    new_text = new.get("text")
-    old_lines = old_text.splitlines() if isinstance(old_text, str) else []
-    new_lines = new_text.splitlines() if isinstance(new_text, str) else []
-    from_file = "/dev/null" if file.status == "added" else f"a/{old_path}"
-    to_file = "/dev/null" if file.status == "removed" else f"b/{file.filename}"
-    unified = "\n".join(
-        difflib.unified_diff(
-            old_lines,
-            new_lines,
-            fromfile=from_file,
-            tofile=to_file,
-            lineterm="",
-        )
-    )
-    return header + unified
+        if summary is None:
+            raise RuntimeError(f"GitHub diff did not include {file.filename!r}")
+        file.previous_filename = summary.old_filename
+        file.patch = summary.patch

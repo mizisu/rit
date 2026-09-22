@@ -1,6 +1,7 @@
 import asyncio
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
 from rit.services.gh_cli import GhCliError, run_gh, run_gh_sync
 from rit.services.github_repo import (
@@ -16,6 +17,7 @@ from rit.services.graphql_mutations import (
 from rit.services.graphql_mutations import (
     unresolve_thread as unresolve_thread_via_graphql,
 )
+from rit.services.local_git import LocalGitSource
 from rit.services.pr_discussion import (
     PRDiscussion,
     fetch_pr_discussion,
@@ -138,6 +140,7 @@ class GitHubService:
         self._repo = repo
         self._detected_repo: GitHubRepo | None = None
         self._repo_lock = asyncio.Lock()
+        self._local_source = LocalGitSource(Path.cwd())
 
     async def get_repo(self) -> GitHubRepo:
         if self._owner and self._repo:
@@ -201,7 +204,7 @@ class GitHubService:
         *,
         total_count: int | None = None,
     ) -> list[PRFile]:
-        """Fetch PR files with a fast first page and concurrent remaining pages."""
+        """Fetch metadata and canonical patches without downloading full files."""
         repo = await self.get_repo()
         try:
             return await fetch_pr_files(
@@ -479,7 +482,10 @@ class GitHubService:
         )
 
     async def get_file_content(self, path: str, ref: str) -> str:
-        """Fetch raw file content at a given ref (branch/sha)."""
+        """Read immutable local objects first, falling back to GitHub text."""
+        content = await self._local_source.read_file(path, ref)
+        if content is not None:
+            return content
         repo = await self.get_repo()
         try:
             return await fetch_file_content(
