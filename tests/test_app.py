@@ -792,7 +792,7 @@ class TestRitApp:
         async with app.run_test() as pilot:
             screen = cast(MainScreen, app.screen)
             screen.store.state.file_diffs = {"preview.py": source_diff}
-            screen.store.state.file_contents["preview.py"] = full_content
+            screen.store.state.file_contents[("", "preview.py")] = full_content
             diff_view = screen.file_changes.diff_view
 
             await diff_view.show_full_file_preview(
@@ -1711,7 +1711,7 @@ class TestRitApp:
             screen.current_tab = 1
             screen.store.state.pr = PR(number=123, head_sha="deadbeef")
             screen.store.state.file_diffs = {"preview.py": source_diff}
-            screen.store.state.file_contents["preview.py"] = full_content
+            screen.store.state.file_contents[("deadbeef", "preview.py")] = full_content
             screen.store._service = service  # type: ignore[assignment]
             diff_view = screen.file_changes.diff_view
             await diff_view.show_full_file_preview(

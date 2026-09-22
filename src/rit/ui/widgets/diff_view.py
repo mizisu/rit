@@ -305,6 +305,7 @@ class DiffView(VerticalScroll):
 
         self._showing_full_file: bool = False
         self._saved_diff: FileDiff | None = None
+        self._saved_diff_plan_cache: DiffPlanCache | None = None
         self._saved_filename: str | None = None
         self._saved_restore_position: _full_preview.FullFileRestorePosition | None = (
             None
@@ -2075,6 +2076,7 @@ class DiffView(VerticalScroll):
         _expected_navigation_revision: int | None = None,
         _show_full_file: bool | None = None,
         _fold_refresh: bool = False,
+        _initial_position: _full_preview.FullFileRestorePosition | None = None,
     ) -> None:
         """Prepare outside repaint batches and publish the current projection."""
         if _fold_refresh:
@@ -2093,7 +2095,12 @@ class DiffView(VerticalScroll):
                     self._diff_plan_cache is None
                     or self._diff_plan_cache.source is not diff
                 ):
-                    self._diff_plan_cache = DiffPlanCache(diff)
+                    saved = self._saved_diff_plan_cache
+                    self._diff_plan_cache = (
+                        saved
+                        if saved is not None and saved.source is diff
+                        else DiffPlanCache(diff)
+                    )
                 cache = self._diff_plan_cache
                 showing_full_file = (
                     _show_full_file
@@ -2150,6 +2157,7 @@ class DiffView(VerticalScroll):
                             show_full_file=_show_full_file,
                             fold_refresh=_fold_refresh,
                             navigation_revision=_expected_navigation_revision,
+                            initial_position=_initial_position,
                         )
                     )
                     try:
@@ -2183,6 +2191,7 @@ class DiffView(VerticalScroll):
         show_full_file: bool | None,
         fold_refresh: bool,
         navigation_revision: int | None,
+        initial_position: _full_preview.FullFileRestorePosition | None,
     ) -> bool:
         async with self.batch() if self.is_mounted else self.lock:
             if request_token != self._render_request_token:
@@ -2223,6 +2232,7 @@ class DiffView(VerticalScroll):
                     preserve_full_file_state=preserve_full_file_state,
                     _show_full_file=show_full_file,
                     fold_state=state,
+                    initial_position=initial_position,
                     allow_retained_prefix=allow_retained_prefix,
                 )
             finally:
@@ -2244,6 +2254,7 @@ class DiffView(VerticalScroll):
         preserve_full_file_state: bool,
         _show_full_file: bool | None,
         fold_state: _fold_state.FoldState | None,
+        initial_position: _full_preview.FullFileRestorePosition | None,
         allow_retained_prefix: bool,
     ) -> None:
         with self.app.batch_update() if self.is_mounted else nullcontext():
@@ -2266,6 +2277,7 @@ class DiffView(VerticalScroll):
             if not preserve_full_file_state:
                 self._showing_full_file = False
                 self._saved_diff = None
+                self._saved_diff_plan_cache = None
                 self._saved_filename = None
                 self._saved_restore_position = None
             elif _show_full_file is not None:
@@ -2415,8 +2427,10 @@ class DiffView(VerticalScroll):
                 self._row_lookup_unified = rendered_rows.row_lookup_unified
                 self._rows_unified_ready = True
 
-            if fold_state is not None:
-                fold_state.restore_model(self)
+            self.split = planned_split
+            position = fold_state or initial_position
+            if position is not None:
+                position.restore_model(self)
             if self._inline_comment_editor_target is not None:
                 editor_line = self.line_index_for_location(
                     *self._inline_comment_editor_target
@@ -2428,11 +2442,9 @@ class DiffView(VerticalScroll):
                     else None
                 )
             _comments.build_comment_map(self)
-            _render._update_split_state(self)
-            _render._ensure_rendered_rows_for_mode(self, split=self.split)
             _virtual._rebuild_virtual_layout(self)
-            if fold_state is not None:
-                fold_state.restore_scroll(self)
+            if position is not None:
+                position.restore_scroll(self)
             _virtual._configure_virtual_window(self)
             if fold_state is not None and self._virt.active:
                 viewport_line = fold_state.viewport.resolve(self)
@@ -2461,13 +2473,17 @@ class DiffView(VerticalScroll):
             if not used_retained_prefix:
                 await self._run_render_diff_for_request(request_token)
             if (
-                fold_state is not None
+                position is not None
                 and self._file_navigation_revision == navigation_revision
             ):
-                # Mounts finish before layout; resolve anchors before the first paint.
-                self._reflow_fold_layout()
-                fold_state.restore_scroll(self, mounted=True)
-                self._reflow_fold_layout()
+                # Retained fold widgets need settling; previews mount a fresh window.
+                if fold_state is not None:
+                    self._reflow_fold_layout()
+                else:
+                    self.screen._refresh_layout()
+                position.restore_scroll(self, mounted=True)
+                if fold_state is not None:
+                    self._reflow_fold_layout()
 
     def _reflow_fold_layout(self) -> None:
         """Settle retained container geometry while fold painting is paused."""
@@ -2612,6 +2628,9 @@ class DiffView(VerticalScroll):
         saved_filename = restore_filename or self.current_file
         saved_diff = restore_diff or self._source_diff or self._diff
         saved_restore_position = self._full_file_restore_position()
+        saved_cache = self._diff_plan_cache
+        if saved_cache is not None and saved_cache.source is not saved_diff:
+            saved_cache = None
         preview_render_token = self._render_request_token + 1
         await self.show_diff(
             filename,
@@ -2619,6 +2638,9 @@ class DiffView(VerticalScroll):
             preserve_full_file_state=True,
             _expected_navigation_revision=view_revision[1],
             _show_full_file=True,
+            _initial_position=_full_preview.FullFileRestorePosition.for_preview(
+                anchor_line_no
+            ),
         )
         if (
             self._render_request_token != preview_render_token
@@ -2627,8 +2649,8 @@ class DiffView(VerticalScroll):
             return False
         self._saved_filename = saved_filename
         self._saved_diff = saved_diff
+        self._saved_diff_plan_cache = saved_cache
         self._saved_restore_position = saved_restore_position
-        self._jump_to_full_file_preview_anchor(anchor_line_no)
         self.post_message(Flash("Full file preview", style="success", duration=1.5))
         return True
 
@@ -2642,27 +2664,6 @@ class DiffView(VerticalScroll):
             self._current_line(),
             source_diff,
         )
-
-    def _jump_to_full_file_preview_anchor(self, line_no: int | None) -> None:
-        line_index = _full_preview.full_file_anchor_line_index(
-            line_no,
-            self._line_index_by_new_number,
-            available_line_bounds=self._new_line_number_bounds,
-        )
-        if line_index is None:
-            return
-
-        row = self._row_for_line_and_pane(line_index, "new")
-        if row is not None:
-            self._jump_to_row_with_anchor(
-                row,
-                pane="new",
-                viewport_offset=2,
-                update_active_pane=True,
-            )
-            return
-
-        self._move_cursor(line=line_index, pane="new", update_active_pane=True)
 
     def _full_file_restore_position(
         self,
@@ -2685,12 +2686,13 @@ class DiffView(VerticalScroll):
             return
         diff = self._saved_diff
         restore_position = self._saved_restore_position
-        self._saved_diff = None
-        self._saved_filename = None
-        self._saved_restore_position = None
-        self._showing_full_file = False
         self.run_worker(
-            self._restore_diff_async(filename, diff, restore_position),
+            self._restore_diff_async(
+                filename,
+                diff,
+                restore_position,
+                expected_view_revision=self.view_revision,
+            ),
             exclusive=True,
             name="diff-restore",
         )
@@ -2700,46 +2702,23 @@ class DiffView(VerticalScroll):
         filename: str,
         diff: FileDiff,
         restore_position: _full_preview.FullFileRestorePosition | None,
+        *,
+        expected_view_revision: tuple[int, int] | None = None,
     ) -> None:
-        await self.show_diff(filename, diff)
-        self._restore_full_file_position(restore_position)
+        revision = expected_view_revision or self.view_revision
+        if not self._is_current_view_revision(revision):
+            return
+        request_token = self._render_request_token + 1
+        await self.show_diff(
+            filename,
+            diff,
+            _expected_navigation_revision=revision[1],
+            _initial_position=restore_position,
+        )
+        if self._render_request_token != request_token or self.current_diff is not diff:
+            return
         self.post_message(self.FullFilePreviewRestored(filename=filename))
         self.post_message(Flash("Diff view", style="success", duration=1.5))
-
-    def _restore_full_file_position(
-        self,
-        restore_position: _full_preview.FullFileRestorePosition | None,
-    ) -> None:
-        if restore_position is None:
-            return
-        line_index = _full_preview.full_file_restore_line_index(
-            restore_position,
-            line_count=len(self._all_lines),
-        )
-        if line_index is None:
-            return
-
-        target_row = self._row_for_line_and_pane(
-            line_index, restore_position.cursor_pane
-        )
-        if target_row is not None:
-            self._jump_to_row_with_anchor(
-                target_row,
-                pane=restore_position.cursor_pane,
-                column=restore_position.column,
-                viewport_offset=restore_position.viewport_offset
-                if restore_position.viewport_offset is not None
-                else 2,
-                update_active_pane=True,
-            )
-        else:
-            self._move_cursor(
-                line=line_index,
-                column=restore_position.column,
-                pane=restore_position.cursor_pane,
-                update_active_pane=True,
-            )
-        self.active_pane = restore_position.active_pane
 
     def _row_for_line_and_pane(
         self,

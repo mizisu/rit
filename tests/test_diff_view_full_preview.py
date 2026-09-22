@@ -2,17 +2,21 @@
 
 import asyncio
 import threading
-from typing import cast
+from typing import Literal, cast
 
 import pytest
 from textual.app import App, ComposeResult
 from textual.widgets import Static
 
 from rit.core.diff import parse_patch
+from rit.core.types import DiffHunk, DiffLine, FileDiff
+from rit.state.models import PendingReviewComment, PRFile
 from rit.state.store import PRStore
 from rit.ui.widgets import diff_full_file_preview as full_preview_module
+from rit.ui.widgets import diff_plan
 from rit.ui.widgets.diff_full_file_preview import build_full_file_diff
 from rit.ui.widgets.diff_view import DiffView
+from tests.conftest import wait_until
 
 
 def _content(line_count: int) -> str:
@@ -351,3 +355,172 @@ async def test_full_file_preview_discards_result_after_newer_render(
         assert diff_view.current_file == "newer.py"
         assert diff_view.current_diff is newer_diff
         assert diff_view._showing_full_file is False
+        assert diff_view._saved_diff_plan_cache is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["unified", "split"])
+async def test_preview_round_trip_renders_only_target_and_reuses_checked_plan(
+    mode: Literal["unified", "split"], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = FileDiff(
+        "preview.py",
+        hunks=[
+            DiffHunk(
+                1,
+                900,
+                1,
+                900,
+                starts_file=True,
+                file_path="preview.py",
+                lines=[
+                    DiffLine(
+                        number,
+                        number,
+                        f"old {number}" if number == 750 else f"line {number}",
+                        f"line {number}",
+                        is_modified=number == 750,
+                    )
+                    for number in range(1, 901)
+                ],
+            )
+        ],
+    )
+    canonical = FileDiff(
+        "All files",
+        hunks=[
+            DiffHunk(
+                1,
+                20,
+                1,
+                20,
+                starts_file=True,
+                file_path="first.py",
+                lines=[DiffLine(n, n, "context", "context") for n in range(1, 21)],
+            ),
+            *source.hunks,
+        ],
+        show_hunk_headers=False,
+    )
+    store = PRStore()
+    store.state.files = [PRFile(filename=name) for name in ("first.py", "preview.py")]
+    store.state.file_diffs["preview.py"] = source
+    draft = PendingReviewComment(
+        body="keep this draft " * 50, path="preview.py", line=749
+    )
+    store.state.pending_review.comments = [draft]
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(store=store, mode=mode)
+
+    async with TestApp().run_test(size=(120, 30)) as pilot:
+        view = pilot.app.query_one(DiffView)
+        await view.show_diff(canonical.filename, canonical)
+        await pilot.pause()
+        original_index = view._line_index_by_file_new_number[("preview.py", 750)]
+        view.jump_to_line_index(original_index, side="LEFT", focus=True)
+        view.cursor_column = 3
+        await pilot.pause()
+        offset = view._current_cursor_viewport_offset()
+        cache = view._diff_plan_cache
+        assert cache is not None
+        revision = cache.revision
+        renders: list[int] = []
+        plans: list[FileDiff] = []
+        render = view._render_diff
+        build = diff_plan.build_diff_plan
+
+        async def record_render() -> None:
+            renders.append(view.cursor_line)
+            assert view._virt.window_start <= view.cursor_line <= view._virt.window_end
+            await render()
+
+        def record_plan(diff: FileDiff, **kwargs):
+            plans.append(diff)
+            return build(diff, **kwargs)
+
+        monkeypatch.setattr(view, "_render_diff", record_render)
+        monkeypatch.setattr(diff_plan, "build_diff_plan", record_plan)
+        for changed in (False, True):
+            renders.clear()
+            assert await view.show_full_file_preview(
+                "preview.py", _content(950), source_diff=source
+            )
+            await pilot.pause()
+            assert renders == [749]
+            assert view._current_cursor_viewport_offset() == 2
+            assert view._saved_diff_plan_cache is cache
+            if changed:
+                source.hunks[0].lines[749].new_content = "updated while previewing"
+            renders.clear()
+            plans.clear()
+            view.action_toggle_full_file()
+            await wait_until(
+                lambda: (
+                    view.current_diff is canonical
+                    and view._committing_render_token is None
+                ),
+                timeout=2,
+            )
+            await pilot.pause()
+            assert renders == [original_index]
+            assert view._diff_plan_cache is cache
+            assert view._saved_diff_plan_cache is None
+            assert bool(plans) is changed
+            assert (cache.revision > revision) is changed
+            assert view._current_cursor_viewport_offset() == offset
+            assert view.cursor_pane == "old" and view.cursor_column == 3
+            assert store.state.pending_review.comments == [draft]
+            assert store.get_file_diff("preview.py") is source
+            assert store.is_inline_comment_diff_line(
+                path="preview.py", line=750, side="RIGHT"
+            )
+            assert not store.is_inline_comment_diff_line(
+                path="preview.py", line=950, side="RIGHT"
+            )
+
+
+@pytest.mark.asyncio
+async def test_obsolete_restore_does_not_publish_or_move_the_newer_view(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = DiffView()
+    source = parse_patch("@@ -1 +1 @@\n-old\n+new", "preview.py")
+    newer = parse_patch("@@ -1 +1 @@\n-before\n+after", "newer.py")
+    calls: list[object] = []
+
+    async def superseded_render(*args, **kwargs) -> None:
+        calls.append(args)
+        view._render_request_token += 2
+        view._source_diff = newer
+
+    def capture_message(message) -> bool:
+        calls.append(message)
+        return True
+
+    monkeypatch.setattr(view, "show_diff", superseded_render)
+    monkeypatch.setattr(view, "post_message", capture_message)
+    revision = view.view_revision
+    await view._restore_diff_async("preview.py", source, None)
+    assert len(calls) == 1
+    assert view.current_diff is newer
+    await view._restore_diff_async(
+        "preview.py", source, None, expected_view_revision=revision
+    )
+    assert len(calls) == 1
+    assert view.current_diff is newer
+
+
+@pytest.mark.parametrize(
+    ("line_number", "index"), [(None, 0), (-1, 0), (0, 0), (1, 0), (100, 99)]
+)
+def test_preview_position_uses_bounded_source_line(
+    line_number: int | None, index: int
+) -> None:
+    position = full_preview_module.FullFileRestorePosition.for_preview(line_number)
+    assert position.line == index
+    assert position.cursor_pane == position.active_pane == "new"
+    restore_index = full_preview_module.full_file_restore_line_index
+    assert restore_index(position, line_count=10) == min(index, 9)
+    assert restore_index(position, line_count=0) is None

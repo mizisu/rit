@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from rit.core.types import DiffHunk, DiffLine, FileDiff
+from rit.ui.widgets import diff_cursor as _cursor
+from rit.ui.widgets.diff_cursor_update import clamp_cursor_column
+
+if TYPE_CHECKING:
+    from rit.ui.widgets.diff_view import DiffView
 
 __all__ = (
     "FullFilePreviewAction",
@@ -36,6 +41,53 @@ class FullFileRestorePosition:
     cursor_pane: Literal["old", "new"]
     active_pane: Literal["old", "new"]
     viewport_offset: int | None
+
+    @classmethod
+    def for_preview(cls, line_number: int | None) -> FullFileRestorePosition:
+        """Anchor the sequential full-file projection at a source line."""
+        return cls(max(0, (line_number or 1) - 1), 0, "new", "new", 2)
+
+    def restore_model(self, view: DiffView) -> None:
+        """Install the cursor before mounting the target window."""
+        index = full_file_restore_line_index(self, line_count=len(view._all_lines))
+        if index is None:
+            return
+        view._cursor_ui.suspend_line_watch = True
+        view._cursor_ui.suspend_column_watch = True
+        view._cursor_ui.suspend_pane_watch = True
+        try:
+            view.cursor_line = index
+            view.cursor_pane = self.cursor_pane
+            view.active_pane = self.active_pane
+            view.cursor_column = clamp_cursor_column(
+                requested_column=self.column,
+                text_length=len(
+                    _cursor._get_cursor_text_for_target(view, index, self.cursor_pane)
+                ),
+            )
+            view.current_hunk_index = view._get_hunk_index_for_line(index) or 0
+            view._selected_file_header_hunk = None
+        finally:
+            view._cursor_ui.suspend_line_watch = False
+            view._cursor_ui.suspend_column_watch = False
+            view._cursor_ui.suspend_pane_watch = False
+
+    def restore_scroll(self, view: DiffView, *, mounted: bool = False) -> None:
+        """Use planned geometry until the target widgets have been laid out."""
+        row = view._current_row()
+        bounds = (
+            _cursor._row_vertical_bounds(view, row, mounted=mounted)
+            if row is not None
+            else None
+        )
+        if bounds is None:
+            return
+        offset = self.viewport_offset if self.viewport_offset is not None else 2
+        target = max(0, bounds[0] - offset)
+        view.scroll_to(y=target, animate=False, force=True, immediate=True)
+        if not mounted:
+            # The previous document's scroll limits still apply until layout.
+            view.set_scroll(None, target)
 
 
 def choose_full_file_preview_action(
@@ -374,12 +426,10 @@ def _full_preview_change_ranges(
             start = max(1, min(hunk.new_start, total_lines))
             end = max(start, min(hunk.new_start + hunk.new_count - 1, total_lines))
 
-        if start < next_start:
-            start = next_start
+        start = max(start, next_start)
         if start > total_lines:
             break
-        if end < start:
-            end = start
+        end = max(end, start)
 
         ranges.append((start, end, hunk))
         next_start = end + 1
