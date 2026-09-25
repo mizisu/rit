@@ -81,10 +81,14 @@ class DiffPlanCache:
                 line.syntax_highlighting_disabled,
                 line.preview_change,
                 line.preview_deleted_before,
-                tuple((part.text, part.type) for part in line.old_segments)
+                line.old_segments
+                if isinstance(line.old_segments, tuple)
+                else tuple((part.text, part.type) for part in line.old_segments)
                 if line.old_segments
                 else (),
-                tuple((part.text, part.type) for part in line.new_segments)
+                line.new_segments
+                if isinstance(line.new_segments, tuple)
+                else tuple((part.text, part.type) for part in line.new_segments)
                 if line.new_segments
                 else (),
             )

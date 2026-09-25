@@ -939,6 +939,35 @@ def test_file_header_prefers_visible_file_list_over_stale_lookup_cache() -> None
     assert "-3" in header_text
 
 
+def test_file_header_position_cache_reads_live_list_entries() -> None:
+    from rit.ui.widgets.diff_render import _file_for_header
+
+    class CountingFiles(list[PRFile]):
+        scans = 0
+
+        def __iter__(self):
+            self.scans += 1
+            return super().__iter__()
+
+    files = CountingFiles(PRFile(filename=f"file-{i}.py") for i in range(1000))
+    store = PRStore()
+    store.state.files = files
+    view = DiffView(store=store)
+    assert _file_for_header(view, "file-999.py") is files[999]
+    assert _file_for_header(view, "file-500.py") is files[500]
+    assert files.scans == 1
+    replacement = PRFile(filename="file-500.py", additions=42)
+    files[500] = replacement
+    assert _file_for_header(view, "file-500.py") is replacement
+    assert files.scans == 1
+    files.reverse()
+    assert _file_for_header(view, "file-500.py") is replacement
+    assert files.scans == 2
+    store.state.files = [PRFile(filename="different.py")]
+    assert _file_for_header(view, "file-500.py") is None
+    assert _file_for_header(view, "different.py") is store.state.files[0]
+
+
 def test_file_header_reuses_current_view_file_without_store_scan() -> None:
     class NoIterFiles(list[PRFile]):
         def __iter__(self):

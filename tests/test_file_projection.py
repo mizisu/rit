@@ -6,7 +6,7 @@ from rit.state.models import PRFile
 
 
 def _file_projection_module():
-    import rit.state.file_projection as file_projection
+    from rit.state import file_projection
 
     return file_projection
 
@@ -52,9 +52,7 @@ def test_file_from_diff_maps_status_and_change_counts() -> None:
     file_projection = _file_projection_module()
 
     added = file_projection.file_from_diff(_diff(filename="new.py", is_new=True))
-    removed = file_projection.file_from_diff(
-        _diff(filename="old.py", is_deleted=True)
-    )
+    removed = file_projection.file_from_diff(_diff(filename="old.py", is_deleted=True))
     renamed = file_projection.file_from_diff(
         _diff(filename="new.py", old_filename="old.py")
     )
@@ -230,6 +228,64 @@ def test_diff_from_file_patch_restores_rest_metadata() -> None:
     assert diff.old_filename == "old.py"
     assert diff.is_new is True
     assert diff.is_deleted is False
+
+
+def test_compact_word_ranges_preserve_highlighting_without_recomputation(
+    monkeypatch,
+) -> None:
+    from rit.core import diff as diff_module
+    from rit.core import highlighting
+    from rit.ui.widgets.diff_plan_cache import DiffPlanCache, publish_line_metadata
+
+    long_text = "😀" * 600
+    patch = (
+        "@@ -1,5 +1,5 @@\n"
+        "-\tvalue = ('old 界 😀', before)\n+\tvalue = ('new 界 😀', after)\n context\n"
+        f"-{long_text} old\n+{long_text} new\n context\n"
+        "-offscreen = 'before'\n+offscreen = 'before' + 'after'"
+    )
+    eager = diff_module.parse_patch(patch, "sample.py")
+    compact = _file_projection_module().diff_from_file_patch(
+        PRFile(filename="sample.py", patch=patch)
+    )
+    publish_line_metadata(eager)
+    publish_line_metadata(compact)
+    lines = compact.hunks[0].lines
+    for index in (0, 4):
+        assert lines[index].is_modified and lines[index].has_word_diff
+        assert isinstance(lines[index].old_segments, tuple)
+        assert isinstance(lines[index].new_segments, tuple)
+    assert lines[2].is_modified and not lines[2].has_word_diff
+    assert lines[2].old_segments == lines[2].new_segments == []
+    ranges = lines[0].old_segments, lines[0].new_segments
+    cache = DiffPlanCache(compact)
+    before = cache.prepare(compact)
+    revision = cache.revision
+
+    def unexpected(*_args):
+        raise AssertionError("highlighting must not recompute word diffs")
+
+    monkeypatch.setattr(diff_module, "compute_word_diff", unexpected)
+    for enabled in (False, True, False, True):
+        for diff in (compact, eager):
+            highlighting.highlight_lines_for_diff_range(
+                diff, 0, 0, include_word_diff=enabled
+            )
+        for side in ("old", "new"):
+            attr = f"highlighted_{side}_content"
+            assert getattr(lines[0], attr) == getattr(eager.hunks[0].lines[0], attr)
+            assert getattr(lines[4], attr) is None
+        assert lines[0].old_segments is ranges[0]
+        assert lines[0].new_segments is ranges[1]
+
+    for index in (2, 4):
+        for diff in (compact, eager):
+            highlighting.highlight_lines_for_diff_range(diff, index, index)
+        for side in ("old", "new"):
+            attr = f"highlighted_{side}_content"
+            assert getattr(lines[index], attr) == getattr(eager.hunks[0].lines[index], attr)
+    assert cache.prepare(compact).hunks[0] is before.hunks[0]
+    assert cache.revision == revision
 
 
 def test_diff_from_file_patch_reads_status_once(monkeypatch) -> None:

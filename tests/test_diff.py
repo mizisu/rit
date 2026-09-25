@@ -1,5 +1,6 @@
 """Tests for diff algorithm."""
 
+import pytest
 from textual.content import Content
 
 from rit.core import diff as diff_module
@@ -738,9 +739,7 @@ class TestComputeWordDiff:
         assert old_segments == [
             InlineSegment(text="old_value", type=SegmentType.DELETED)
         ]
-        assert new_segments == [
-            InlineSegment(text="new_value", type=SegmentType.ADDED)
-        ]
+        assert new_segments == [InlineSegment(text="new_value", type=SegmentType.ADDED)]
 
     def test_punctuation_is_a_separate_token(self):
         old_segments, new_segments = compute_word_diff("@classmethod", "@staticmethod")
@@ -1295,6 +1294,34 @@ class TestDiffHighlighting:
             ["line 16", "line 17", "line 18", "line 19"],
         ]
         assert diff.hunks[0].lines[18].highlighted_new_content == Content("line 19")
+
+    @pytest.mark.parametrize("same_text", [True, False])
+    def test_highlight_context_is_parsed_but_not_split_into_unused_rows(
+        self, same_text, monkeypatch
+    ):
+        old_text = [f'value_{i} = "한글 😀 {i}"' for i in range(300)]
+        new_text = old_text if same_text else [text + " # changed" for text in old_text]
+        full_old, full_new = highlighting_module._highlight_text_lines(
+            filename="example.py", old_lines_text=old_text, new_lines_text=new_text
+        )
+        split_sizes = []
+        original_split = Content.split
+
+        def counted_split(content, *args, **kwargs):
+            split_sizes.append(len(content.plain.splitlines()))
+            return original_split(content, *args, **kwargs)
+
+        monkeypatch.setattr(Content, "split", counted_split)
+        selected_old, selected_new = highlighting_module._highlight_text_lines(
+            filename="example.py",
+            old_lines_text=old_text,
+            new_lines_text=new_text,
+            old_start_line=260,
+            new_start_line=265,
+        )
+        assert selected_old == full_old[260:]
+        assert selected_new == full_new[265:]
+        assert split_sizes == ([40] if same_text else [40, 35])
 
     def test_highlight_lines_for_diff_range_uses_cached_hunk_indices(self):
         """Cached hunk ranges should avoid scanning every hunk for late windows."""

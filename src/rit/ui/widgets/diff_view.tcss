@@ -9,7 +9,7 @@ DiffView #diff-content {
     width: 1fr;
     height: auto;
     overflow-x: auto;
-    overflow-y: auto;
+    overflow-y: hidden;
 }
 
 DiffView .placeholder {
@@ -211,7 +211,7 @@ DiffView .line-prefix.-placeholder {
 }
 
 DiffView .-virtual-buffer {
-    text-align: center;
+    height: 0;
     margin: 0;
 }
 

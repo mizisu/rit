@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from textual.widgets import Static
+    from textual.worker import Worker
 
     from rit.core.types import FileDiff
 
@@ -91,8 +92,7 @@ class UnifiedDiffBlock(Horizontal):
         id: str | None = None,
         classes: str | None = None,
     ) -> None:
-        self.line_indices = _line_indices_tuple(line_indices)
-        self._row_ranges_by_line: dict[int, tuple[int, int]] = {}
+        self.set_line_indices(line_indices)
         self._annotations = LineAnnotations([], classes="line-prefix")
         self._code = DiffCode(classes="code-content")
         super().__init__(
@@ -101,6 +101,11 @@ class UnifiedDiffBlock(Horizontal):
             id=id,
             classes=classes,
         )
+
+    def set_line_indices(self, line_indices: Iterable[int]) -> None:
+        """Rebind a block to a new virtual window."""
+        self.line_indices = _line_indices_tuple(line_indices)
+        self._row_ranges_by_line: dict[int, tuple[int, int]] = {}
 
     def update_block(
         self,
@@ -113,8 +118,9 @@ class UnifiedDiffBlock(Horizontal):
     ) -> None:
         if row_ranges is not None:
             self._row_ranges_by_line = row_ranges
+        self.styles.height = max(len(annotations), len(line_styles))
         self._annotations.numbers = annotations
-        self._code.update(LineContent(code_lines, line_styles, width=width))
+        self._code.update_block(LineContent(code_lines, line_styles, width=width))
 
     def update_rows(
         self,
@@ -150,10 +156,7 @@ class SplitDiffBlock(Horizontal):
         id: str | None = None,
         classes: str | None = None,
     ) -> None:
-        self.line_indices = _line_indices_tuple(line_indices)
-        self._rows_by_line = {
-            line_index: row for row, line_index in enumerate(self.line_indices)
-        }
+        self.set_line_indices(line_indices)
         self._left_annotations = LineAnnotations([], classes="line-prefix")
         self._left_code = DiffCode(classes="code-content -old-side")
         self._left_scroll = SyncedCodeScroll(
@@ -171,19 +174,26 @@ class SplitDiffBlock(Horizontal):
             self._left_scroll,
             classes="split-pane split-pane-left",
         )
-        self._left_pane.styles.height = "auto"
+        self._left_scroll.styles.height = "1fr"
         self._right_pane = Horizontal(
             self._right_annotations,
             self._right_scroll,
             classes="split-pane split-pane-right",
         )
-        self._right_pane.styles.height = "auto"
+        self._right_scroll.styles.height = "1fr"
         super().__init__(
             self._left_pane,
             self._right_pane,
             id=id,
             classes=classes,
         )
+
+    def set_line_indices(self, line_indices: Iterable[int]) -> None:
+        """Rebind a block to a new virtual window."""
+        self.line_indices = _line_indices_tuple(line_indices)
+        self._rows_by_line = {
+            line_index: row for row, line_index in enumerate(self.line_indices)
+        }
 
     def update_block(
         self,
@@ -199,14 +209,21 @@ class SplitDiffBlock(Horizontal):
         left_width: int | None = None,
         right_width: int | None = None,
     ) -> None:
+        # Rows never wrap, so measuring the nested panes cannot change the height.
+        self.styles.height = max(
+            len(left_annotations),
+            len(left_styles),
+            len(right_annotations),
+            len(right_styles),
+        )
         self._left_annotations.numbers = left_annotations
         self._left_annotations.line_styles = left_annotation_styles
-        self._left_code.update(
+        self._left_code.update_block(
             LineContent(left_code_lines, left_styles, width=left_width)
         )
         self._right_annotations.numbers = right_annotations
         self._right_annotations.line_styles = right_annotation_styles
-        self._right_code.update(
+        self._right_code.update_block(
             LineContent(right_code_lines, right_styles, width=right_width)
         )
 
@@ -286,6 +303,11 @@ class VirtualState:
     rendered_start: int = 0
     rendered_end: int = -1
     render_pending: bool = False
+    viewport_worker: Worker[None] | None = None
+    viewport_frame_token: int | None = None
+    viewport_scroll_latched: bool = False
+    viewport_painted_at: float = 0.0
+    spare_blocks: list[UnifiedDiffBlock | SplitDiffBlock] = field(default_factory=list)
     cursor_shift_pending: bool = False
     pending_scroll: Callable[[], None] | None = None
     coalesced_center: int | None = None

@@ -29,7 +29,7 @@ def test_estimate_pending_draft_height_does_not_materialize_body_lines() -> None
     )
     draft.body = NoSplitLines("one\ntwo\nthree\nfour")
 
-    assert estimate_pending_draft_height(draft) == 7
+    assert estimate_pending_draft_height(draft) == 9
 
 
 def _make_review_thread(*, root_id: int, side: str) -> ReviewThread:
@@ -404,16 +404,22 @@ async def test_virtualized_pending_draft_collapse_updates_scroll_geometry() -> N
 
         collapsed_virtual_height = diff_view._virtual_content_height
         collapsed_next_line_top = diff_view._line_top_offsets[next_line]
+        await wait_until(
+            lambda: diff_view.virtual_size.height == diff_view._virtual_content_height
+        )
         collapsed_max_scroll_y = int(diff_view.max_scroll_y)
+        assert pending_item.region.height == collapsed_draft_height == 3
 
         diff_view.scroll_to(y=diff_view.max_scroll_y, animate=False)
         await wait_until(
             lambda: (
                 diff_view._virt.window_start > 0
                 and len(diff_view.query("CommentCard.pending-draft")) == 0
+                and not diff_view._virt.render_pending
             )
         )
 
+        assert diff_view.virtual_size.height == diff_view._virtual_content_height
         assert diff_view._virtual_content_height == collapsed_virtual_height
         assert diff_view._line_top_offsets[next_line] == collapsed_next_line_top
         assert int(diff_view.max_scroll_y) == collapsed_max_scroll_y
@@ -423,11 +429,13 @@ async def test_virtualized_pending_draft_collapse_updates_scroll_geometry() -> N
             lambda: (
                 diff_view._virt.window_start == 0
                 and len(diff_view.query("CommentCard.pending-draft")) == 1
+                and not diff_view._virt.render_pending
             )
         )
 
         remounted_draft = diff_view.query_one("CommentCard.pending-draft", CommentCard)
         assert remounted_draft.collapsed is True
+        assert diff_view.virtual_size.height == diff_view._virtual_content_height
         assert diff_view._virtual_content_height == collapsed_virtual_height
         assert diff_view._line_top_offsets[next_line] == collapsed_next_line_top
         assert int(diff_view.max_scroll_y) == collapsed_max_scroll_y

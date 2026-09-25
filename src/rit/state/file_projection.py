@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
+from typing import Literal
 
 from rit.core.diff import ParsedFilePatchSummary, parse_file_patch_summary, parse_patch
-from rit.core.types import FileDiff
+from rit.core.types import FileDiff, InlineSegment, SegmentType, WordDiffRanges
 from rit.state.models import PRFile
-
 
 __all__ = (
     "diff_from_file_patch",
@@ -69,13 +69,35 @@ def file_from_summary(summary: ParsedFilePatchSummary) -> PRFile:
 
 
 def diff_from_file_patch(file: PRFile) -> FileDiff:
-    """Parse a PR file patch and restore changed-file metadata on the diff."""
+    """Parse a PR patch, compact word spans, and restore file metadata."""
     diff = parse_patch(file.patch, file.filename)
+    # ponytail: large single-file parse peaks remain; pack during refinement if needed.
+    for hunk in diff.hunks:
+        for line in hunk.lines:
+            if line.old_segments:
+                line.old_segments = _word_diff_ranges(line.old_segments)
+            if line.new_segments:
+                line.new_segments = _word_diff_ranges(line.new_segments)
     status = file.status
     diff.old_filename = file.previous_filename
     diff.is_new = status == "added"
     diff.is_deleted = status == "removed"
     return diff
+
+
+def _word_diff_ranges(segments: list[InlineSegment] | WordDiffRanges) -> WordDiffRanges:
+    if isinstance(segments, tuple):
+        return segments
+    ranges: list[tuple[int, int, Literal["added", "deleted"]]] = []
+    offset = 0
+    for segment in segments:
+        end = offset + len(segment.text)
+        if segment.type == SegmentType.ADDED:
+            ranges.append((offset, end, "added"))
+        elif segment.type == SegmentType.DELETED:
+            ranges.append((offset, end, "deleted"))
+        offset = end
+    return tuple(ranges)
 
 
 def _file_status(

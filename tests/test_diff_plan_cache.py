@@ -171,12 +171,16 @@ def test_initial_planning_populates_reusable_hunks(
         "path",
         "order",
         "segments",
+        "compact_segments",
+        "compact_mutation",
         "metadata",
         "highlight_policy",
     ],
 )
 def test_cache_invalidates_mutated_source_inputs(mutation: str) -> None:
     source = _source()
+    if mutation == "compact_mutation":
+        source.hunks[0].lines[0].new_segments = ((0, 3, "added"),)
     cache = DiffPlanCache(source)
     _assert_projection(cache, source, split=False)
     revision = cache.revision
@@ -197,7 +201,10 @@ def test_cache_invalidates_mutated_source_inputs(mutation: str) -> None:
     elif mutation == "path":
         hunk.file_path = "renamed.py"
     elif mutation == "segments":
+        assert isinstance(hunk.lines[0].new_segments, list)
         hunk.lines[0].new_segments.append(InlineSegment("new", SegmentType.ADDED))
+    elif mutation in {"compact_segments", "compact_mutation"}:
+        hunk.lines[0].new_segments = ((0, 4, "added"),)
     elif mutation == "metadata":
         hunk.header = "new context"
     elif mutation == "highlight_policy":
@@ -218,7 +225,9 @@ def test_highlight_policy_change_invalidates_shared_fold_projections(
     )
     view = DiffView()
     view.current_file = source.filename
-    view._source_diff = source
+    monkeypatch.setattr(
+        diff_highlight, "_use_windowed_highlight_strategy", lambda *_: True
+    )
     view._diff = folded
     view._hl_state.cache = {(id(source), True, True), (id(folded), True, True)}
     monkeypatch.setattr(diff_highlight, "_use_windowed_highlight_strategy", lambda *_: True)

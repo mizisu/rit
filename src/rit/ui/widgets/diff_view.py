@@ -9,12 +9,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, Literal
 
 from textual import events, on
+from textual._animator import EasingFunction
+from textual._types import AnimationLevel, CallbackType
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.content import Content
 from textual.message import Message
 from textual.reactive import reactive, var
+from textual.scrollbar import ScrollTo
 from textual.widget import AwaitMount, Widget
 from textual.widgets import Input, Static
 
@@ -248,6 +251,7 @@ class DiffView(VerticalScroll):
         ] = {}
         self._diff_file_paths: frozenset[str] = frozenset()
         self._file_change_stats: dict[str, tuple[int, int]] = {}
+        self._file_header_positions: dict[str, int] = {}
         self._line_index_by_new_number: dict[int, int] = {}
         self._line_index_by_old_number: dict[int, int] = {}
         self._new_line_number_bounds: tuple[int, int] | None = None
@@ -417,6 +421,75 @@ class DiffView(VerticalScroll):
                 self._rows_for_current_mode() if self._search.query else (),
             )
 
+    def _scroll_to(
+        self,
+        x: float | None = None,
+        y: float | None = None,
+        *,
+        animate: bool = True,
+        speed: float | None = None,
+        duration: float | None = None,
+        easing: EasingFunction | str | None = None,
+        force: bool = False,
+        on_complete: CallbackType | None = None,
+        level: AnimationLevel = "basic",
+        release_anchor: bool = True,
+    ) -> bool:
+        deferred = False
+        if (
+            y is not None
+            and not animate
+            and on_complete is None
+            and self._virt.active
+            and self._virt.render_pending
+            and (
+                self._virt.viewport_worker is not None
+                or self._virt.viewport_scroll_latched
+            )
+            and not self._virt.cursor_shift_pending
+            and not self._suspend_scroll_virtual_window_watch
+            and (self.allow_vertical_scroll or force)
+        ):
+            first, last = _virtual._viewport_line_range(self, self.validate_scroll_y(y))
+            if self._virt.viewport_frame_token is None:
+                start, end = self._virt.window_start, self._virt.window_end
+            else:
+                start, end = self._virt.rendered_start, self._virt.rendered_end
+            if (
+                not start <= first <= last <= end
+                and not _virtual._replace_viewport_before_frame(self)
+            ):
+                self._virt.viewport_scroll_latched = True
+                previous_target = self.scroll_target_y
+                if release_anchor:
+                    self.release_anchor()
+                self.scroll_target_y = y
+                deferred = self.scroll_target_y != previous_target
+                y = None
+                release_anchor = False
+        return (
+            super()._scroll_to(
+                x,
+                y,
+                animate=animate,
+                speed=speed,
+                duration=duration,
+                easing=easing,
+                force=force,
+                on_complete=on_complete,
+                level=level,
+                release_anchor=release_anchor,
+            )
+            or deferred
+        )
+
+    @on(ScrollTo)
+    def _on_scrollbar_to(self, message: ScrollTo) -> None:
+        if self._virt.active and message.y is not None:
+            # Keep the latest pointer destination without animating intermediate windows.
+            message.stop().prevent_default()
+            self.scroll_to(message.x, round(message.y), animate=False, immediate=True)
+
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
         if old_value == new_value or self._suspend_scroll_virtual_window_watch:
@@ -433,10 +506,17 @@ class DiffView(VerticalScroll):
         self._search_input_widget = self.query_one("#diff-search-input", Input)
 
         self._content_widget = self.query_one("#diff-content", VerticalScroll)
+        # Unlike idle callbacks, the unbatched layout signal follows compositor output.
+        self.screen.screen_layout_refresh_signal.subscribe(
+            self,
+            lambda screen: _virtual._viewport_frame_painted(self, screen),
+            immediate=True,
+        )
         if not self._highlighter_prewarm_started:
             self._highlighter_prewarm_started = True
             self.run_worker(
                 _hl._prewarm_highlighter(self),
+                group="diff-highlight",
                 exclusive=False,
                 name="diff-highlight-prewarm",
             )
@@ -2923,7 +3003,7 @@ class DiffView(VerticalScroll):
             else:
                 state.focus_id = None
 
-    async def _render_diff(self) -> None:
+    async def _render_diff(self, *, finalize: bool = True) -> None:
         async with self.batch():
             request_token = _RENDER_REQUEST_CONTEXT.get()
             if request_token is not None and not self._is_current_render_request(
@@ -2931,7 +3011,7 @@ class DiffView(VerticalScroll):
             ):
                 return
             self._capture_comment_editors()
-            await _render._render_diff(self)
+            await _render._render_diff(self, finalize=finalize)
             await self._await_content_mounts()
             self._restore_comment_editors()
 

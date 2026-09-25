@@ -7,7 +7,7 @@ from typing import overload
 from textual.content import Content, Span
 
 from rit.core.syntax_highlighting import highlight_code
-from rit.core.types import DiffHunk, DiffLine, FileDiff
+from rit.core.types import DiffHunk, DiffLine, FileDiff, InlineSegment, WordDiffRanges
 
 __all__ = (
     "WORD_DIFF_ADDED_STYLE",
@@ -202,6 +202,8 @@ def _highlight_text_lines(
     old_lines_text: list[str],
     new_lines_text: list[str],
     dark_mode: bool = True,
+    old_start_line: int = 0,
+    new_start_line: int = 0,
 ) -> tuple[list[Content], list[Content]]:
     old_code = "\n".join(old_lines_text)
     new_code = "\n".join(new_lines_text)
@@ -214,8 +216,14 @@ def _highlight_text_lines(
             path=filename,
             dark_mode=dark_mode,
         )
-        content_lines = _highlighted_lines(highlighted, old_lines_text)
-        return content_lines, list(content_lines)
+        start_line = min(old_start_line, new_start_line)
+        content_lines = _highlighted_lines(
+            highlighted, old_lines_text, start_line=start_line
+        )
+        return (
+            content_lines[old_start_line - start_line :],
+            content_lines[new_start_line - start_line :],
+        )
 
     old_highlighted = Content.empty()
     if old_lines_text:
@@ -233,8 +241,12 @@ def _highlight_text_lines(
             dark_mode=dark_mode,
         )
 
-    old_content_lines = _highlighted_lines(old_highlighted, old_lines_text)
-    new_content_lines = _highlighted_lines(new_highlighted, new_lines_text)
+    old_content_lines = _highlighted_lines(
+        old_highlighted, old_lines_text, start_line=old_start_line
+    )
+    new_content_lines = _highlighted_lines(
+        new_highlighted, new_lines_text, start_line=new_start_line
+    )
 
     return old_content_lines, new_content_lines
 
@@ -242,12 +254,21 @@ def _highlight_text_lines(
 def _highlighted_lines(
     highlighted: Content,
     source_lines: list[str],
+    *,
+    start_line: int = 0,
 ) -> list[Content]:
     if not source_lines:
         return []
-    if len(source_lines) == 1:
+    if len(source_lines) == 1 and start_line == 0:
         return [highlighted]
-    return highlighted.split("\n")
+    offset = 0
+    for _ in range(start_line):
+        newline = highlighted.plain.find("\n", offset)
+        if newline < 0:
+            return []
+        offset = newline + 1
+    # Context is needed by the parser, not as hundreds of discarded Content rows.
+    return highlighted[offset:].split("\n")
 
 
 def apply_word_diff_spans(
@@ -276,11 +297,9 @@ def _apply_highlighted_content_to_lines(
     old_lines: list[Content],
     new_lines: list[Content],
     include_word_diff: bool,
-    old_start_idx: int = 0,
-    new_start_idx: int = 0,
 ) -> None:
-    old_idx = old_start_idx
-    new_idx = new_start_idx
+    old_idx = 0
+    new_idx = 0
 
     for line in lines:
         if line.syntax_highlighting_disabled:
@@ -360,19 +379,33 @@ def highlight_lines_for_diff_range(
             old_lines_text=old_lines_text,
             new_lines_text=new_lines_text,
             dark_mode=dark_mode,
+            old_start_line=old_offset,
+            new_start_line=new_offset,
         )
         _apply_highlighted_content_to_lines(
             selected_lines,
             old_lines=old_lines,
             new_lines=new_lines,
             include_word_diff=include_word_diff,
-            old_start_idx=old_offset,
-            new_start_idx=new_offset,
         )
 
 
-def _apply_word_diff_to_content(content: Content, segments: list) -> Content:
+def _apply_word_diff_to_content(
+    content: Content, segments: list[InlineSegment] | WordDiffRanges
+) -> Content:
     from rit.core.types import SegmentType
+
+    if isinstance(segments, tuple):
+        return content.add_spans(
+            [
+                Span(
+                    start,
+                    end,
+                    WORD_DIFF_ADDED_STYLE if kind == "added" else WORD_DIFF_DELETED_STYLE,
+                )
+                for start, end, kind in segments
+            ]
+        )
 
     spans: list[Span] = []
     pos = 0

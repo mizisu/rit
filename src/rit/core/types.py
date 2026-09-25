@@ -21,6 +21,9 @@ class SegmentType(Enum):
     DELETED = "deleted"
 
 
+type WordDiffRanges = tuple[tuple[int, int, Literal["added", "deleted"]], ...]
+
+
 @dataclass
 class InlineSegment:
     text: str
@@ -43,8 +46,9 @@ class DiffLine:
     is_deleted: bool = False
     is_modified: bool = False  # Line exists on both sides but content differs
 
-    old_segments: list[InlineSegment] = field(default_factory=list)
-    new_segments: list[InlineSegment] = field(default_factory=list)
+    # Immutable ranges share offsets with the plan cache, not per-word objects.
+    old_segments: list[InlineSegment] | WordDiffRanges = field(default_factory=list)
+    new_segments: list[InlineSegment] | WordDiffRanges = field(default_factory=list)
 
     line_index: int = 0  # Global index in diff view (0-based)
 

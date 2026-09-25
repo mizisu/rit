@@ -272,8 +272,10 @@ def _clear_mounted_render_state(view: DiffView) -> None:
     view._row_anchor_widgets = {}
     view._file_header_widgets = {}
     view._hunk_header_widgets = {}
+    view._file_header_positions.clear()
     view._virt.top_buffer = None
     view._virt.bottom_buffer = None
+    view._virt.spare_blocks.clear()
     view._center_padding_widget = None
     view._center_padding_height = 0
     view._cursor_ui.suspend_pane_watch = False
@@ -486,7 +488,9 @@ async def _render_diff_from_retained_prefix(
         return False
 
     with view.app.batch_update():
-        await content.remove_children(retained.suffix_children)
+        await _virtual._finish_widget_removal(
+            content.remove_children(retained.suffix_children)
+        )
         if not view._is_current_render_request(request_token):
             return False
 
@@ -517,7 +521,7 @@ async def _render_diff_from_retained_prefix(
     return True
 
 
-async def _render_diff(view: DiffView) -> None:
+async def _render_diff(view: DiffView, *, finalize: bool = True) -> None:
     ctx = _get_render_request_context()
     request_token = ctx.get()
     if request_token is not None and not view._is_current_render_request(request_token):
@@ -527,13 +531,17 @@ async def _render_diff(view: DiffView) -> None:
         new_content = view.query_one("#diff-content", VerticalScroll)
         view._content_widget = new_content
     with view.app.batch_update():
-        await new_content.remove_children()
+        if view._virt.active or any(new_content.styles.margin):
+            await _virtual._remove_virtual_widgets(*new_content.children)
+        else:
+            await _virtual._finish_widget_removal(new_content.remove_children())
         if request_token is not None and not view._is_current_render_request(
             request_token
         ):
             return
 
         _clear_mounted_render_state(view)
+        new_content.styles.margin = 0
 
         if not view._diff or not view._diff.hunks:
             new_content.mount(Static("No changes in this file", classes="placeholder"))
@@ -556,12 +564,13 @@ async def _render_diff(view: DiffView) -> None:
             view._virt.rendered_start = 0
             view._virt.rendered_end = len(view._all_lines) - 1
 
-    if request_token is not None:
-        view.call_after_refresh(
-            lambda: view._finalize_render_state_if_current(request_token)
-        )
-    else:
-        view.call_after_refresh(lambda: _finalize_render_state(view))
+    if finalize:
+        if request_token is not None:
+            view.call_after_refresh(
+                lambda: view._finalize_render_state_if_current(request_token)
+            )
+        else:
+            view.call_after_refresh(lambda: _finalize_render_state(view))
 
 
 def _file_for_header(view: DiffView, path: str) -> PRFile | None:
@@ -573,16 +582,18 @@ def _file_for_header(view: DiffView, path: str) -> PRFile | None:
     state = getattr(store, "state", None)
     files = getattr(state, "files", None)
     if isinstance(files, Sequence) and not isinstance(files, (str, bytes)):
-        file = next(
-            (
-                candidate
-                for candidate in files
-                if isinstance(candidate, PRFile) and candidate.filename == path
-            ),
-            None,
-        )
-        if file is not None:
-            return file
+        positions = view._file_header_positions
+        index = positions.get(path)
+        if index is not None and index < len(files):
+            file = files[index]
+            if isinstance(file, PRFile) and file.filename == path:
+                return file
+        # Cache positions, not objects: the visible list wins over stale indexes.
+        for index, candidate in enumerate(files):
+            if isinstance(candidate, PRFile):
+                positions[candidate.filename] = index
+                if candidate.filename == path:
+                    return candidate
 
     files_by_filename = getattr(state, "files_by_filename", None)
     if isinstance(files_by_filename, Mapping):
@@ -728,8 +739,7 @@ def _create_hunk_header_widget(
     hunk: DiffHunk,
 ) -> Widget:
     hunk_header = (
-        f"@@ -{hunk.old_start},{hunk.old_count} "
-        f"+{hunk.new_start},{hunk.new_count} @@"
+        f"@@ -{hunk.old_start},{hunk.old_count} +{hunk.new_start},{hunk.new_count} @@"
     )
     if hunk.header:
         hunk_header += f" {hunk.header}"

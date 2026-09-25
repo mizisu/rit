@@ -1,17 +1,30 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from contextlib import nullcontext
+from typing import ClassVar, Literal
+from unittest.mock import AsyncMock
 
 import pytest
+from textual import events
 from textual.app import App, ComposeResult
+from textual.selection import Selection
+from textual.widget import Widget
+from textual.widgets import TextArea
 
 from rit.core.diff import parse_patch
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.state.models import PRFile, ReviewThread
 from rit.state.store import PRStore
 from rit.ui.components.combined_diff import build_combined_diff_document
-from rit.ui.widgets import diff_blocks, diff_comments, diff_highlight, diff_virtual
+from rit.ui.widgets import (
+    diff_blocks,
+    diff_comments,
+    diff_folding,
+    diff_highlight,
+    diff_virtual,
+)
 from rit.ui.widgets.diff_plan import build_diff_plan
 from rit.ui.widgets.diff_types import VirtualState
 from rit.ui.widgets.diff_view import DiffView
@@ -34,8 +47,9 @@ class VirtualLineGroupView:
 
 class NoSliceLines(list):
     def __getitem__(self, index):
-        if isinstance(index, slice):
-            raise AssertionError("virtual grouping should not copy line slices")
+        assert not isinstance(index, slice), (
+            "virtual grouping should not copy line slices"
+        )
         return super().__getitem__(index)
 
 
@@ -48,9 +62,16 @@ class CursorDrivenVirtualRenderView:
             cursor_shift_pending=True,
         )
         self.refresh_callbacks: list[Callable[[], None]] = []
+        self.finalized: list[tuple[int, int]] = []
         self.revealed = False
+        self.is_mounted = True
         self.mounted = False
         self.editors_restored = False
+        self.editor_captures = 0
+
+    def _capture_comment_editors(self) -> None:
+        assert self._virt.render_pending
+        self.editor_captures += 1
 
     async def _await_content_mounts(self) -> None:
         assert self._virt.render_pending
@@ -66,13 +87,53 @@ class CursorDrivenVirtualRenderView:
     def call_after_refresh(self, callback: Callable[[], None]) -> None:
         self.refresh_callbacks.append(callback)
 
+    def _finalize_render_state_if_current(self, request_token: int) -> None:
+        assert self._is_current_render_request(request_token)
+        assert self.mounted and self.editors_restored
+        self.finalized.append((self._virt.rendered_start, self._virt.rendered_end))
+
 
 class HeaderWidget:
     def __init__(self) -> None:
         self.removed = False
 
-    async def remove(self) -> None:
-        self.removed = True
+
+@pytest.mark.asyncio
+async def test_widget_removal_finishes_before_repeated_render_cancellation() -> None:
+    started, release, closed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def message_pump_exit() -> None:
+        await release.wait()
+        closed.set()
+
+    child = asyncio.create_task(message_pump_exit())
+
+    async def remove_children() -> None:
+        started.set()
+        await asyncio.gather(child)
+
+    render = asyncio.create_task(diff_virtual._finish_widget_removal(remove_children()))
+    await started.wait()
+    render.cancel()
+    await asyncio.sleep(0)
+    assert not render.done() and not child.cancelled()
+    render.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await render
+    assert closed.is_set() and child.done() and not child.cancelled()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [ValueError, asyncio.CancelledError])
+async def test_widget_removal_propagates_its_own_failure(
+    error: type[BaseException],
+) -> None:
+    async def failed_removal() -> None:
+        raise error
+
+    with pytest.raises(error):
+        await diff_virtual._finish_widget_removal(failed_removal())
 
 
 @pytest.mark.parametrize(
@@ -136,7 +197,11 @@ def test_iter_virtualized_line_groups_does_not_copy_line_window() -> None:
 
 
 @pytest.mark.asyncio
-async def test_virtual_window_shift_preserves_file_headers() -> None:
+@pytest.mark.parametrize("mode", ["unified", "split"])
+async def test_virtual_window_shift_preserves_file_headers(
+    mode: Literal["unified", "split"],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def file_hunk(path: str) -> DiffHunk:
         return DiffHunk(
             old_start=1,
@@ -159,32 +224,39 @@ async def test_virtual_window_shift_preserves_file_headers() -> None:
 
     diff = FileDiff(
         filename="All files",
-        hunks=[file_hunk("one.py"), file_hunk("two.py")],
+        hunks=[file_hunk("one.py"), file_hunk("two.py"), file_hunk("folded.py")],
         show_hunk_headers=False,
+    )
+    diff, _ = diff_folding.build_viewed_file_fold_diff(
+        diff, is_collapsed=lambda path: path == "folded.py"
     )
 
     class TestApp(App):
         def compose(self) -> ComposeResult:
-            yield DiffView(mode="unified", id="diff-view")
+            yield DiffView(mode=mode, id="diff-view")
 
     app = TestApp()
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(100, 4)) as pilot:
         diff_view = app.query_one(DiffView)
-        diff_view.VIRTUALIZE_LINE_THRESHOLD = 1
-        diff_view.VIRTUAL_WINDOW_RADIUS = 3
-        diff_view.VIRTUAL_WINDOW_SHIFT_MARGIN = 1
+        monkeypatch.setattr(diff_view, "BLOCK_RENDER_LINE_THRESHOLD", 1)
+        monkeypatch.setattr(diff_view, "VIRTUALIZE_LINE_THRESHOLD", 1)
+        monkeypatch.setattr(diff_view, "VIRTUAL_WINDOW_RADIUS", 3)
+        monkeypatch.setattr(diff_view, "VIRTUAL_WINDOW_SHIFT_MARGIN", 1)
         await diff_view.show_diff("All files", diff)
         await pilot.pause()
 
         assert diff_view._virt.active
-        assert len(diff_view.query("#file-header-0")) == 1
+        first_header = diff_view.query_one("#file-header-0")
+        first_block = diff_view._line_widgets_by_index[3]
         assert len(diff_view.query("#file-header-1")) == 0
 
         diff_virtual._set_virtual_window_around(diff_view, 4)
         assert await diff_virtual._try_shift_virtual_window_incremental(diff_view)
         await pilot.pause()
 
-        assert len(diff_view.query("#file-header-0")) == 0
+        assert diff_view.query_one("#file-header-0") is first_header
+        assert diff_view._line_widgets_by_index[3] is first_block
+        assert diff_view._virt.rendered_start == 0
 
         diff_virtual._set_virtual_window_around(diff_view, 6)
         assert await diff_virtual._try_shift_virtual_window_incremental(diff_view)
@@ -193,6 +265,20 @@ async def test_virtual_window_shift_preserves_file_headers() -> None:
         second_header = diff_view.query_one("#file-header-1")
         second_file_lines = diff_view._line_widgets_by_index[8]
         assert second_header.region.y < second_file_lines.region.y
+
+        diff_virtual._set_virtual_window_around(diff_view, 10)
+        assert await diff_virtual._try_shift_virtual_window_incremental(diff_view)
+        await pilot.pause()
+        assert len(diff_view.query("#file-header-0")) == 0
+        assert diff_view.query_one("#file-header-1") is second_header
+        assert diff_view._line_widgets_by_index[8] is second_file_lines
+
+        for center in (14, 12, 14, 10):
+            diff_virtual._set_virtual_window_around(diff_view, center)
+            assert await diff_virtual._try_shift_virtual_window_incremental(diff_view)
+            await pilot.pause()
+            assert bool(diff_view.query("#file-header-2")) is (center == 14)
+            assert 16 not in diff_view._line_widgets_by_index
 
         diff_virtual._set_virtual_window_around(diff_view, 4)
         assert await diff_virtual._try_shift_virtual_window_incremental(diff_view)
@@ -317,70 +403,347 @@ async def test_virtual_scroll_preserves_per_file_layout_for_code_and_comments(
 
         assert_layout()
         for center in (15, 30, 45, 60, 75, 90, 105, 90, 75, 60, 45, 30, 15, 5):
+            previous_lines = dict(view._line_widgets_by_index)
+            previous_headers = dict(view._file_header_widgets)
+            previous_comments = dict(view._comment_layout_widgets_by_line)
             diff_virtual._set_virtual_window_around(view, center)
             assert await diff_virtual._try_shift_virtual_window_incremental(view)
             await pilot.pause()
             assert_layout()
+            for index in previous_lines.keys() & view._line_widgets_by_index.keys():
+                assert view._line_widgets_by_index[index] is previous_lines[index]
+            for index in previous_headers.keys() & view._file_header_widgets.keys():
+                assert view._file_header_widgets[index] is previous_headers[index]
+            for index in (
+                previous_comments.keys() & view._comment_layout_widgets_by_line.keys()
+            ):
+                assert (
+                    view._comment_layout_widgets_by_line[index]
+                    is previous_comments[index]
+                )
 
 
-def test_mount_virtualized_ranges_at_bottom_uses_sorted_repair_order(
+@pytest.mark.parametrize("first,last", [(0, 20), (30, 80), (89, 99)])
+def test_viewport_window_covers_both_edges(
+    first: int, last: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view = DiffView()
+    view._all_lines = [DiffLine(1, 1, "line", "line")] * 100
+    view._virt.active = True
+    monkeypatch.setattr(view, "VIRTUAL_WINDOW_RADIUS", 3)
+    monkeypatch.setattr(
+        diff_virtual, "_viewport_line_range", lambda _view: (first, last)
+    )
+
+    assert diff_virtual._set_virtual_window_from_viewport(view)
+    assert view._virt.window_start == max(0, first - 3)
+    assert view._virt.window_end == min(99, last + 3)
+    assert not diff_virtual._set_virtual_window_from_viewport(view)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cursor_driven", [False, True])
+async def test_pending_scroll_uses_latest_viewport_without_overriding_cursor(
+    cursor_driven: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class RangeRecord:
-        def __init__(self, start: int, end: int) -> None:
-            self.start = start
-            self.end = end
+    view = DiffView()
+    view._all_lines = [DiffLine(1, 1, "line", "line")] * 100
+    view._virt = VirtualState(
+        active=True,
+        window_start=20,
+        window_end=30,
+        render_pending=True,
+        cursor_shift_pending=cursor_driven,
+        coalesced_center=90,
+    )
+    monkeypatch.setattr(view, "VIRTUAL_WINDOW_RADIUS", 3)
+    monkeypatch.setattr(view, "batch", nullcontext)
+    monkeypatch.setattr(diff_virtual, "_viewport_line_range", lambda _view: (80, 95))
+    render = AsyncMock()
+    monkeypatch.setattr(diff_virtual, "_render_virtual_window_and_finalize", render)
 
-        def __iter__(self):
-            return iter((self.start, self.end))
-
-        def __lt__(self, _other: object) -> bool:
-            raise AssertionError("bottom repair ranges should not be resorted")
-
-    mounted: list[tuple[int, int]] = []
-    monkeypatch.setattr(
-        diff_virtual,
-        "_mount_virtualized_lines_at_bottom",
-        lambda _view, _container, start, end: mounted.append((start, end)),
+    await diff_virtual._run_virtual_window_render_for_request(
+        view, view._render_request_token
     )
 
-    diff_virtual._mount_virtualized_ranges_at_bottom(
-        object(),
-        object(),
-        [RangeRecord(1, 2), RangeRecord(5, 7)],
+    render.assert_awaited_once_with(view)
+    assert (view._virt.window_start, view._virt.window_end) == (
+        (20, 30) if cursor_driven else (77, 98)
     )
+    assert view._virt.coalesced_center == (90 if cursor_driven else None)
 
-    assert mounted == [(1, 2), (5, 7)]
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["unified", "split"])
+async def test_wheel_scroll_covers_viewport_and_survives_widget_retirement(
+    mode: Literal["unified", "split"], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lines = [
+        DiffLine(number, number, f"old_{number}", f"new_{number}", is_modified=True)
+        for number in range(1, 1001)
+    ]
+    diff = FileDiff("test.py", hunks=[DiffHunk(1, 1000, 1, 1000, lines=lines)])
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode=mode)
+
+    app = TestApp()
+    async with app.run_test(size=(120, 30)) as pilot:
+        view = app.query_one(DiffView)
+        await view.show_diff("test.py", diff)
+        await pilot.pause()
+        cursor = view.cursor_line
+        x, y = 40, 15
+
+        async def wheel(
+            event_type: type[events.MouseScrollDown | events.MouseScrollUp],
+        ) -> None:
+            await app.on_event(
+                event_type(
+                    widget=None,
+                    x=x,
+                    y=y,
+                    delta_x=0,
+                    delta_y=0,
+                    button=0,
+                    shift=False,
+                    meta=False,
+                    ctrl=False,
+                )
+            )
+
+        async def settled_at(expected_y: float) -> None:
+            await wait_until(
+                lambda: view.scroll_y == expected_y and not view._virt.render_pending,
+                timeout=5.0,
+            )
+            await pilot.pause()
+            first, last = diff_virtual._viewport_line_range(view)
+            assert view._virt.rendered_start <= first <= last <= view._virt.rendered_end
+            assert view.cursor_line == cursor
+            region = view.scrollable_content_region
+            strips = app.screen._compositor.render_strips()
+            assert all(
+                strips[row].text.strip() for row in range(region.y, region.bottom)
+            )
+            assert set(view._line_widgets_by_index) == set(
+                range(view._virt.rendered_start, view._virt.rendered_end + 1)
+            )
+            assert len(view._line_widgets_by_index) <= (
+                region.height
+                + 2 * diff_virtual._effective_virtual_window_radius(view)
+                + 2 * view.UNIFIED_BLOCK_CHUNK_SIZE
+            )
+
+        content = view.query_one("#diff-content")
+        content.styles.height = 3
+        await pilot.pause()
+        assert content.virtual_size.height > content.content_size.height
+        assert not content.allow_vertical_scroll
+        y = content.region.y + 1
+        await wheel(events.MouseScrollDown)
+        await wait_until(lambda: view.scroll_y == app.scroll_sensitivity_y, timeout=5.0)
+        assert content.scroll_y == 0
+        content.styles.height = "auto"
+        view.scroll_to(y=0, animate=False)
+        y = 15
+        await pilot.pause()
+
+        for _ in range(12):
+            await wheel(events.MouseScrollDown)
+        await settled_at(12 * app.scroll_sensitivity_y)
+
+        old_target, _ = app.screen.get_widget_at(x, y)
+        assert old_target.has_class("code-content")
+        remove = diff_virtual._remove_virtual_widgets
+        injected = False
+
+        async def remove_with_wheel(*widgets: Widget) -> None:
+            nonlocal injected
+            inject = not injected and any(
+                old_target in widget.walk_children(with_self=True) for widget in widgets
+            )
+            if inject:
+                injected = True
+                await wheel(events.MouseScrollDown)
+            await remove(*widgets)
+            if inject:
+                assert old_target._closed
+                target, _ = app.screen.get_widget_at(x, y)
+                assert not target._closed and not target._closing
+                await wheel(events.MouseScrollDown)
+
+        monkeypatch.setattr(diff_virtual, "_remove_virtual_widgets", remove_with_wheel)
+        with monkeypatch.context() as retirement:
+            retirement.setattr(
+                diff_virtual,
+                "_reuse_virtual_code_blocks",
+                AsyncMock(return_value=False),
+            )
+            view._virt.render_pending = True
+            diff_virtual._set_virtual_window_around(view, 500)
+            destination = view._line_top_offsets[500]
+            view.scroll_to(y=destination, animate=False)
+            await diff_virtual._run_virtual_window_render_for_request(
+                view, view._render_request_token
+            )
+        assert injected
+        expected = destination + 2 * app.scroll_sensitivity_y
+        await settled_at(expected)
+
+        for direction, event_type in (
+            (1, events.MouseScrollDown),
+            (-1, events.MouseScrollUp),
+        ):
+            for _ in range(48):
+                await wheel(event_type)
+            expected += direction * 48 * app.scroll_sensitivity_y
+            await settled_at(expected)
+
+        view.cursor_line = view._viewport_center_line()
+        await pilot.pause()
+        assert await view.open_inline_comment_editor()
+        await pilot.pause()
+        editor = view._inline_comment_editor_widget
+        assert editor is not None
+        body = editor.query_one(TextArea)
+        body.text = "draft kept while scrolling"
+        body.move_cursor((0, 7))
+        await pilot.pause()
+        line = view.cursor_line
+        for step, center in enumerate((line + 3, line - 3, line + 120, line)):
+            diff_virtual._set_virtual_window_around(view, center)
+            view._virt.render_pending = True
+            await diff_virtual._run_virtual_window_render_for_request(
+                view, view._render_request_token
+            )
+            await wait_until(lambda: not view._virt.render_pending, timeout=5.0)
+            await pilot.pause()
+            current = view._inline_comment_editor_widget
+            if step == 2:
+                assert current is None
+                continue
+            assert current is not None
+            if step < 2:
+                assert current is editor
+            current_body = current.query_one(TextArea)
+            assert current_body.text == "draft kept while scrolling"
+            assert current_body.cursor_location == (0, 7)
 
 
-def test_mount_virtualized_ranges_at_top_uses_reverse_repair_order(
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["unified", "split"])
+async def test_virtual_spare_blocks_survive_changing_file_sizes(
+    mode: Literal["unified", "split"],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class RangeRecord:
-        def __init__(self, start: int, end: int) -> None:
-            self.start = start
-            self.end = end
+    hunks = [
+        DiffHunk(
+            1,
+            size,
+            1,
+            size,
+            lines=[
+                DiffLine(i, i, f"file{file}:{i}", f"file{file}:{i}")
+                for i in range(1, size + 1)
+            ],
+            starts_file=True,
+            file_path=f"file{file}.py",
+        )
+        for file, size in enumerate([10] * 8 + [1000] + [10] * 8)
+    ]
 
-        def __iter__(self):
-            return iter((self.start, self.end))
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode=mode)
 
-        def __lt__(self, _other: object) -> bool:
-            raise AssertionError("top repair ranges should not be resorted")
+    app = TestApp()
+    async with app.run_test(size=(100, 12)) as pilot:
+        view = app.query_one(DiffView)
+        await view.show_diff(
+            "files.py", FileDiff("files.py", hunks=hunks, show_hunk_headers=False)
+        )
+        content = view.query_one("#diff-content")
+        warmed: set[Widget] = set()
+        for step, line in enumerate((20, 500, 1120, 20, 500, 1120, 20)):
+            view.scroll_to(y=view._line_top_offsets[line], animate=False)
+            await wait_until(
+                lambda: (
+                    not view._virt.render_pending
+                    and not view._hl_state.window_worker_active
+                ),
+                timeout=5.0,
+            )
+            await pilot.pause()
+            blocks = set(content.query(".diff-block"))
+            if step == 2:
+                warmed = blocks
+            elif step > 2:
+                assert blocks == warmed
+            assert len(view._virt.spare_blocks) <= view.scrollable_content_region.height
+            assert all(
+                not block.display and not block.line_indices
+                for block in view._virt.spare_blocks
+            )
+            assert all(
+                not node.visible
+                for block in view._virt.spare_blocks
+                for node in block.walk_children(Widget, with_self=True)
+            )
+            assert set(view._virt.spare_blocks).isdisjoint(
+                view._line_widgets_by_index.values()
+            )
+            assert view.virtual_size.height == (
+                view._virtual_content_height + content.scrollbar_size_horizontal
+            )
+            first, last = diff_virtual._viewport_line_range(view)
+            assert view._virt.rendered_start <= first <= last <= view._virt.rendered_end
 
-    mounted: list[tuple[int, int]] = []
-    monkeypatch.setattr(
-        diff_virtual,
-        "_mount_virtualized_lines_at_top",
-        lambda _view, _container, start, end: mounted.append((start, end)),
-    )
+        old_y = view.scroll_y
+        old_headers = set(view._file_header_widgets)
+        remove_headers = diff_virtual._remove_stale_virtual_file_headers
+        redirected = False
 
-    diff_virtual._mount_virtualized_ranges_at_top(
-        object(),
-        object(),
-        [RangeRecord(1, 2), RangeRecord(5, 7)],
-    )
+        async def return_during_retirement(
+            view: DiffView, start: int, end: int
+        ) -> None:
+            nonlocal redirected
+            await remove_headers(view, start, end)
+            if not redirected:
+                redirected = True
+                view.scroll_to(y=old_y, animate=False, immediate=True)
 
-    assert mounted == [(5, 7), (1, 2)]
+        with monkeypatch.context() as retirement:
+            retirement.setattr(
+                diff_virtual,
+                "_remove_stale_virtual_file_headers",
+                return_during_retirement,
+            )
+            view.scroll_to(y=view._line_top_offsets[500], animate=False)
+            await wait_until(
+                lambda: redirected and not view._virt.render_pending, timeout=5.0
+            )
+            await pilot.pause()
+        assert view.scroll_y == old_y
+        assert set(view._file_header_widgets) == old_headers
+        assert set(content.query(".diff-block")) == warmed
+        assert view.virtual_size.height == (
+            view._virtual_content_height + content.scrollbar_size_horizontal
+        )
+
+        spare = view._virt.spare_blocks[0]
+        code = spare.query_one(".code-content")
+        app.screen.selections = {code: Selection(None, None)}
+        view.scroll_to(y=view._line_top_offsets[500], animate=False)
+        await wait_until(lambda: not view._virt.render_pending, timeout=5.0)
+        await pilot.pause()
+        assert spare._closed
+        assert not view._virt.spare_blocks
+        await view.show_diff("small.py", parse_patch("@@ -1 +1 @@\n small", "small.py"))
+        await pilot.pause()
+        assert not view._virt.spare_blocks and all(block._closed for block in warmed)
 
 
 def test_extra_heights_single_entries_skip_sum(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -388,8 +751,10 @@ def test_extra_heights_single_entries_skip_sum(monkeypatch: pytest.MonkeyPatch) 
     thread = object()
 
     class View:
-        _pending_comment_drafts_by_line = {3: [draft]}
-        _comment_threads_by_line = {3: [thread]}
+        _pending_comment_drafts_by_line: ClassVar[dict[int, list[object]]] = {
+            3: [draft]
+        }
+        _comment_threads_by_line: ClassVar[dict[int, list[object]]] = {3: [thread]}
 
     monkeypatch.setattr(
         diff_virtual,
@@ -414,9 +779,17 @@ def test_extra_heights_single_entries_skip_sum(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.asyncio
-async def test_clear_virtual_hunk_headers_does_not_copy_header_items() -> None:
+async def test_clear_virtual_hunk_headers_does_not_copy_header_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        diff_virtual,
+        "_remove_virtual_widgets",
+        AsyncMock(side_effect=lambda header: setattr(header, "removed", True)),
+    )
+
     class NoListItems:
-        def __init__(self, items: object) -> None:
+        def __init__(self, items: Iterable[tuple[int, HeaderWidget]]) -> None:
             self._items = items
 
         def __iter__(self):
@@ -443,9 +816,15 @@ async def test_clear_virtual_hunk_headers_does_not_copy_header_items() -> None:
 
 
 @pytest.mark.asyncio
-async def test_remove_stale_virtual_hunk_headers_does_not_copy_all_header_keys() -> (
-    None
-):
+async def test_remove_stale_virtual_hunk_headers_does_not_copy_all_header_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        diff_virtual,
+        "_remove_virtual_widgets",
+        AsyncMock(side_effect=lambda header: setattr(header, "removed", True)),
+    )
+
     class HeaderMap(dict[int, HeaderWidget]):
         def __iter__(self):
             raise AssertionError("stale header cleanup should not copy all keys")
@@ -502,6 +881,43 @@ async def test_cursor_driven_virtual_render_stays_pending_until_revealed(
 
     assert view.revealed is True
     assert view._virt.render_pending is False
+
+
+@pytest.mark.asyncio
+async def test_pending_viewport_catches_up_before_releasing_render_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = CursorDrivenVirtualRenderView()
+    view._virt.cursor_shift_pending = False
+    view._virt.window_start, view._virt.window_end = 0, 10
+    rendered: list[tuple[int, int]] = []
+
+    async def shifted(_view: CursorDrivenVirtualRenderView) -> bool:
+        start, end = _view._virt.window_start, _view._virt.window_end
+        _view._virt.rendered_start, _view._virt.rendered_end = start, end
+        rendered.append((start, end))
+        _view._virt.coalesced_center = 25 if len(rendered) == 1 else None
+        return True
+
+    def latest_window(_view: CursorDrivenVirtualRenderView) -> bool:
+        _view._virt.window_start, _view._virt.window_end = 17, 33
+        return True
+
+    monkeypatch.setattr(diff_virtual, "_try_shift_virtual_window_incremental", shifted)
+    monkeypatch.setattr(diff_virtual, "_viewport_line_range", lambda _view: (20, 30))
+    monkeypatch.setattr(
+        diff_virtual, "_set_virtual_window_from_viewport", latest_window
+    )
+
+    await diff_virtual._render_virtual_window_and_finalize(view)
+
+    assert rendered == [(0, 10), (17, 33)]
+    assert len(view.refresh_callbacks) == 1
+    view.refresh_callbacks[0]()
+    assert view.finalized == [(17, 33)]
+    assert view.editor_captures == 1
+    assert view.editors_restored
+    assert not view._virt.render_pending
 
 
 @pytest.mark.asyncio
@@ -563,7 +979,6 @@ async def test_latest_placement_survives_virtual_render(
             + view.scrollable_content_region.height // 2
         )
         await wait_until(
-            lambda: "line300"
-            in app.screen._compositor.render_strips()[center].text,
+            lambda: "line300" in app.screen._compositor.render_strips()[center].text,
             timeout=5.0,
         )

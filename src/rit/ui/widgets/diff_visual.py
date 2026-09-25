@@ -169,7 +169,8 @@ class LineAnnotations(Widget):
         self.numbers = list(numbers)
         self.line_styles = list(line_styles or [])
 
-    def watch_numbers(self, numbers: list[Content]) -> None:
+    def watch_numbers(self, old_numbers: list[Content], numbers: list[Content]) -> None:
+        old_width = self._number_width
         count = len(numbers)
         if count == 0:
             self._number_width = 0
@@ -177,6 +178,8 @@ class LineAnnotations(Widget):
             self._number_width = numbers[0].cell_length
         else:
             self._number_width = max(number.cell_length for number in numbers)
+        if len(old_numbers) != count or old_width != self._number_width:
+            self.refresh(layout=True)
 
     @property
     def total_width(self) -> int:
@@ -280,6 +283,16 @@ class DiffCode(Static):
     """
 
     ALLOW_SELECT = True
+
+    def update_block(self, content: LineContent) -> None:
+        """Replace code rows without relayout when their dimensions are unchanged."""
+        visual = self.visual
+        same_size = (
+            isinstance(visual, LineContent)
+            and len(visual.line_styles) == len(content.line_styles)
+            and visual._content_width == content._content_width
+        )
+        self.update(content, layout=not same_size)
 
     def render_line(self, y: int) -> Strip:
         self._dirty_regions.clear()

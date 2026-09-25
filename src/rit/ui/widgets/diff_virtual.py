@@ -2,20 +2,26 @@
 
 from __future__ import annotations
 
+import asyncio
 from bisect import bisect_left, bisect_right
-from collections.abc import Iterator, Sequence
+from collections.abc import Awaitable, Iterator, Sequence
+from contextlib import ExitStack
 from contextvars import ContextVar
+from time import monotonic
 from typing import TYPE_CHECKING, overload
 
+from textual.constants import MAX_FPS
 from textual.containers import VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Static
 
-from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_folding as _folding
 from rit.ui.widgets import diff_geometry as _geometry
+from rit.ui.widgets.diff_types import SplitDiffBlock, UnifiedDiffBlock, VirtualState
 
 if TYPE_CHECKING:
+    from textual.screen import Screen
+
     from rit.core.types import DiffLine
     from rit.state.models import PendingReviewComment
     from rit.ui.widgets.diff_view import DiffView
@@ -184,13 +190,27 @@ def _extra_heights_by_hunk(view) -> dict[int, int]:
     return extra_heights
 
 
+def _viewport_line_range(
+    view: DiffView, scroll_y: float | None = None
+) -> tuple[int, int]:
+    top = int(view.scroll_y if scroll_y is None else scroll_y)
+    bottom = top + max(1, view.scrollable_content_region.height) - 1
+    return (
+        view._line_index_at_vertical_offset(top),
+        view._line_index_at_vertical_offset(bottom),
+    )
+
+
 def _set_virtual_window_from_viewport(view) -> bool:
     if not view._virt.active or not view._all_lines:
         return False
 
     old_start = view._virt.window_start
     old_end = view._virt.window_end
-    _set_virtual_window_around(view, view._viewport_center_line())
+    first, last = _viewport_line_range(view)
+    radius = _effective_virtual_window_radius(view)
+    view._virt.window_start = max(0, first - radius)
+    view._virt.window_end = min(len(view._all_lines) - 1, last + radius)
     return view._virt.window_start != old_start or view._virt.window_end != old_end
 
 
@@ -202,33 +222,141 @@ def _maybe_update_virtual_window_from_viewport(view) -> None:
         view._virt.suppress_next_viewport_shift = False
         return
 
-    center_line = view._viewport_center_line()
+    first, last = _viewport_line_range(view)
     margin = _effective_virtual_window_shift_margin(view)
     start = view._virt.window_start
     end = view._virt.window_end
 
-    if not (center_line < start + margin or center_line > end - margin):
+    if not (
+        (start > 0 and first < start + margin)
+        or (end < len(view._all_lines) - 1 and last > end - margin)
+    ):
         return
 
     if view._virt.render_pending:
         if not view._virt.cursor_shift_pending:
-            view._virt.coalesced_center = center_line
+            view._virt.coalesced_center = view._viewport_center_line()
         return
 
     view._virt.coalesced_center = None
-    _set_virtual_window_around(view, center_line)
+    if not _set_virtual_window_from_viewport(view):
+        return
     view._virt.render_pending = True
-    view.run_worker(
-        _run_virtual_window_render_for_request(view, view._render_request_token),
-        exclusive=True,
-        name="diff-virtual-window-scroll-shift",
+    _queue_viewport_render(view)
+
+
+def _queue_viewport_render(view: DiffView) -> None:
+    # Reserve painting before the worker starts, and release even if it is
+    # cancelled before entering its coroutine (where finally cannot run).
+    batch = ExitStack()
+    batch.enter_context(view.app.batch_update())
+    request_token = view._render_request_token
+    state = view._virt
+    state.viewport_scroll_latched = (
+        state.window_start > state.rendered_end
+        or state.window_end < state.rendered_start
     )
+
+    async def render() -> None:
+        try:
+            await _run_virtual_window_render_for_request(view, request_token)
+            if (
+                state.viewport_scroll_latched
+                and view._virt is state
+                and view._is_current_render_request(request_token)
+                and not state.cursor_shift_pending
+                and state.viewport_worker is worker
+            ):
+                state.render_pending = True
+                state.viewport_frame_token = request_token
+                view.refresh(layout=True)
+        finally:
+            batch.close()
+
+    try:
+        worker = view.run_worker(
+            render,
+            start=False,
+            exclusive=True,
+            name="diff-virtual-window-scroll-shift",
+        )
+        view._virt.viewport_worker = worker
+        # Textual's terminal runner uses eager tasks; publish ownership before start.
+        view.workers.add_worker(worker, start=True, exclusive=False)
+        completion = asyncio.create_task(worker.wait())
+    except BaseException:
+        batch.close()
+        state.viewport_scroll_latched = False
+        state.render_pending = False
+        raise
+
+    def release(completed: asyncio.Task[None]) -> None:
+        try:
+            if not completed.cancelled():
+                completed.exception()  # The Textual worker reports failures to App.
+        finally:
+            if view._virt.viewport_worker is worker:
+                view._virt.viewport_worker = None
+                if worker.is_cancelled and not view._virt.cursor_shift_pending:
+                    view._virt.viewport_frame_token = None
+                    view._virt.viewport_scroll_latched = False
+                    view._virt.render_pending = False
+            batch.close()
+
+    completion.add_done_callback(release)
+
+
+def _replace_viewport_before_frame(view: DiffView) -> bool:
+    # A fast replacement can meet the next paint; after two frame periods paint
+    # wins, regardless of further input. This budget is not a latency guarantee.
+    state = view._virt
+    if (
+        state.viewport_frame_token is None
+        or not view._is_current_render_request(state.viewport_frame_token)
+        or monotonic() - state.viewport_painted_at >= 2 / MAX_FPS
+    ):
+        return False
+    state.viewport_frame_token = None
+    state.viewport_scroll_latched = False
+    state.render_pending = False
+    return True
+
+
+def _viewport_frame_painted(view: DiffView, screen: Screen) -> None:
+    if view.app._batch_count or screen is not view.app.screen:
+        return
+    state = view._virt
+    state.viewport_painted_at = monotonic()
+    token = state.viewport_frame_token
+    if token is None:
+        return
+    state.viewport_frame_token = None
+    _resume_viewport_scroll(view, state, token)
+
+
+def _resume_viewport_scroll(
+    view: DiffView, state: VirtualState, request_token: int
+) -> None:
+    if (
+        view._virt is not state
+        or not view._is_current_render_request(request_token)
+        or state.cursor_shift_pending
+    ):
+        return
+    state.render_pending = False
+    state.viewport_scroll_latched = False
+    view.scroll_to(
+        y=view.scroll_target_y, animate=False, immediate=True, release_anchor=False
+    )
+    _maybe_update_virtual_window_from_viewport(view)
 
 
 def _configure_virtual_window(view) -> None:
     total_lines = len(view._all_lines)
     view._virt.active = view._render_policy_line_count > view.VIRTUALIZE_LINE_THRESHOLD
     view._virt.render_pending = False
+    view._virt.viewport_frame_token = None
+    view._virt.viewport_scroll_latched = False
 
     if total_lines == 0:
         view._virt.window_start = 0
@@ -336,25 +464,61 @@ def _visible_hunk_index_range(
     return range(first, last + 1)
 
 
-@staticmethod
-def _set_virtual_buffer_height(view, widget: Static, height: int) -> None:
-    widget.styles.height = max(1, height)
+async def _finish_widget_removal(removal: Awaitable[None]) -> None:
+    """Finish pruning even when a replacement render cancels its caller."""
+    task = asyncio.ensure_future(removal)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            cancelled = True
+    task.result()
+    if cancelled:
+        raise asyncio.CancelledError
 
 
-async def _remove_virtualized_lines(
-    view,
-    start: int,
-    end: int,
-    *,
-    preserve_start: int | None = None,
-    preserve_end: int | None = None,
-) -> list[tuple[int, int]]:
+async def _remove_virtual_widgets(*widgets: Widget) -> None:
+    levels: list[list[Widget]] = []
+    nodes = list(widgets)
+    # The compositor may still hit-test the old layout until this batch finishes.
+    # Explicit visibility survives detachment; inherited visibility does not.
+    while nodes:
+        levels.append(nodes)
+        for node in nodes:
+            node.visible = False
+        nodes = [
+            child
+            for node in nodes
+            for child in (*node.children, *node._get_virtual_dom())
+        ]
+    # Drain children before their parents so queued wheel events can still bubble.
+    for level in reversed(levels):
+        pending: list[asyncio.Event] = []
+        for node in level:
+            drained = asyncio.Event()
+            if node.is_running and node.call_later(drained.set):
+                pending.append(drained)
+        for drained in pending:
+            await drained.wait()
+    if (
+        widgets
+        and isinstance(parent := widgets[0].parent, Widget)
+        and all(widget.parent is parent for widget in widgets)
+    ):
+        await _finish_widget_removal(parent.remove_children(widgets))
+    else:
+        for widget in widgets:
+            await _finish_widget_removal(widget.remove())
+
+
+async def _remove_virtualized_lines(view, start: int, end: int) -> None:
     if start > end:
-        return []
+        return
 
-    removed_blocks: set[int] = set()
-    repair_ranges: list[tuple[int, int]] = []
-
+    widgets: list[Widget] = []
     comment_widgets_map = getattr(view, "_comment_widgets_by_line", {})
     comment_layout_widgets_map = getattr(view, "_comment_layout_widgets_by_line", {})
     pending_draft_widgets_map = getattr(view, "_pending_comment_widgets_by_line", {})
@@ -368,49 +532,21 @@ async def _remove_virtualized_lines(
     )
 
     for line_idx in range(start, end + 1):
-        comment_layout_widgets = comment_layout_widgets_map.pop(line_idx, [])
-        if comment_layout_widgets:
-            for cw in comment_layout_widgets:
-                await cw.remove()
-            comment_widgets_map.pop(line_idx, None)
-        else:
-            for cw in comment_widgets_map.pop(line_idx, []):
-                await cw.remove()
-
-        pending_draft_layout_widgets = pending_draft_layout_widgets_map.pop(
-            line_idx, []
-        )
-        if pending_draft_layout_widgets:
-            for dw in pending_draft_layout_widgets:
-                await dw.remove()
-            pending_draft_widgets_map.pop(line_idx, None)
-        else:
-            for dw in pending_draft_widgets_map.pop(line_idx, []):
-                await dw.remove()
+        comments = comment_widgets_map.pop(line_idx, [])
+        widgets.extend(comment_layout_widgets_map.pop(line_idx, []) or comments)
+        drafts = pending_draft_widgets_map.pop(line_idx, [])
+        widgets.extend(pending_draft_layout_widgets_map.pop(line_idx, []) or drafts)
 
         if line_idx == inline_editor_line and inline_editor_widget is not None:
-            if inline_editor_layout_widget is not None:
-                await inline_editor_layout_widget.remove()
-                view._inline_comment_editor_layout_widget = None
-            else:
-                await inline_editor_widget.remove()
+            widgets.append(inline_editor_layout_widget or inline_editor_widget)
+            view._inline_comment_editor_layout_widget = None
             view._inline_comment_editor_widget = None
 
         block = view._unified_blocks_by_line.get(line_idx)
         if block is None:
             block = view._split_blocks_by_line.get(line_idx)
         if block is not None:
-            block_id = id(block)
-            if block_id not in removed_blocks:
-                removed_blocks.add(block_id)
-                if preserve_start is not None and preserve_end is not None:
-                    block_start = block.line_indices[0]
-                    block_end = block.line_indices[-1]
-                    overlap_start = max(block_start, preserve_start)
-                    overlap_end = min(block_end, preserve_end)
-                    if overlap_start <= overlap_end:
-                        repair_ranges.append((overlap_start, overlap_end))
-                await block.remove()
+            widgets.append(block)
             for block_line_idx in block.line_indices:
                 view._code_widgets_by_line.pop(block_line_idx, None)
                 view._unregister_line_widgets(block_line_idx)
@@ -418,12 +554,12 @@ async def _remove_virtualized_lines(
 
         line_widget = view._get_line_container(line_idx)
         if line_widget is not None:
-            await line_widget.remove()
+            widgets.append(line_widget)
 
         view._code_widgets_by_line.pop(line_idx, None)
         view._unregister_line_widgets(line_idx)
 
-    return _geometry.merge_line_ranges(repair_ranges, already_sorted=True)
+    await _remove_virtual_widgets(*widgets)
 
 
 async def _remove_mounted_file_comment_editor(view, hunk_index: int) -> None:
@@ -431,7 +567,7 @@ async def _remove_mounted_file_comment_editor(view, hunk_index: int) -> None:
         return
     editor = view._file_comment_editor_widget
     if editor is not None:
-        await editor.remove()
+        await _remove_virtual_widgets(editor)
     view._file_comment_editor_widget = None
     view._file_comment_editor_mounted_hunk_index = None
 
@@ -440,14 +576,13 @@ async def _remove_mounted_file_comment_annotations(view, hunk_index: int) -> Non
     widgets = view._file_comment_annotation_widgets_by_hunk.pop(hunk_index, ())
     view._pending_file_comment_widgets_by_hunk.pop(hunk_index, None)
     view._file_comment_widgets_by_hunk.pop(hunk_index, None)
-    for widget in widgets:
-        await widget.remove()
+    await _remove_virtual_widgets(*widgets)
 
 
 async def _clear_virtual_file_headers(view) -> None:
     while view._file_header_widgets:
         hunk_index, header_widget = view._file_header_widgets.popitem()
-        await header_widget.remove()
+        await _remove_virtual_widgets(header_widget)
         await _remove_mounted_file_comment_annotations(view, hunk_index)
         await _remove_mounted_file_comment_editor(view, hunk_index)
 
@@ -455,7 +590,7 @@ async def _clear_virtual_file_headers(view) -> None:
 async def _clear_virtual_hunk_headers(view) -> None:
     while view._hunk_header_widgets:
         _, header_widget = view._hunk_header_widgets.popitem()
-        await header_widget.remove()
+        await _remove_virtual_widgets(header_widget)
 
 
 async def _remove_stale_virtual_file_headers(
@@ -469,8 +604,8 @@ async def _remove_stale_virtual_file_headers(
             continue
         stale_headers.append((hunk_index, header_widget))
 
-    for hunk_index, header_widget in stale_headers:
-        await header_widget.remove()
+    await _remove_virtual_widgets(*(widget for _, widget in stale_headers))
+    for hunk_index, _ in stale_headers:
         view._file_header_widgets.pop(hunk_index, None)
         await _remove_mounted_file_comment_annotations(view, hunk_index)
         await _remove_mounted_file_comment_editor(view, hunk_index)
@@ -487,8 +622,8 @@ async def _remove_stale_virtual_hunk_headers(
             continue
         stale_headers.append((hunk_index, header_widget))
 
-    for hunk_index, header_widget in stale_headers:
-        await header_widget.remove()
+    await _remove_virtual_widgets(*(widget for _, widget in stale_headers))
+    for hunk_index, _ in stale_headers:
         view._hunk_header_widgets.pop(hunk_index, None)
 
 
@@ -632,18 +767,16 @@ async def _sync_virtual_buffers(
 ) -> None:
     top_height = _virtual_top_buffer_height(view, window_start, window_end)
     bottom_height = _virtual_bottom_buffer_height(view, window_end)
+    container.styles.margin = (top_height, 0, bottom_height, 0)
 
     top_buffer = view._virt.top_buffer
     if top_height > 0:
-        if isinstance(top_buffer, Static):
-            _set_virtual_buffer_height(view, top_buffer, top_height)
-        else:
+        if top_buffer is None:
             widget = Static(
                 "",
                 classes="placeholder -virtual-buffer",
                 id="virtual-buffer-top",
             )
-            _set_virtual_buffer_height(view, widget, top_height)
             first_child = container.children[0] if container.children else None
             if first_child is not None:
                 container.mount(widget, before=first_child)
@@ -651,24 +784,21 @@ async def _sync_virtual_buffers(
                 container.mount(widget)
             view._virt.top_buffer = widget
     elif top_buffer is not None:
-        await top_buffer.remove()
+        await _remove_virtual_widgets(top_buffer)
         view._virt.top_buffer = None
 
     bottom_buffer = view._virt.bottom_buffer
     if bottom_height > 0:
-        if isinstance(bottom_buffer, Static):
-            _set_virtual_buffer_height(view, bottom_buffer, bottom_height)
-        else:
+        if bottom_buffer is None:
             widget = Static(
                 "",
                 classes="placeholder -virtual-buffer",
                 id="virtual-buffer-bottom",
             )
-            _set_virtual_buffer_height(view, widget, bottom_height)
             container.mount(widget)
             view._virt.bottom_buffer = widget
     elif bottom_buffer is not None:
-        await bottom_buffer.remove()
+        await _remove_virtual_widgets(bottom_buffer)
         view._virt.bottom_buffer = None
 
 
@@ -676,7 +806,7 @@ def _iter_virtualized_line_groups(
     view,
     start: int,
     end: int,
-) -> Iterator[Sequence[DiffLine]]:
+) -> Iterator[_VirtualLineWindow]:
     if view._diff is None or start > end or not view._all_lines:
         return
 
@@ -760,31 +890,131 @@ def _mount_virtualized_lines_at_top(
     _mount_virtualized_lines(view, container, start, end, before=anchor)
 
 
-def _mount_virtualized_ranges_at_top(
-    view,
-    container: VerticalScroll,
-    ranges: list[tuple[int, int]],
+def _display_virtual_block(
+    block: UnifiedDiffBlock | SplitDiffBlock, display: bool
 ) -> None:
-    for start, end in reversed(ranges):
-        _mount_virtualized_lines_at_top(view, container, start, end)
+    """Exclude parked descendants from the compositor's previous hit-test map."""
+    for node in block.walk_children(Widget, with_self=True):
+        node.styles.visibility = None if display else "hidden"
+        for child in node._get_virtual_dom():
+            child.styles.visibility = None if display else "hidden"
+    block.display = display
 
 
-def _mount_virtualized_ranges_at_bottom(
-    view,
-    container: VerticalScroll,
-    ranges: list[tuple[int, int]],
-) -> None:
-    for start, end in ranges:
-        _mount_virtualized_lines_at_bottom(view, container, start, end)
+async def _reuse_virtual_code_blocks(
+    view: DiffView,
+    content: VerticalScroll,
+    removed_ranges: tuple[tuple[int, int], tuple[int, int]],
+    added_ranges: tuple[tuple[int, int], tuple[int, int]],
+) -> bool:
+    """Rebind outgoing code blocks without closing their input queues or children."""
+    from rit.ui.widgets import diff_blocks as _blocks
+
+    diff = view._diff
+    if diff is None:
+        return False
+    outgoing: dict[UnifiedDiffBlock | SplitDiffBlock, None] = {}
+    for start, end in removed_ranges:
+        for index in range(start, end + 1):
+            widget = view._line_widgets_by_index.get(index)
+            if not isinstance(
+                widget, (UnifiedDiffBlock, SplitDiffBlock)
+            ) or not _blocks._can_render_in_unified_block(view, view._all_lines[index]):
+                return False
+            if widget not in outgoing and any(
+                child.text_selection is not None or child is view.app.mouse_captured
+                for child in widget.walk_children(Widget, with_self=True)
+            ):
+                return False
+            outgoing[widget] = None
+    if not outgoing:
+        return False
+
+    chunks: list[tuple[int, bool, list[DiffLine]]] = []
+    for edge, (start, end) in enumerate(added_ranges):
+        for lines in _iter_virtualized_line_groups(view, start, end):
+            hunk = diff.hunks[view._hunk_index_by_line[lines[0].line_index]]
+            split = view._split_for_hunk(hunk)
+            eligible = (
+                _blocks._can_render_in_split_block
+                if split
+                else _blocks._can_render_in_unified_block
+            )
+            if any(
+                _folding.is_folded_placeholder_line(line) or not eligible(view, line)
+                for line in lines
+            ):
+                return False
+            for offset in range(0, len(lines), view.UNIFIED_BLOCK_CHUNK_SIZE):
+                chunks.append(
+                    (
+                        edge,
+                        split,
+                        lines[offset : offset + view.UNIFIED_BLOCK_CHUNK_SIZE],
+                    )
+                )
+
+    for block in view._virt.spare_blocks:
+        if block.parent is not content or any(
+            child.text_selection is not None or child is view.app.mouse_captured
+            for child in block.walk_children(Widget, with_self=True)
+        ):
+            return False
+    outgoing.update((block, None) for block in view._virt.spare_blocks)
+    view._virt.spare_blocks.clear()
+    unified = [block for block in outgoing if isinstance(block, UnifiedDiffBlock)]
+    split_blocks = [block for block in outgoing if isinstance(block, SplitDiffBlock)]
+    top_anchor = next(
+        (
+            child
+            for child in content.children
+            if child.id != "virtual-buffer-top" and child not in outgoing
+        ),
+        None,
+    )
+    for block in outgoing:
+        for index in block.line_indices:
+            view._unregister_line_widgets(index)
+            view._code_widgets_by_line.pop(index, None)
+
+    for edge, split, lines in chunks:
+        anchor = top_anchor if edge == 0 else view._virt.bottom_buffer
+        if split:
+            if not split_blocks:
+                _blocks._render_split_line_block(view, content, lines, before=anchor)
+                continue
+            block = split_blocks.pop()
+            block.set_line_indices(line.line_index for line in lines)
+            _blocks._refresh_split_block(view, block)
+            _blocks._register_split_block(view, block, lines)
+        else:
+            if not unified:
+                _blocks._render_unified_line_block(view, content, lines, before=anchor)
+                continue
+            block = unified.pop()
+            block.set_line_indices(line.line_index for line in lines)
+            _blocks._refresh_unified_block(view, block)
+            _blocks._register_unified_block(view, block, lines)
+        if not block.display:
+            _display_virtual_block(block, True)
+        if anchor is not None:
+            content.move_child(block, before=anchor)
+        else:
+            content.move_child(block, after=-1)
+
+    unused = [*unified, *split_blocks]
+    limit = max(0, view.scrollable_content_region.height)
+    for block in unused[:limit]:
+        block.set_line_indices(())
+        _display_virtual_block(block, False)
+        view._virt.spare_blocks.append(block)
+    await _remove_virtual_widgets(*unused[limit:])
+    return True
 
 
 async def _try_shift_virtual_window_incremental(view) -> bool:
     if not view._virt.active or view._diff is None or not view.is_mounted:
         return False
-
-    grouped_blocks_active = _blocks._should_use_unified_block_renderer(
-        view
-    ) or _blocks._should_use_split_block_renderer(view)
 
     old_start = view._virt.rendered_start
     old_end = view._virt.rendered_end
@@ -794,87 +1024,68 @@ async def _try_shift_virtual_window_incremental(view) -> bool:
     if old_end < old_start or new_end < new_start:
         return False
 
+    request_token = _RENDER_REQUEST_CONTEXT.get()
+    retargeted = False
+    while True:
+        # Keep intersecting blocks intact so scrolling preserves their render caches.
+        for blocks in (view._unified_blocks_by_line, view._split_blocks_by_line):
+            if (block := blocks.get(new_start)) is not None:
+                new_start = block.line_indices[0]
+            if (block := blocks.get(new_end)) is not None:
+                new_end = block.line_indices[-1]
+        view._virt.window_start = new_start
+        view._virt.window_end = new_end
+        if (new_start, new_end) == (old_start, old_end) and not retargeted:
+            return True
+
+        await _remove_stale_virtual_file_headers(view, new_start, new_end)
+        await _remove_stale_virtual_hunk_headers(view, new_start, new_end)
+        if request_token is not None and not view._is_current_render_request(
+            request_token
+        ):
+            return False
+        if view._virt.cursor_shift_pending or view._virt.coalesced_center is None:
+            break
+        first, last = _viewport_line_range(view)
+        if new_start <= first <= last <= new_end:
+            break
+        # Input can overtake us while header queues drain. Build the latest window,
+        # rather than materializing a stale one and immediately throwing it away.
+        view._virt.coalesced_center = None
+        _set_virtual_window_from_viewport(view)
+        new_start, new_end = view._virt.window_start, view._virt.window_end
+        retargeted = True
+
     content = view.query_one("#diff-content", VerticalScroll)
 
-    # For large jumps, clearing and rendering the new window is cheaper than
-    # individually removing every old block/header.
-    if grouped_blocks_active and (new_start > old_end + 1 or new_end < old_start - 1):
-        return False
-
-    # Downward shift (append bottom, drop top)
-    if new_start >= old_start and new_end >= old_end:
-        # No overlap (large jump) -> fallback to full render.
-        if new_start > old_end + 1:
+    removed_ranges = (
+        (old_start, min(old_end, new_start - 1)),
+        (max(old_start, new_end + 1), old_end),
+    )
+    added_ranges = (
+        (new_start, min(new_end, old_start - 1)),
+        (max(new_start, old_end + 1), new_end),
+    )
+    reused = await _reuse_virtual_code_blocks(
+        view, content, removed_ranges, added_ranges
+    )
+    if not reused:
+        if new_start > old_end + 1 or new_end < old_start - 1:
             return False
+        for start, end in removed_ranges:
+            await _remove_virtualized_lines(view, start, end)
 
-        dropped_start = old_start
-        dropped_end = min(old_end, new_start - 1)
-        preserve_start = new_start
-        preserve_end = old_end
-        repair_ranges = await _remove_virtualized_lines(
-            view,
-            dropped_start,
-            dropped_end,
-            preserve_start=preserve_start if grouped_blocks_active else None,
-            preserve_end=preserve_end if grouped_blocks_active else None,
-        )
+    if not reused:
+        _mount_virtualized_lines_at_top(view, content, *added_ranges[0])
+        _mount_virtualized_lines_at_bottom(view, content, *added_ranges[1])
+    await _sync_visible_virtual_file_headers(view, content, new_start, new_end)
+    await _sync_visible_virtual_hunk_headers(view, content, new_start, new_end)
+    await _sync_virtual_buffers(view, content, new_start, new_end)
 
-        await _remove_stale_virtual_file_headers(view, new_start, new_end)
-        await _remove_stale_virtual_hunk_headers(view, new_start, new_end)
-
-        if grouped_blocks_active and repair_ranges:
-            _mount_virtualized_ranges_at_top(view, content, repair_ranges)
-
-        added_start = max(old_end + 1, new_start)
-        added_end = new_end
-        _mount_virtualized_lines_at_bottom(view, content, added_start, added_end)
-        await _sync_visible_virtual_file_headers(view, content, new_start, new_end)
-        await _sync_visible_virtual_hunk_headers(view, content, new_start, new_end)
-
-        await _sync_virtual_buffers(view, content, new_start, new_end)
-
-        view._virt.rendered_start = new_start
-        view._virt.rendered_end = new_end
-        view._visual_selection_specs = {}
-        return True
-
-    # Upward shift (prepend top, drop bottom)
-    if new_start <= old_start and new_end <= old_end:
-        # No overlap (large jump) -> fallback to full render.
-        if new_end < old_start - 1:
-            return False
-
-        dropped_start = max(old_start, new_end + 1)
-        dropped_end = old_end
-        preserve_start = old_start
-        preserve_end = new_end
-        repair_ranges = await _remove_virtualized_lines(
-            view,
-            dropped_start,
-            dropped_end,
-            preserve_start=preserve_start if grouped_blocks_active else None,
-            preserve_end=preserve_end if grouped_blocks_active else None,
-        )
-
-        await _remove_stale_virtual_file_headers(view, new_start, new_end)
-        await _remove_stale_virtual_hunk_headers(view, new_start, new_end)
-
-        added_start = new_start
-        added_end = min(old_start - 1, new_end)
-        _mount_virtualized_lines_at_top(view, content, added_start, added_end)
-        if grouped_blocks_active and repair_ranges:
-            _mount_virtualized_ranges_at_bottom(view, content, repair_ranges)
-        await _sync_visible_virtual_file_headers(view, content, new_start, new_end)
-        await _sync_visible_virtual_hunk_headers(view, content, new_start, new_end)
-
-        await _sync_virtual_buffers(view, content, new_start, new_end)
-
-        view._virt.rendered_start = new_start
-        view._virt.rendered_end = new_end
-        view._visual_selection_specs = {}
-        return True
-
-    return False
+    view._virt.rendered_start = new_start
+    view._virt.rendered_end = new_end
+    view._visual_selection_specs = {}
+    return True
 
 
 def _reveal_cursor_after_virtual_render(view, request_token: int) -> None:
@@ -894,6 +1105,8 @@ def _reveal_cursor_after_virtual_render(view, request_token: int) -> None:
 def _complete_cursor_driven_virtual_render(view, request_token: int) -> None:
     if not view._is_current_render_request(request_token):
         return
+    view._virt.viewport_frame_token = None
+    view._virt.viewport_scroll_latched = False
     view._virt.render_pending = False
     _reveal_cursor_after_virtual_render(view, request_token)
 
@@ -904,6 +1117,12 @@ async def _run_virtual_window_render_for_request(view, request_token: int) -> No
         async with view.batch():
             if not view._is_current_render_request(request_token):
                 return
+            if (
+                not view._virt.cursor_shift_pending
+                and view._virt.coalesced_center is not None
+            ):
+                _set_virtual_window_from_viewport(view)
+                view._virt.coalesced_center = None
             view._capture_comment_editors()
             await _render_virtual_window_and_finalize(view)
     finally:
@@ -917,27 +1136,55 @@ async def _render_virtual_window_and_finalize(view) -> None:
     if not view._is_current_render_request(request_token):
         return
 
-    try:
-        updated = await _try_shift_virtual_window_incremental(view)
+    if view._virt.viewport_scroll_latched and not view._virt.cursor_shift_pending:
+        saved = view._suspend_scroll_virtual_window_watch
+        view._suspend_scroll_virtual_window_watch = True
+        try:
+            view.scroll_y = view.scroll_target_y
+        finally:
+            view._suspend_scroll_virtual_window_watch = saved
+        _set_virtual_window_from_viewport(view)
+
+    while True:
+        try:
+            updated = await _try_shift_virtual_window_incremental(view)
+            if not view._is_current_render_request(request_token):
+                return
+
+            if not updated:
+                await view._render_diff(finalize=False)
+            await view._await_content_mounts()
+            view._restore_comment_editors()
+        except Exception:
+            if view._is_current_render_request(request_token):
+                view._virt.render_pending = False
+            raise
+
         if not view._is_current_render_request(request_token):
             return
+        if (
+            view._virt.cursor_shift_pending
+            or view._virt.coalesced_center is None
+            or not view._virt.active
+            or not view.is_mounted
+        ):
+            break
+        first, last = _viewport_line_range(view)
+        if view._virt.rendered_start <= first <= last <= view._virt.rendered_end:
+            break
 
-        if updated:
-            view.call_after_refresh(
-                lambda: view._finalize_render_state_if_current(request_token)
-            )
-        else:
-            await view._render_diff()
-        await view._await_content_mounts()
-        view._restore_comment_editors()
-    except Exception:
-        if view._is_current_render_request(request_token):
-            view._virt.render_pending = False
-        raise
+        # A queued worker would release the batch and expose an obsolete window
+        # to paint. Catch up inside this batch when input has outrun its coverage.
+        view._virt.coalesced_center = None
+        if not _set_virtual_window_from_viewport(view):
+            break
+        view._capture_comment_editors()
 
-    if not view._is_current_render_request(request_token):
-        return
-
+    # call_after_refresh also runs on Screen idle inside a batch. Finalize only
+    # the completed window, not intermediate windows already overtaken by input.
+    view.call_after_refresh(
+        lambda: view._finalize_render_state_if_current(request_token)
+    )
     cursor_driven = view._virt.cursor_shift_pending
     view._virt.cursor_shift_pending = False
     queued_center = view._virt.coalesced_center
@@ -966,25 +1213,17 @@ async def _render_virtual_window_and_finalize(view) -> None:
         )
         return
 
+    # Overlapping wheel windows must also yield when the last paint is overdue.
+    if (
+        view._virt.viewport_worker is not None
+        and view._virt.viewport_worker.is_running
+        and monotonic() - view._virt.viewport_painted_at >= 2 / MAX_FPS
+    ):
+        view._virt.viewport_scroll_latched = True
     view._virt.render_pending = False
 
-    if queued_center is None or not view._virt.active or not view.is_mounted:
-        return
-
-    margin = _effective_virtual_window_shift_margin(view)
-    if not (
-        queued_center < view._virt.window_start + margin
-        or queued_center > view._virt.window_end - margin
-    ):
-        return
-
-    _set_virtual_window_around(view, queued_center)
-    view._virt.render_pending = True
-    view.run_worker(
-        _run_virtual_window_render_for_request(view, view._render_request_token),
-        exclusive=True,
-        name="diff-virtual-window-scroll-shift",
-    )
+    if queued_center is not None and not view._virt.viewport_scroll_latched:
+        _maybe_update_virtual_window_from_viewport(view)
 
 
 def _render_virtual_window(view, container: VerticalScroll) -> None:
@@ -999,13 +1238,16 @@ def _render_virtual_window(view, container: VerticalScroll) -> None:
     end = min(total_lines - 1, view._virt.window_end)
 
     top_buffer_height = _virtual_top_buffer_height(view, start, end)
+    bottom_buffer_height = _virtual_bottom_buffer_height(view, end)
+    # Tall blank widgets make Textual invalidate a dirty row for every offscreen
+    # line. Margins preserve scroll geometry without document-sized paint caches.
+    container.styles.margin = (top_buffer_height, 0, bottom_buffer_height, 0)
     if top_buffer_height > 0:
         top_buffer = Static(
             "",
             classes="placeholder -virtual-buffer",
             id="virtual-buffer-top",
         )
-        _set_virtual_buffer_height(view, top_buffer, top_buffer_height)
         container.mount(top_buffer)
         view._virt.top_buffer = top_buffer
 
@@ -1022,13 +1264,11 @@ def _render_virtual_window(view, container: VerticalScroll) -> None:
             show_header=view._should_render_hunk_header(hunk_index, start, end),
         )
 
-    bottom_buffer_height = _virtual_bottom_buffer_height(view, end)
     if bottom_buffer_height > 0:
         bottom_buffer = Static(
             "",
             classes="placeholder -virtual-buffer",
             id="virtual-buffer-bottom",
         )
-        _set_virtual_buffer_height(view, bottom_buffer, bottom_buffer_height)
         container.mount(bottom_buffer)
         view._virt.bottom_buffer = bottom_buffer

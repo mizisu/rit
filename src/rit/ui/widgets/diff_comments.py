@@ -69,10 +69,11 @@ __all__ = (
 )
 
 
-COLLAPSED_PENDING_DRAFT_HEIGHT = 1
-COLLAPSED_THREAD_HEIGHT = 1
+# Inline ReviewThreadItem borders occupy two rows even when collapsed.
+COLLAPSED_PENDING_DRAFT_HEIGHT = 3
+COLLAPSED_THREAD_HEIGHT = 3
 COMMENT_HEIGHT_ESTIMATE = 3  # header + ~2 body lines
-PENDING_DRAFT_HEIGHT_ESTIMATE = 5
+PENDING_DRAFT_HEIGHT_ESTIMATE = 6
 INLINE_COMMENT_MAX_WIDTH = 96
 
 
@@ -82,7 +83,7 @@ def estimate_thread_height(thread: ReviewThread) -> int:
     n = len(thread.comments)
     if n == 0:
         return COLLAPSED_THREAD_HEIGHT
-    return 2 + n * COMMENT_HEIGHT_ESTIMATE
+    return 4 + n * COMMENT_HEIGHT_ESTIMATE
 
 
 def clear_state(view: DiffView) -> None:
@@ -1556,7 +1557,7 @@ def _update_thread_widget_resolved(
 
 def estimate_pending_draft_height(draft: PendingReviewComment) -> int:
     body_lines = max(1, _count_body_lines(draft.body))
-    return max(PENDING_DRAFT_HEIGHT_ESTIMATE, body_lines + 3)
+    return max(PENDING_DRAFT_HEIGHT_ESTIMATE, body_lines + 5)
 
 
 def _count_body_lines(body: str) -> int:

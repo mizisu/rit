@@ -113,6 +113,7 @@ def _queue_highlight_diff(view, filename: str, diff: FileDiff) -> None:
     view._hl_state.full_worker_active = True
     view.run_worker(
         partial(_drain_queued_full_highlights, view),
+        group="diff-highlight",
         exclusive=False,
         name="diff-highlight",
     )
@@ -185,9 +186,7 @@ def _line_has_highlight(view, line: DiffLine) -> bool:
         return True
     if line.old_content and line.highlighted_old_content is None:
         return False
-    if line.new_content and line.highlighted_new_content is None:
-        return False
-    return True
+    return not (line.new_content and line.highlighted_new_content is None)
 
 
 def _current_highlight_window(view) -> tuple[int, int]:
@@ -231,18 +230,6 @@ def _current_highlight_window(view) -> tuple[int, int]:
     return start, end
 
 
-def _is_highlight_range_ready(view, start: int, end: int) -> bool:
-    if start > end:
-        return True
-
-    for line_index in range(start, end + 1):
-        if line_index >= len(view._all_lines):
-            break
-        if not _line_has_highlight(view, view._all_lines[line_index]):
-            return False
-    return True
-
-
 def _ensure_visible_highlight(view) -> None:
     if view._diff is None or view.current_file is None:
         return
@@ -250,10 +237,12 @@ def _ensure_visible_highlight(view) -> None:
         return
 
     start, end = _current_highlight_window(view)
-    if start > end or _is_highlight_range_ready(view, start, end):
-        return
-
-    _queue_highlight_diff_range(view, view.current_file, view._diff, start, end)
+    while start <= end and _line_has_highlight(view, view._all_lines[start]):
+        start += 1
+    while start <= end and _line_has_highlight(view, view._all_lines[end]):
+        end -= 1
+    if start <= end:
+        _queue_highlight_diff_range(view, view.current_file, view._diff, start, end)
 
 
 def _queue_highlight_diff_range(
@@ -304,6 +293,7 @@ def _queue_highlight_diff_range(
     view._hl_state.window_worker_active = True
     view.run_worker(
         partial(_drain_queued_window_highlights, view),
+        group="diff-highlight",
         exclusive=False,
         name="diff-highlight-window",
     )
