@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Coroutine, Iterable
 from contextlib import nullcontext
 from typing import ClassVar, Literal
 from unittest.mock import AsyncMock
@@ -68,6 +68,17 @@ class CursorDrivenVirtualRenderView:
         self.mounted = False
         self.editors_restored = False
         self.editor_captures = 0
+        self.layout_reflows = 0
+
+    def _reflow_retained_layout(self) -> None:
+        assert self.mounted and self.editors_restored
+        self.layout_reflows += 1
+
+    def run_worker(
+        self, coroutine: Coroutine[object, object, None], **_kwargs: object
+    ) -> None:
+        coroutine.close()
+        raise AssertionError("Catch up before releasing the current render batch")
 
     def _capture_comment_editors(self) -> None:
         assert self._virt.render_pending
@@ -669,14 +680,17 @@ async def test_virtual_spare_blocks_survive_changing_file_sizes(
         warmed: set[Widget] = set()
         for step, line in enumerate((20, 500, 1120, 20, 500, 1120, 20)):
             view.scroll_to(y=view._line_top_offsets[line], animate=False)
+            await pilot.pause()
             await wait_until(
                 lambda: (
                     not view._virt.render_pending
+                    and view._virt.viewport_worker is None
                     and not view._hl_state.window_worker_active
+                    and view.virtual_size.height
+                    == view._virtual_content_height + content.scrollbar_size_horizontal
                 ),
                 timeout=5.0,
             )
-            await pilot.pause()
             blocks = set(content.query(".diff-block"))
             if step == 2:
                 warmed = blocks
@@ -855,8 +869,48 @@ async def test_remove_stale_virtual_hunk_headers_does_not_copy_all_header_keys(
     assert view._hunk_header_widgets == {1: visible}
 
 
+@pytest.mark.parametrize("outside", [False, True])
+def test_cursor_takes_over_a_prepared_viewport_frame(
+    outside: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    view = CursorDrivenVirtualRenderView()
+    state = view._virt
+    state.window_start, state.window_end = 0, 100
+    state.rendered_start, state.rendered_end = 0, 100
+    state.cursor_shift_pending = False
+    state.viewport_frame_token = view._render_request_token
+    state.viewport_scroll_latched = True
+    state.coalesced_center = 55
+    state.pending_scroll = lambda: None
+    launches: list[int] = []
+
+    def set_window(_view: CursorDrivenVirtualRenderView, center: int) -> None:
+        _view._virt.window_start, _view._virt.window_end = center - 20, center + 20
+
+    def run_worker(
+        coroutine: Coroutine[object, object, None], **_kwargs: object
+    ) -> None:
+        coroutine.close()
+        launches.append(state.window_start)
+
+    monkeypatch.setattr(view, "run_worker", run_worker)
+    monkeypatch.setattr(
+        diff_virtual, "_effective_virtual_window_shift_margin", lambda _: 1
+    )
+    monkeypatch.setattr(diff_virtual, "_set_virtual_window_around", set_window)
+
+    diff_virtual._maybe_update_virtual_window(view, 250 if outside else 50)
+
+    assert state.viewport_frame_token is None
+    assert not state.viewport_scroll_latched
+    assert state.coalesced_center is None and state.pending_scroll is None
+    assert state.render_pending is outside
+    assert state.cursor_shift_pending is outside
+    assert len(launches) == int(outside)
+
+
 @pytest.mark.asyncio
-async def test_cursor_driven_virtual_render_stays_pending_until_revealed(
+async def test_cursor_driven_virtual_render_reveals_before_releasing_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view = CursorDrivenVirtualRenderView()
@@ -865,6 +919,8 @@ async def test_cursor_driven_virtual_render_stays_pending_until_revealed(
         return True
 
     def revealed(_view: CursorDrivenVirtualRenderView, _request_token: int) -> None:
+        assert _view.layout_reflows == 1
+        assert not _view._virt.render_pending
         _view.revealed = True
 
     monkeypatch.setattr(diff_virtual, "_try_shift_virtual_window_incremental", shifted)
@@ -872,23 +928,21 @@ async def test_cursor_driven_virtual_render_stays_pending_until_revealed(
 
     await diff_virtual._render_virtual_window_and_finalize(view)
 
-    assert view._virt.render_pending is True
     assert view.mounted and view.editors_restored
-    assert view.refresh_callbacks
-    assert view.revealed is False
-
-    view.refresh_callbacks.pop()()
-
+    assert len(view.refresh_callbacks) == 1
     assert view.revealed is True
+    assert view.layout_reflows == 2
     assert view._virt.render_pending is False
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("cursor_driven", [False, True])
 async def test_pending_viewport_catches_up_before_releasing_render_batch(
+    cursor_driven: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     view = CursorDrivenVirtualRenderView()
-    view._virt.cursor_shift_pending = False
+    view._virt.cursor_shift_pending = cursor_driven
     view._virt.window_start, view._virt.window_end = 0, 10
     rendered: list[tuple[int, int]] = []
 
@@ -908,15 +962,32 @@ async def test_pending_viewport_catches_up_before_releasing_render_batch(
     monkeypatch.setattr(
         diff_virtual, "_set_virtual_window_from_viewport", latest_window
     )
+    monkeypatch.setattr(
+        diff_virtual, "_effective_virtual_window_shift_margin", lambda _: 1
+    )
+    monkeypatch.setattr(
+        diff_virtual,
+        "_set_virtual_window_around",
+        lambda _view, _: latest_window(_view),
+    )
+    monkeypatch.setattr(
+        diff_virtual,
+        "_reveal_cursor_after_virtual_render",
+        lambda _view, _: setattr(_view, "revealed", True),
+    )
 
     await diff_virtual._render_virtual_window_and_finalize(view)
 
     assert rendered == [(0, 10), (17, 33)]
     assert len(view.refresh_callbacks) == 1
-    view.refresh_callbacks[0]()
+    assert view.revealed is cursor_driven
+    assert view.layout_reflows == (2 if cursor_driven else 1)
+    for callback in view.refresh_callbacks:
+        callback()
     assert view.finalized == [(17, 33)]
     assert view.editor_captures == 1
     assert view.editors_restored
+    assert view.revealed is cursor_driven
     assert not view._virt.render_pending
 
 

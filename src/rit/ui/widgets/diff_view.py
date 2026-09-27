@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from bisect import bisect_right
 from collections.abc import Callable, Collection, Sequence
 from contextlib import nullcontext
 from contextvars import ContextVar
@@ -509,7 +510,7 @@ class DiffView(VerticalScroll):
         # Unlike idle callbacks, the unbatched layout signal follows compositor output.
         self.screen.screen_layout_refresh_signal.subscribe(
             self,
-            lambda screen: _virtual._viewport_frame_painted(self, screen),
+            self._on_layout_refresh,
             immediate=True,
         )
         if not self._highlighter_prewarm_started:
@@ -520,6 +521,10 @@ class DiffView(VerticalScroll):
                 exclusive=False,
                 name="diff-highlight-prewarm",
             )
+
+    def _on_layout_refresh(self, screen: Screen) -> None:
+        self._refresh_sticky_header()
+        _virtual._viewport_frame_painted(self, screen)
 
     def watch_active_pane(
         self,
@@ -2311,6 +2316,7 @@ class DiffView(VerticalScroll):
                 self._committing_render_token = None
                 self._suspend_split_state_rerender = False
                 self._suspend_scroll_virtual_window_watch = False
+            self._refresh_sticky_header(force=True)
             return layout == (self.mode, self.size.width)
 
     async def _apply_render_plan(
@@ -2548,17 +2554,13 @@ class DiffView(VerticalScroll):
                 position is not None
                 and self._file_navigation_revision == navigation_revision
             ):
-                # Retained fold widgets need settling; previews mount a fresh window.
-                if fold_state is not None:
-                    self._reflow_fold_layout()
-                else:
-                    self.screen._refresh_layout()
+                self._reflow_retained_layout()
                 position.restore_scroll(self, mounted=True)
                 if fold_state is not None:
-                    self._reflow_fold_layout()
+                    self._reflow_retained_layout()
 
-    def _reflow_fold_layout(self) -> None:
-        """Settle retained container geometry while fold painting is paused."""
+    def _reflow_retained_layout(self) -> None:
+        """Settle retained container geometry while painting is paused."""
         containers = [
             widget for widget in (self._content_widget, self) if widget is not None
         ]

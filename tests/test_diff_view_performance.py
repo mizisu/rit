@@ -2,7 +2,7 @@
 
 import asyncio
 import threading
-from typing import Literal
+from typing import Literal, cast
 from unittest.mock import Mock
 
 import pytest
@@ -46,6 +46,7 @@ def _diff_view_render_idle(diff_view: DiffView) -> bool:
         and diff_view._hl_state.queued_window is None
         and not diff_view._cursor_ui.flush_pending
         and not diff_view._virt.render_pending
+        and diff_view._virt.viewport_worker is None
     )
 
 
@@ -657,6 +658,8 @@ def test_mounted_block_row_bounds_does_not_copy_line_indices() -> None:
         is_mounted = True
         line_indices = NoListLineIndices((3, 4, 5))
         region = Region(0, 20, 20, 3)
+        virtual_region = Region(0, 25, 20, 3)
+        parent: object | None = None
 
     class ScrollableContentRegion:
         y = 5
@@ -664,6 +667,7 @@ def test_mounted_block_row_bounds_does_not_copy_line_indices() -> None:
     class View:
         split = False
         scroll_y = 10
+        _layout_required = False
         scrollable_content_region = ScrollableContentRegion()
         _unified_blocks_by_line = {5: Block()}
         _split_blocks_by_line = {}
@@ -684,7 +688,12 @@ def test_mounted_block_row_bounds_does_not_copy_line_indices() -> None:
         new_line_no=5,
     )
 
-    assert _cursor_mod._mounted_block_row_vertical_bounds(View(), row) == (28, 29)
+    stub = View()
+    stub._unified_blocks_by_line[5].parent = stub
+    view = cast(DiffView, stub)
+    assert _cursor_mod._mounted_block_row_vertical_bounds(view, row) == (28, 29)
+    view.scroll_y = 42
+    assert _cursor_mod._mounted_block_row_vertical_bounds(view, row) == (28, 29)
 
 
 def test_mounted_block_row_bounds_finds_row_in_single_pass() -> None:
@@ -702,6 +711,8 @@ def test_mounted_block_row_bounds_finds_row_in_single_pass() -> None:
         is_mounted = True
         line_indices = NoIndexLineIndices((3, 4, 5))
         region = Region(0, 20, 20, 3)
+        virtual_region = Region(0, 25, 20, 3)
+        parent: object | None = None
 
     class ScrollableContentRegion:
         y = 5
@@ -709,6 +720,7 @@ def test_mounted_block_row_bounds_finds_row_in_single_pass() -> None:
     class View:
         split = False
         scroll_y = 10
+        _layout_required = False
         scrollable_content_region = ScrollableContentRegion()
         _unified_blocks_by_line = {5: Block()}
         _split_blocks_by_line = {}
@@ -729,7 +741,10 @@ def test_mounted_block_row_bounds_finds_row_in_single_pass() -> None:
         new_line_no=5,
     )
 
-    assert _cursor_mod._mounted_block_row_vertical_bounds(View(), row) == (28, 29)
+    stub = View()
+    stub._unified_blocks_by_line[5].parent = stub
+    view = cast(DiffView, stub)
+    assert _cursor_mod._mounted_block_row_vertical_bounds(view, row) == (28, 29)
 
 
 def test_build_comment_map_reuses_planned_file_paths_without_line_scan() -> None:
@@ -1915,7 +1930,7 @@ async def test_large_diff_uses_windowed_rendering_and_shifts_with_cursor() -> No
             yield DiffView(mode="unified", id="diff-view")
 
     app = TestApp()
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(100, 12)) as pilot:
         diff_view = app.query_one(DiffView)
 
         # Lower thresholds for deterministic test behavior.
@@ -3064,7 +3079,7 @@ async def test_cursor_coalesces_pending_virtual_window_updates(
     async with app.run_test(size=(100, 12)) as pilot:
         diff_view = app.query_one(DiffView)
         diff_view.VIRTUALIZE_LINE_THRESHOLD = 10
-        diff_view.VIRTUAL_WINDOW_RADIUS = 3
+        diff_view.VIRTUAL_WINDOW_RADIUS = 12
         diff_view.VIRTUAL_WINDOW_SHIFT_MARGIN = 1
 
         diff = parse_patch(patch, "big.py")
@@ -3091,26 +3106,23 @@ async def test_cursor_coalesces_pending_virtual_window_updates(
         )
 
         diff_view.cursor_line = 80
-        await pilot.pause()
-        await pilot.pause()
-
-        assert started.wait(timeout=1.0) is True
+        await wait_until(started.is_set)
 
         diff_view.cursor_line = 360
-        await pilot.pause()
-        await pilot.pause()
-
-        queued_center = diff_view._virt.coalesced_center
-        assert queued_center == 360
+        await wait_until(lambda: diff_view._virt.coalesced_center == 360)
 
         unblock.set()
-        await pilot.pause()
-        await pilot.pause()
-        await pilot.pause()
-        await pilot.pause()
+        await wait_until(lambda: not diff_view._virt.render_pending)
 
-        assert calls["count"] == 2
+        assert calls["count"] == 1
         assert diff_view._virt.rendered_start <= 360 <= diff_view._virt.rendered_end
+        first, last = _virtual_mod._viewport_line_range(diff_view)
+        assert (
+            diff_view._virt.rendered_start
+            <= first
+            <= last
+            <= diff_view._virt.rendered_end
+        )
 
 
 @pytest.mark.asyncio
@@ -3595,6 +3607,9 @@ async def test_grouped_virtual_large_jump_reuses_blocks(
         assert render_calls["count"] == baseline_calls + 1
         assert original_block._closed
         assert diff_view._line_widgets_by_index[20] is not original_block
+        previous_render_finalized = asyncio.Event()
+        diff_view.call_after_refresh(previous_render_finalized.set)
+        await previous_render_finalized.wait()
 
         finalized: list[int] = []
         original_finalize = diff_view._finalize_render_state_if_current

@@ -189,6 +189,80 @@ async def test_continuous_native_input_paints_before_producer_stops(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["unified", "split"])
+async def test_held_half_page_keys_paint_covered_viewports(
+    mode: Literal["unified", "split"],
+) -> None:
+    observing = False
+    painted: list[int] = []
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode=mode)
+
+        def _display(self, screen: Screen, renderable: RenderableType | None) -> None:
+            super()._display(screen, renderable)
+            if observing and renderable is not None and not self._batch_count:
+                view = self.query_one(DiffView)
+                first, last = diff_virtual._viewport_line_range(view)
+                assert (
+                    view._virt.rendered_start
+                    <= first
+                    <= last
+                    <= view._virt.rendered_end
+                )
+                painted.append(view.cursor_line)
+
+    loop = asyncio.get_running_loop()
+    factory = loop.get_task_factory()
+    loop.set_task_factory(asyncio.eager_task_factory)
+    try:
+        app = TestApp()
+        async with app.run_test(size=(216, 67)) as pilot:
+            view = app.query_one(DiffView)
+            patch = "@@ -1,801 +1,801 @@\n" + "\n".join(
+                f" line{number}" for number in range(1, 802)
+            )
+            await view.show_diff("test.py", parse_patch(patch, "test.py"))
+            view.focus()
+            await pilot.pause()
+            assert view._virt.active
+            observing = True
+            step = view._half_page_step()
+            target = 0
+            for key, character, direction in (
+                ("ctrl+d", "\x04", 1),
+                ("ctrl+u", "\x15", -1),
+            ):
+                for _ in range(5):
+                    previous_paints = len(painted)
+                    target += 4 * step * direction
+                    for _ in range(4):
+                        app.post_message(events.Key(key, character))
+                    await wait_until(
+                        lambda target=target, previous_paints=previous_paints: (
+                            view.cursor_line == target
+                            and not view._virt.render_pending
+                            and target in painted[previous_paints:]
+                        ),
+                        timeout=5,
+                    )
+                    row = view._current_row()
+                    assert row is not None
+                    assert view._row_is_visible(row), (
+                        view.cursor_line,
+                        view.scroll_y,
+                        view._row_vertical_bounds(row),
+                        diff_virtual._viewport_line_range(view),
+                        (view._virt.rendered_start, view._virt.rendered_end),
+                    )
+            assert view.cursor_line == 0
+            observing = False
+    finally:
+        loop.set_task_factory(factory)
+
+
+@pytest.mark.asyncio
 async def test_eager_worker_owns_window_before_rendering(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

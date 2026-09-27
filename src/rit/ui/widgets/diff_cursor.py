@@ -123,9 +123,11 @@ def _select_file_header(view: DiffView, hunk_index: int) -> bool:
 
 def _scroll_to_file_header(view: DiffView, hunk_index: int) -> None:
     for widget in view.query(f"#file-header-{hunk_index}"):
-        if not widget.is_mounted:
+        if not widget.is_mounted or view._virt.render_pending:
             continue
-        top = int(view.scroll_y) + (widget.region.y - view.scrollable_content_region.y)
+        top = _widget_vertical_offset(view, widget)
+        if top is None:
+            continue
         _scroll_to_vertical_span(view, top, top + 1, animate=False)
         return
 
@@ -648,19 +650,42 @@ def _pane_for_row(view: DiffView, row: RenderedRow) -> Literal["old", "new"]:
 
 
 def _half_page_step(view: DiffView) -> int:
-    return max(1, view.scrollable_content_region.height // 2)
+    return max(
+        1, (view.scrollable_content_region.height - view._sticky_header_inset) // 2
+    )
+
+
+def _widget_vertical_offset(view: DiffView, widget: Widget) -> int | None:
+    # Screen regions retain the previous scroll offset until the next layout.
+    if view._layout_required:
+        return None
+    top = widget.virtual_region.y
+    parent = widget.parent
+    while isinstance(parent, Widget) and parent is not view:
+        if parent._layout_required:
+            return None
+        top += (
+            parent.virtual_region.y + parent.content_offset.y - parent.scroll_offset.y
+        )
+        parent = parent.parent
+    return top if parent is view else None
 
 
 def _row_vertical_bounds(
     view: DiffView, row: RenderedRow, *, mounted: bool = True
 ) -> tuple[int, int] | None:
-    if mounted and view.is_mounted:
+    if (
+        mounted
+        and view.is_mounted
+        and (
+            not view._virt.render_pending or view._virt.viewport_frame_token is not None
+        )
+    ):
         widget = _target_widget_for_row(view, row)
         if widget is not None and widget.region.height > 0:
-            top = (
-                int(view.scroll_y) + widget.region.y - view.scrollable_content_region.y
-            )
-            return top, top + widget.region.height
+            top = _widget_vertical_offset(view, widget)
+            if top is not None:
+                return top, top + widget.region.height
         bounds = _mounted_block_row_vertical_bounds(view, row)
         if bounds is not None:
             return bounds
@@ -723,7 +748,10 @@ def _scroll_to_row(
         viewport_offset = _geometry.cursor_viewport_offset(bounds, viewport)
 
     if view._virt.active:
-        if not view._is_line_rendered(row.line_index):
+        if (
+            not view._is_line_rendered(row.line_index)
+            or view._virt.viewport_frame_token is not None
+        ):
             _virtual._maybe_update_virtual_window(view, row.line_index)
         if view._virt.render_pending:
             revision = view.view_revision
@@ -757,6 +785,13 @@ def _scroll_to_row(
         )
     finally:
         view._suspend_scroll_virtual_window_watch = saved
+
+    if not saved and view._virt.active and not view._virt.render_pending:
+        first, last = _virtual._viewport_line_range(view)
+        if not view._virt.rendered_start <= first <= last <= view._virt.rendered_end:
+            # Rendering the cursor's neighborhood may not cover an anchored viewport.
+            view._virt.suppress_next_viewport_shift = False
+            _virtual._maybe_update_virtual_window_from_viewport(view)
 
 
 def _row_is_visible(view: DiffView, row: RenderedRow) -> bool:
@@ -832,8 +867,10 @@ def _mounted_block_row_vertical_bounds(
     if block is None or not block.is_mounted or block.region.height <= 0:
         return None
 
+    block_top = _widget_vertical_offset(view, block)
+    if block_top is None:
+        return None
     line_indices = block.line_indices
-    block_top = int(view.scroll_y) + (block.region.y - view.scrollable_content_region.y)
     if split_block is not None:
         for row_offset, line_index in enumerate(line_indices):
             if line_index == row.line_index:

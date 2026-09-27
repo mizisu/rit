@@ -152,6 +152,7 @@ async def test_search_placement_survives_virtual_render(
     app = TestApp()
     async with app.run_test(size=(100, 8)) as pilot:
         view = app.query_one(DiffView)
+        monkeypatch.setattr(view, "VIRTUAL_WINDOW_RADIUS", 3)
         await view.show_diff("test.py", parse_patch(patch, "test.py"))
         view.focus()
         await pilot.press("/")
@@ -168,6 +169,11 @@ async def test_search_placement_survives_virtual_render(
         )
         await pilot.pause()
         assert view.cursor_line == 59
+        first = view._line_index_at_vertical_offset(int(view.scroll_y))
+        last = view._line_index_at_vertical_offset(
+            int(view.scroll_y) + view.scrollable_content_region.height - 1
+        )
+        assert view._virt.rendered_start <= first <= last <= view._virt.rendered_end
         assert (
             "beta match"
             in app.screen._compositor.render_strips()[

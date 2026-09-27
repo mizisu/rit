@@ -405,6 +405,15 @@ def _maybe_update_virtual_window(view, line_index: int) -> None:
     if not view._virt.active:
         return
 
+    if view._virt.viewport_frame_token is not None:
+        # The viewport worker is finished; cursor input must not wait on its frame.
+        view._virt.viewport_frame_token = None
+        view._virt.viewport_scroll_latched = False
+        view._virt.render_pending = False
+        view._virt.cursor_shift_pending = False
+        view._virt.coalesced_center = None
+        view._virt.pending_scroll = None
+
     margin = _effective_virtual_window_shift_margin(view)
     start = view._virt.window_start
     end = view._virt.window_end
@@ -1163,8 +1172,7 @@ async def _render_virtual_window_and_finalize(view) -> None:
         if not view._is_current_render_request(request_token):
             return
         if (
-            view._virt.cursor_shift_pending
-            or view._virt.coalesced_center is None
+            view._virt.coalesced_center is None
             or not view._virt.active
             or not view.is_mounted
         ):
@@ -1180,6 +1188,8 @@ async def _render_virtual_window_and_finalize(view) -> None:
             break
         view._capture_comment_editors()
 
+    # A queued compositor repaint may run before Textual's next layout.
+    view._reflow_retained_layout()
     # call_after_refresh also runs on Screen idle inside a batch. Finalize only
     # the completed window, not intermediate windows already overtaken by input.
     view.call_after_refresh(
@@ -1208,9 +1218,8 @@ async def _render_virtual_window_and_finalize(view) -> None:
                 )
                 return
 
-        view.call_after_refresh(
-            lambda: _complete_cursor_driven_virtual_render(view, request_token)
-        )
+        _complete_cursor_driven_virtual_render(view, request_token)
+        view._reflow_retained_layout()
         return
 
     # Overlapping wheel windows must also yield when the last paint is overdue.
