@@ -16,6 +16,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, VerticalScroll
 from textual.content import Content
+from textual.geometry import Offset, Region, Spacing
 from textual.message import Message
 from textual.reactive import reactive, var
 from textual.scrollbar import ScrollTo
@@ -71,6 +72,8 @@ from rit.ui.widgets.diff_types import (
 )
 
 if TYPE_CHECKING:
+    from textual.screen import Screen
+
     from rit.state.store import PRStore
 
 
@@ -253,6 +256,12 @@ class DiffView(VerticalScroll):
         self._diff_file_paths: frozenset[str] = frozenset()
         self._file_change_stats: dict[str, tuple[int, int]] = {}
         self._file_header_positions: dict[str, int] = {}
+        self._file_header_hunks: list[int] = []
+        self._sticky_header = Static(
+            "", id="diff-sticky-header", classes="file-diff-header"
+        )
+        self._sticky_header_hunk: int | None = None
+        self._sticky_header_width = 0
         self._line_index_by_new_number: dict[int, int] = {}
         self._line_index_by_old_number: dict[int, int] = {}
         self._new_line_number_bounds: tuple[int, int] | None = None
@@ -367,6 +376,7 @@ class DiffView(VerticalScroll):
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="diff-content")
+        yield self._sticky_header
         with Horizontal(id="diff-search-bar"):
             yield Static("/", classes="search-prompt")
             yield Input(id="diff-search-input")
@@ -377,6 +387,64 @@ class DiffView(VerticalScroll):
         if self._content_widget is not None:
             region = region.shrink(self._content_widget.dock_gutter)
         return region
+
+    @property
+    def _sticky_header_inset(self) -> int:
+        return int(
+            bool(self._file_header_hunks) and self.scrollable_content_region.height > 1
+        )
+
+    def _refresh_sticky_header(self, *, force: bool = False) -> None:
+        if not self.is_mounted:
+            return
+        diff = self._diff
+        hunk_index = None
+        if (
+            diff is not None
+            and self._sticky_header_inset
+            and len(self._hunk_header_top_offsets) == len(diff.hunks)
+        ):
+            index = (
+                bisect_right(
+                    self._file_header_hunks,
+                    self.scroll_offset.y,
+                    key=self._hunk_header_top_offsets.__getitem__,
+                )
+                - 1
+            )
+            if index >= 0:
+                hunk_index = self._file_header_hunks[index]
+        header = self._sticky_header
+        header.visible = hunk_index is not None
+        width = max(
+            1, self.scrollable_content_region.width - header.styles.gutter.width
+        )
+        if (
+            not force
+            and hunk_index == self._sticky_header_hunk
+            and width == self._sticky_header_width
+        ):
+            return
+        self._sticky_header_hunk = hunk_index
+        self._sticky_header_width = width
+        if diff is None or hunk_index is None:
+            return
+        hunk = diff.hunks[hunk_index]
+        text, _ = _render._file_header_text_and_width(self, hunk, width=width)
+        header.update(text)
+        header.set_class(self._is_file_folded(hunk.file_path or ""), "-collapsed")
+        header.set_class(hunk_index == self._selected_file_header_hunk, "-selected")
+
+    def scroll_to_region(
+        self, region: Region, *, spacing: Spacing | None = None, **kwargs
+    ) -> Offset:
+        return super().scroll_to_region(
+            region,
+            spacing=(spacing or Spacing()).grow_maximum(
+                Spacing(self._sticky_header_inset, 0, 0, 0)
+            ),
+            **kwargs,
+        )
 
     def watch_mode(self, new_mode: Literal["split", "unified", "auto"]) -> None:
         if self._suspend_split_state_rerender:
@@ -493,7 +561,10 @@ class DiffView(VerticalScroll):
 
     def watch_scroll_y(self, old_value: float, new_value: float) -> None:
         super().watch_scroll_y(old_value, new_value)
-        if old_value == new_value or self._suspend_scroll_virtual_window_watch:
+        if old_value == new_value:
+            return
+        self._refresh_sticky_header()
+        if self._suspend_scroll_virtual_window_watch:
             return
         _virtual._maybe_update_virtual_window_from_viewport(self)
         if not self._virt.active and _hl._use_windowed_highlight_strategy(
@@ -689,14 +760,18 @@ class DiffView(VerticalScroll):
 
         for widget in ancestors:
             widget_id = widget.id or ""
-            if not widget_id.startswith("file-header-"):
+            if widget is self._sticky_header:
+                hunk_index = self._sticky_header_hunk
+            elif widget_id.startswith("file-header-"):
+                suffix = widget_id.removeprefix("file-header-")
+                hunk_index = int(suffix) if suffix.isdigit() else None
+            else:
                 continue
-            suffix = widget_id.removeprefix("file-header-")
-            if not suffix.isdigit():
+            if hunk_index is None:
                 continue
             if self.visual_mode:
                 _selection._exit_visual_mode(self)
-            self._set_file_header_selection(int(suffix))
+            self._set_file_header_selection(hunk_index)
             self.focus(scroll_visible=False)
             self._request_toggle_file_fold()
             event.stop()
@@ -1242,6 +1317,10 @@ class DiffView(VerticalScroll):
                 _comments.update_file_comment_cursor_highlight(self, index)
 
         if self.is_mounted:
+            self._sticky_header.set_class(
+                hunk_index is not None and hunk_index == self._sticky_header_hunk,
+                "-selected",
+            )
             for index in (previous, hunk_index):
                 if index is None:
                     continue
@@ -2414,6 +2493,7 @@ class DiffView(VerticalScroll):
             self._hunk_start_line_indices = []
             self._hunk_end_line_indices = []
             self._hunk_header_top_offsets = []
+            self._file_header_hunks = []
             self._line_top_offsets = []
             self._line_heights = []
             self._line_bottom_offsets = []
@@ -2457,6 +2537,11 @@ class DiffView(VerticalScroll):
             self._folded_file_paths = folded_file_paths
             diff = render_diff
             self._diff = diff
+            self._file_header_hunks = [
+                index
+                for index, hunk in enumerate(diff.hunks)
+                if hunk.starts_file and hunk.lines
+            ]
 
             self._all_lines = plan.all_lines
             self._diff_file_paths = plan.file_paths
@@ -2582,6 +2667,7 @@ class DiffView(VerticalScroll):
     def refresh_header(self) -> None:
         """Re-render visible file headers."""
         _render._refresh_file_header_widgets(self)
+        self._refresh_sticky_header(force=True)
 
     def refresh_thread_metadata(self) -> None:
         """Refresh inline thread metadata without rebuilding diff rows."""

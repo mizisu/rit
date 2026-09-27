@@ -81,6 +81,7 @@ class ViewportGeometry:
     scroll_y: int
     viewport_height: int
     max_scroll_y: int
+    top_inset: int = 0
 
 
 def render_height_for_line(line: DiffLine, *, split: bool) -> int:
@@ -378,7 +379,7 @@ def scroll_target_for_row_viewport_offset(
     top, bottom = bounds
     target_scroll = max(
         0,
-        top - max(0, viewport_offset),
+        top - max(viewport.top_inset, viewport_offset),
     )
     if bottom - target_scroll > max(1, viewport.viewport_height):
         target_scroll = max(
@@ -400,8 +401,8 @@ def scroll_target_for_row_bottom(
 
 def row_is_visible(bounds: tuple[int, int], viewport: ViewportGeometry) -> bool:
     top, bottom = bounds
-    current_top = viewport.scroll_y
-    current_bottom = current_top + max(1, viewport.viewport_height)
+    current_top = viewport.scroll_y + viewport.top_inset
+    current_bottom = viewport.scroll_y + max(1, viewport.viewport_height)
     return top >= current_top and bottom <= current_bottom
 
 
@@ -414,18 +415,18 @@ def scroll_target_for_span(
     scrolloff: int = 0,
 ) -> int | None:
     viewport_height = max(1, viewport.viewport_height)
-    current_top = viewport.scroll_y
-    current_bottom = current_top + viewport_height
+    current_top = viewport.scroll_y + viewport.top_inset
+    current_bottom = viewport.scroll_y + viewport_height
     effective_scrolloff = min(
         max(0, scrolloff),
-        max(0, (viewport_height - 1) // 2),
+        max(0, (viewport_height - viewport.top_inset - 1) // 2),
     )
 
     if top_align:
-        return _clamp_scroll_y(top, viewport.max_scroll_y)
+        return _clamp_scroll_y(top - viewport.top_inset, viewport.max_scroll_y)
     if top < current_top + effective_scrolloff:
         return _clamp_scroll_y(
-            top - effective_scrolloff,
+            top - viewport.top_inset - effective_scrolloff,
             viewport.max_scroll_y,
         )
     if bottom > current_bottom - effective_scrolloff:

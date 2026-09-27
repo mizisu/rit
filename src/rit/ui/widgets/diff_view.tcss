@@ -2,7 +2,7 @@ DiffView {
     width: 1fr;
     overflow-x: auto;
     overflow-y: auto;
-    layers: base search;
+    layers: base sticky search;
 }
 
 DiffView #diff-content {
@@ -27,6 +27,13 @@ DiffView .file-diff-header {
     min-width: 100%;
     margin: 0;
     content-align: left middle;
+}
+
+DiffView #diff-sticky-header {
+    layer: sticky;
+    dock: top;
+    width: 100%;
+    visibility: hidden;
 }
 
 DiffView .file-diff-header:hover {

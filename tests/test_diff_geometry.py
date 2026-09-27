@@ -287,6 +287,29 @@ def test_scroll_target_for_span_respects_vertical_scrolloff() -> None:
     )
 
 
+def test_sticky_header_occlusion_preserves_document_scroll_coordinates() -> None:
+    viewport = ViewportGeometry(20, 9, 80, top_inset=1)
+
+    assert not row_is_visible((20, 21), viewport)
+    assert row_is_visible((21, 22), viewport)
+    assert row_is_visible((28, 29), viewport)
+    assert not row_is_visible((29, 30), viewport)
+    assert cursor_viewport_offset((22, 23), viewport) == 2
+    assert scroll_target_for_row_viewport_offset((40, 41), viewport, 0) == 39
+    assert scroll_target_for_row_viewport_offset((40, 41), viewport, 2) == 38
+    assert scroll_target_for_span(top=20, bottom=21, viewport=viewport) == 19
+    assert scroll_target_for_span(top=21, bottom=22, viewport=viewport) is None
+    assert scroll_target_for_span(top=29, bottom=30, viewport=viewport) == 21
+    assert (
+        scroll_target_for_span(top=21, bottom=22, viewport=viewport, scrolloff=2) == 18
+    )
+    assert (
+        scroll_target_for_span(top=40, bottom=41, viewport=viewport, top_align=True)
+        == 39
+    )
+    assert scroll_target_for_span(top=0, bottom=1, viewport=viewport) == 0
+
+
 def test_merge_line_ranges_sorts_and_coalesces_overlapping_ranges() -> None:
     assert merge_line_ranges([(8, 9), (1, 2), (3, 5), (5, 7)]) == [(1, 9)]
     assert merge_line_ranges([(4, 4), (8, 9), (6, 6)]) == [(4, 4), (6, 6), (8, 9)]

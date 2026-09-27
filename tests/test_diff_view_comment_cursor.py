@@ -1,14 +1,18 @@
 """Tests for cursor navigation through inline comments and pending drafts."""
 
+from typing import Literal
+
 import pytest
 from textual.app import App, ComposeResult
 
 from rit.core.diff import parse_patch
-from rit.state.models import PRComment, ReviewThread
+from rit.state.models import PRComment, PRFile, ReviewThread
 from rit.state.store import PRStore
+from rit.ui.components.combined_diff import build_combined_diff_document
 from rit.ui.widgets.diff_view import DiffView
 from rit.ui.widgets.diff_visual import LineContent
 from rit.ui.widgets.review_thread_card import ReviewThreadItem
+from tests.conftest import wait_until
 
 
 def _make_review_thread(
@@ -596,3 +600,99 @@ async def test_cursor_line_after_many_comments_stays_visible_inside_grouped_bloc
         viewport_bottom = viewport_top + diff_view.scrollable_content_region.height
         assert top >= viewport_top
         assert bottom <= viewport_bottom
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["unified", "split"])
+@pytest.mark.parametrize("file_level", [False, True])
+async def test_virtual_comment_cursor_scrolls_only_when_comment_is_clipped(
+    mode: Literal["unified", "split"],
+    file_level: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    patch = "@@ -1,200 +1,200 @@\n" + "\n".join(
+        f" line{index}" for index in range(1, 201)
+    )
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename=path, status="modified") for path in ("prefix.py", "test.py")
+    ]
+    thread = _make_review_thread_with_reply(line=1)
+    if file_level:
+        thread.subject_type = "FILE"
+        for comment in thread.comments:
+            comment.subject_type = "file"
+        store.save_pending_file_comment("draft", path="test.py")
+    else:
+        store.save_pending_inline_comment("draft", path="test.py", line=1, side="RIGHT")
+    store.state.review_threads = [thread]
+    document = build_combined_diff_document(
+        store.state.files,
+        {
+            file.filename: parse_patch(patch, file.filename)
+            for file in store.state.files
+        },
+    )
+    assert document is not None
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(store, mode=mode)
+
+    app = TestApp()
+    async with app.run_test(size=(120, 32)) as pilot:
+        view = app.query_one(DiffView)
+        monkeypatch.setattr(view, "VIRTUALIZE_LINE_THRESHOLD", 1)
+        monkeypatch.setattr(view, "VIRTUAL_WINDOW_RADIUS", 12)
+        await view.show_diff(document.diff.filename, document.diff)
+        await pilot.pause()
+        view.jump_to_line_index(200, side="RIGHT", focus=True)
+        await wait_until(lambda: not view._virt.render_pending, timeout=5)
+        await pilot.pause()
+        if file_level:
+            view._set_file_header_selection(1)
+        view.scroll_to(
+            y=view._hunk_header_top_offsets[1] - 2, animate=False, immediate=True
+        )
+        await pilot.pause()
+        content = view._content_widget
+        assert content is not None and content.styles.margin.top > 0
+        initial_scroll = view.scroll_offset
+        item = view.query_one("#inline-thread-41", ReviewThreadItem)
+        root, reply = item.comment_card_at(0), item.comment_card_at(1)
+        assert root is not None and reply is not None
+        assert view.scrollable_content_region.contains_region(root.region)
+
+        await pilot.press("j")
+        assert view.scroll_offset == initial_scroll
+        assert view.active_pending_draft_index() == 0
+        await pilot.press("j")
+        assert view._comment_cursor_index == 2
+        assert view.active_review_comment() == thread.comments[0]
+        assert view.scroll_offset == initial_scroll
+
+        viewport = view.scrollable_content_region
+        view.scroll_to(
+            y=view.scroll_y + reply.region.y - (viewport.bottom - 2),
+            animate=False,
+            immediate=True,
+        )
+        await pilot.pause()
+        before = view.scroll_y
+        clipped_rows = reply.region.bottom - viewport.bottom
+        assert 0 < clipped_rows < reply.region.height
+        await pilot.press("j")
+        assert view.active_review_comment() == thread.comments[1]
+        assert view.scroll_y == before + clipped_rows
+
+        view.scroll_to(
+            y=view.scroll_y + root.region.y - viewport.y,
+            animate=False,
+            immediate=True,
+        )
+        await pilot.pause()
+        before = view.scroll_y
+        await pilot.press("k")
+        assert view.active_review_comment() == thread.comments[0]
+        assert view.scroll_y == before - view._sticky_header_inset
+        assert root.region.y == viewport.y + view._sticky_header_inset

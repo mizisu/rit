@@ -632,6 +632,8 @@ def _aggregate_file_change_stats(view: DiffView, path: str) -> tuple[int, int]:
 def _file_header_text_and_width(
     view: DiffView,
     hunk: DiffHunk,
+    *,
+    width: int | None = None,
 ) -> tuple[Text, int]:
     path = hunk.file_path or "unknown"
     old_path = hunk.file_old_path
@@ -649,14 +651,15 @@ def _file_header_text_and_width(
     viewed_state = (
         file.viewer_viewed_state if file is not None else FileViewedState.UNVIEWED
     )
-    width = _file_header_width_for_layout(
-        view,
-        _header.file_header_min_width(
-            path=path,
-            old_path=old_path,
-            stats_plain=stats_plain,
-        ),
-    )
+    if width is None:
+        width = _file_header_width_for_layout(
+            view,
+            _header.file_header_min_width(
+                path=path,
+                old_path=old_path,
+                stats_plain=stats_plain,
+            ),
+        )
     text = _header.build_file_header_text(
         path=path,
         old_path=old_path,

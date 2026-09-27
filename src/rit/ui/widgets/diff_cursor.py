@@ -6,7 +6,8 @@ from collections.abc import Collection
 from typing import TYPE_CHECKING, Literal
 
 from textual.containers import VerticalScroll
-from textual.geometry import Size
+from textual.geometry import Region, Size
+from textual.widget import Widget
 
 from rit.ui.messages import Flash
 from rit.ui.widgets import diff_blocks as _blocks
@@ -86,18 +87,38 @@ def _activate_comment_cursor(view: DiffView, line_index: int) -> None:
         _flush_queued_cursor_ui_updates(view)
     _comments.update_cursor_highlight(view, line_index, line_index)
     view._update_line_cursor(line_index)
-    widget = _comments.active_comment_widget(view, line_index)
-    if widget is not None and widget.is_mounted:
-        view.scroll_to_widget(widget, animate=False)
+    _scroll_to_comment_cursor(view)
 
 
 def _activate_file_comment_cursor(view: DiffView, hunk_index: int) -> None:
     if view._cursor_ui.flush_pending:
         _flush_queued_cursor_ui_updates(view)
     _comments.update_file_comment_cursor_highlight(view, hunk_index)
-    widget = _comments.active_file_comment_widget(view, hunk_index)
-    if widget is not None and widget.is_mounted:
-        view.scroll_to_widget(widget, animate=False)
+    _scroll_to_comment_cursor(view)
+
+
+def _scroll_to_comment_cursor(view: DiffView) -> None:
+    if not view.is_mounted or view._comment_cursor_index == 0:
+        return
+    hunk_index = view._selected_file_header_hunk
+    widget = (
+        _comments.active_file_comment_widget(view, hunk_index)
+        if hunk_index is not None
+        else _comments.active_comment_widget(view, view.cursor_line)
+    )
+    if widget is None or not widget.is_mounted:
+        return
+    top = _widget_vertical_offset(view, widget)
+    if top is None:
+        view.call_after_refresh(_scroll_to_comment_cursor, view)
+        return
+    # scroll_to_widget includes the virtual spacer margins in the reveal region.
+    view.scroll_to_region(
+        Region(0, top, 1, widget.region.height),
+        animate=False,
+        immediate=True,
+        x_axis=False,
+    )
 
 
 def _file_header_before_row(view: DiffView, row: RenderedRow) -> int | None:
@@ -716,6 +737,7 @@ def _viewport_geometry(view: DiffView) -> _geometry.ViewportGeometry:
         scroll_y=int(view.scroll_y),
         viewport_height=max(1, view.scrollable_content_region.height),
         max_scroll_y=max(0, int(view.max_scroll_y)),
+        top_inset=view._sticky_header_inset,
     )
 
 
