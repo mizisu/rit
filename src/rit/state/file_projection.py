@@ -74,10 +74,8 @@ def diff_from_file_patch(file: PRFile) -> FileDiff:
     # ponytail: large single-file parse peaks remain; pack during refinement if needed.
     for hunk in diff.hunks:
         for line in hunk.lines:
-            if line.old_segments:
-                line.old_segments = _word_diff_ranges(line.old_segments)
-            if line.new_segments:
-                line.new_segments = _word_diff_ranges(line.new_segments)
+            line.old_segments = _word_diff_ranges(line.old_segments)
+            line.new_segments = _word_diff_ranges(line.new_segments)
     status = file.status
     diff.old_filename = file.previous_filename
     diff.is_new = status == "added"

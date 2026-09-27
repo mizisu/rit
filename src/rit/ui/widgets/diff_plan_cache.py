@@ -8,7 +8,6 @@ from typing import Literal
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.ui.widgets import diff_plan as _plan
 from rit.ui.widgets.diff_layout import MIN_LINE_NUMBER_WIDTH
-from rit.ui.widgets.diff_types import RenderedRow
 
 
 @dataclass
@@ -27,7 +26,7 @@ class PlanProjection:
     hunks: tuple[HunkPlan, ...]
 
     def build_rows(self, *, split: bool) -> _plan.RenderedRowsPlan:
-        rows: list[RenderedRow] = []
+        rows = _plan.RenderedRows()
         unified_lookup: dict[tuple[int, Literal["old", "new", "auto"]], int] = {}
         split_lookup: dict[int, int] = {}
         for hunk_index, local in enumerate(self.hunks):

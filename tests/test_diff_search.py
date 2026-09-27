@@ -663,6 +663,31 @@ def test_search_match_index_at_cursor_finds_exact_line_side_and_column() -> None
     )
 
 
+@pytest.mark.parametrize("side", ["old", "new", "auto"])
+def test_context_search_match_is_shared_by_both_panes(
+    side: Literal["old", "new", "auto"],
+) -> None:
+    matches = [_match(0, 0, "auto", 2), _match(1, 1, "auto", 4)]
+    assert (
+        diff_search_policy.search_match_index_at_cursor(
+            matches, current_line=0, current_side=side, current_column=2
+        )
+        == 0
+    )
+    assert (
+        diff_search_policy.next_search_match_index(
+            matches, current_row_index=0, current_side=side, current_column=2
+        )
+        == 1
+    )
+    assert (
+        diff_search_policy.next_search_match_index(
+            matches, current_row_index=1, current_side=side, current_column=4
+        )
+        == 0
+    )
+
+
 def test_search_match_index_at_cursor_uses_indexed_lookup_without_prefix_scan() -> None:
     class IndexedMatches:
         def __init__(self, matches: list[DiffSearchMatch]) -> None:

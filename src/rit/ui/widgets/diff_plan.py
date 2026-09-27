@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from functools import lru_cache
+from typing import Literal, cast, overload
 
 from rich.cells import cell_len
 
@@ -21,10 +22,73 @@ __all__ = (
 )
 
 
+type _RowData = tuple[
+    Literal["unified", "split"],
+    int,
+    int,
+    int,
+    str,
+    Literal["old", "new", "auto"],
+    str,
+    int | None,
+    int | None,
+]
+
+
+class RenderedRows(Sequence[RenderedRow]):
+    """Keep primitive row snapshots with a bounded cache of attribute views."""
+
+    __slots__ = ("_data",)
+
+    def __init__(self) -> None:
+        self._data: list[_RowData] = []
+
+    @staticmethod
+    @lru_cache(maxsize=256)
+    def _row(data: _RowData) -> RenderedRow:
+        # Primitive keys cannot keep a previous diff or row collection alive.
+        return RenderedRow._make(data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    @overload
+    def __getitem__(self, index: int) -> RenderedRow: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> list[RenderedRow]: ...
+
+    def __getitem__(self, index: int | slice) -> RenderedRow | list[RenderedRow]:
+        if isinstance(index, slice):
+            return list(map(self._row, self._data[index]))
+        return self._row(self._data[index])
+
+    def __iter__(self) -> Iterator[RenderedRow]:
+        return map(self._row, self._data)
+
+    def iter_data(self) -> Iterator[_RowData]:
+        """Scan stable row fields without allocating attribute views."""
+        return iter(self._data)
+
+    def __eq__(self, other: object) -> bool:
+        return self._data == (other._data if isinstance(other, RenderedRows) else other)
+
+    def append(self, row: RenderedRow) -> None:
+        """Snapshot one planned row as primitive values."""
+        self._data.append(cast(_RowData, tuple(row)))
+
+    def extend(self, rows: Sequence[RenderedRow]) -> None:
+        """Append planned rows without materializing attribute views."""
+        if isinstance(rows, RenderedRows):
+            self._data.extend(rows._data)
+        else:
+            self._data.extend(cast(_RowData, tuple(row)) for row in rows)
+
+
 @dataclass(frozen=True)
 class RenderedRowsPlan:
-    rows_unified: list[RenderedRow]
-    rows_split: list[RenderedRow]
+    rows_unified: Sequence[RenderedRow]
+    rows_split: Sequence[RenderedRow]
     row_lookup_unified: dict[tuple[int, Literal["old", "new", "auto"]], int]
     row_lookup_split: dict[int, int]
 
@@ -75,8 +139,8 @@ def build_rendered_rows(
     *,
     split: bool | None = None,
 ) -> RenderedRowsPlan:
-    rows_unified: list[RenderedRow] = []
-    rows_split: list[RenderedRow] = []
+    rows_unified = RenderedRows()
+    rows_split = RenderedRows()
     row_lookup_unified: dict[tuple[int, Literal["old", "new", "auto"]], int] = {}
     row_lookup_split: dict[int, int] = {}
 
@@ -116,8 +180,8 @@ def build_rendered_rows_from_lines(
     line_offset: int | None = None,
     row_offset: int = 0,
 ) -> RenderedRowsPlan:
-    rows_unified: list[RenderedRow] = []
-    rows_split: list[RenderedRow] = []
+    rows_unified = RenderedRows()
+    rows_split = RenderedRows()
     row_lookup_unified: dict[tuple[int, Literal["old", "new", "auto"]], int] = {}
     row_lookup_split: dict[int, int] = {}
 
@@ -149,8 +213,8 @@ def _append_rendered_rows_for_line(
     *,
     line: DiffLine,
     hunk_index: int,
-    rows_unified: list[RenderedRow],
-    rows_split: list[RenderedRow],
+    rows_unified: RenderedRows,
+    rows_split: RenderedRows,
     row_lookup_unified: dict[tuple[int, Literal["old", "new", "auto"]], int],
     row_lookup_split: dict[int, int],
     split: bool | None,
@@ -246,8 +310,8 @@ def build_diff_plan(
     hunk_line_ranges: list[tuple[int, int, int]] = []
     hunk_start_line_indices: list[int] = []
     hunk_end_line_indices: list[int] = []
-    rows_unified: list[RenderedRow] = []
-    rows_split: list[RenderedRow] = []
+    rows_unified = RenderedRows()
+    rows_split = RenderedRows()
     row_lookup_unified: dict[tuple[int, Literal["old", "new", "auto"]], int] = {}
     row_lookup_split: dict[int, int] = {}
     modified_line_count = 0

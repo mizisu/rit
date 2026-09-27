@@ -35,9 +35,9 @@ def _document(*texts: str) -> tuple[list[DiffLine], list[RenderedRow]]:
     return lines, rows
 
 
-def test_search_session_typing_reveals_submission_activates_and_jump_syncs_cursor() -> (
-    None
-):
+def test_search_session_typing_reveals_submission_activates_and_jump_syncs_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     cursor = SearchCursor(0, 0, "auto", 0)
     results: list[SearchResult] = []
     session = DiffSearchSession(lambda: cursor, results.append)
@@ -59,18 +59,65 @@ def test_search_session_typing_reveals_submission_activates_and_jump_syncs_curso
     assert activation.pane is None
     assert not activation.update_active_pane
     assert results[-1].reveal is None
+    matches = session.matches
+    session.highlight(Content("Alpha alpha"), 0, "auto")
+
+    def unexpected_rebuild(*_args):
+        raise AssertionError("navigation must reuse matches and highlight buckets")
+
+    monkeypatch.setattr(diff_search, "build_matches_from_rows", unexpected_rebuild)
+    monkeypatch.setattr(diff_search, "build_match_buckets", unexpected_rebuild)
 
     cursor = SearchCursor(0, 0, "auto", 6)
-    session.jump(1, lines, rows)
+    session.jump(1)
     assert session.active_index == 2
     assert results[-1].activation is not None
     assert results[-1].activation.dirty_lines == frozenset({0, 2})
+    assert session.matches is matches
+    assert [
+        str(span.style)
+        for span in session.highlight(Content("Alpha alpha"), 0, "auto").spans
+    ] == [
+        "on $warning 25%",
+        "on $warning 25%",
+    ]
+    assert [
+        str(span.style) for span in session.highlight(Content("ALPHA"), 2, "auto").spans
+    ] == ["on $warning 45%"]
     cursor = SearchCursor(2, 2, "auto", 0)
-    session.jump(-1, lines, rows)
+    session.jump(-1)
     assert session.active_index == 1
     cursor = SearchCursor(1, 1, "auto", 0)
     session.sync_cursor()
     assert session.active_index == -1
+    session.jump(1)
+    assert session.active_index == 2
+    cursor = SearchCursor(2, 2, "auto", 0)
+    session.jump(1)
+    assert session.active_index == 0
+    cursor = SearchCursor(0, 0, "auto", 0)
+    session.jump(-1)
+    assert session.active_index == 2
+    assert session.matches is matches
+
+
+def test_search_session_jump_reuses_empty_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    results: list[SearchResult] = []
+    session = DiffSearchSession(lambda: SearchCursor(0, 0, "auto", 0), results.append)
+    lines, rows = _document("alpha")
+    session.search("missing", lines, rows)
+    matches = session.matches
+
+    def unexpected_rebuild(*_args):
+        raise AssertionError("navigation must reuse an empty result too")
+
+    monkeypatch.setattr(diff_search, "build_matches_from_rows", unexpected_rebuild)
+    session.jump(1)
+    session.jump(-1)
+    assert session.matches is matches
+    assert all(result.flash_message == "No matches: missing" for result in results[-2:])
 
 
 def test_search_session_reuses_buckets_and_clears_previously_highlighted_lines(
@@ -108,7 +155,11 @@ def test_search_session_projection_rebuild_and_render_clear() -> None:
     session = DiffSearchSession(lambda: cursor, results.append)
     lines = [
         DiffLine(
-            old_line_no=1, new_line_no=1, old_content="needle", new_content="needle new", is_modified=True
+            old_line_no=1,
+            new_line_no=1,
+            old_content="needle",
+            new_content="needle new",
+            is_modified=True,
         )
     ]
     split = [
@@ -126,6 +177,7 @@ def test_search_session_projection_rebuild_and_render_clear() -> None:
     ]
     session.search("needle", lines, split)
     assert [match.side for match in session.matches] == ["old", "new"]
+    assert session.highlight(Content("needle"), 0, "old").spans
     unified = [
         RenderedRow(
             mode="unified",
@@ -142,6 +194,13 @@ def test_search_session_projection_rebuild_and_render_clear() -> None:
     session.refresh(lines, unified)
     assert [match.side for match in session.matches] == ["new"]
     assert session.active_index == 0
+    assert not session.highlight(Content("needle"), 0, "old").spans
+    assert session.highlight(Content("needle new"), 0, "new").spans
+    lines[0].new_content = "new needle needle"
+    session.refresh(lines, unified)
+    assert [match.column for match in session.matches] == [4, 11]
+    session.search("new", lines, unified)
+    assert [match.column for match in session.matches] == [0]
     count = len(results)
     session.clear(repaint=False)
     assert len(results) == count
@@ -170,13 +229,13 @@ def test_search_session_blank_missing_and_unmatched_submissions() -> None:
     assert session.query == ""
     assert results[-1].flash_message == "Search cleared"
     assert results[-1].flash_duration == 1.5
-    session.jump(1, lines, rows)
+    session.jump(1)
     assert results[-1].flash_message == "No active search"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "replacement", ["new_query", "clear", "projection", "render_install"]
+    "replacement", ["new_query", "clear", "projection", "render_install", "jump"]
 )
 async def test_search_session_rejects_delayed_result_after_replacement(
     monkeypatch: pytest.MonkeyPatch,
@@ -208,6 +267,8 @@ async def test_search_session_rejects_delayed_result_after_replacement(
             session.search("new", lines, rows)
         elif replacement == "projection":
             session.refresh(lines, rows[1:])
+        elif replacement == "jump":
+            session.jump(1)
         else:
             session.clear(repaint=replacement == "clear")
         state = (session.query, tuple(session.matches), session.active_index)

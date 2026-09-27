@@ -5,7 +5,7 @@ from __future__ import annotations
 import builtins
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
 if TYPE_CHECKING:
     from textual.widgets import Static
@@ -40,8 +40,9 @@ __all__ = (
 )
 
 
-@dataclass(frozen=True)
-class RenderedRow:
+class RenderedRow(NamedTuple):
+    """Immutable navigation metadata for one displayed row."""
+
     mode: Literal["unified", "split"]
     row_index: int
     line_index: int

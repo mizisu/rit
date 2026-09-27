@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from rit.core.types import DiffLine
+from rit.ui.widgets.diff_plan import RenderedRows
 from rit.ui.widgets.diff_search_matching import (
     append_search_matches_for_text_casefolded,
     search_sides_for_line,
@@ -28,11 +29,13 @@ def build_matches_from_rows(
 
     query = query.casefold()
     matches: list[DiffSearchMatch] = []
-    for row in rows:
-        line = lines[row.line_index]
+    # Search must not churn the viewport's bounded row-view cache.
+    data_rows = rows.iter_data() if isinstance(rows, RenderedRows) else iter(rows)
+    for mode, row_index, line_index, _, _, row_side, _, _, _ in data_rows:
+        line = lines[line_index]
         sides = search_sides_for_line(
-            row_mode=row.mode,
-            row_side=row.side,
+            row_mode=mode,
+            row_side=row_side,
             line_is_modified=line.is_modified,
             line_is_deleted=line.is_deleted,
             line_is_added=line.is_added,
@@ -48,8 +51,8 @@ def build_matches_from_rows(
                 matches,
                 text=text,
                 query=query,
-                row_index=row.row_index,
-                line_index=row.line_index,
+                row_index=row_index,
+                line_index=line_index,
                 side=side,
             )
     return matches

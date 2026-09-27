@@ -27,7 +27,7 @@ async def test_search_bar_moves_between_matches_with_n_and_N() -> None:
 
     class TestApp(App):
         def compose(self) -> ComposeResult:
-            yield DiffView(mode="unified", id="diff-view")
+            yield DiffView(mode="split", id="diff-view")
 
     app = TestApp()
     async with app.run_test() as pilot:
@@ -63,10 +63,74 @@ async def test_search_bar_moves_between_matches_with_n_and_N() -> None:
         await pilot.pause()
 
         assert diff_view.cursor_line == 1
+        assert diff_view._search.active_index == 0
+        assert diff_view.cursor_pane == "new"
+
+        diff_view.action_cycle_active_pane()
+        await pilot.press("N")
+        assert diff_view.cursor_line == 3
+        assert diff_view.cursor_pane == "old"
+        await pilot.press("n")
+        assert diff_view.cursor_line == 1
+        assert diff_view.cursor_pane == "old"
 
         await pilot.press("/")
         assert search_input.value == "match"
         assert search_input.has_focus
+
+
+@pytest.mark.asyncio
+async def test_search_results_follow_resize_mode_fold_and_document_changes() -> None:
+    patch = "@@ -1,1 +1,1 @@\n-result = needle(old)\n+result = needle(new)"
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="auto", id="diff-view")
+
+    app = TestApp()
+    async with app.run_test(size=(140, 20)) as pilot:
+        view = app.query_one(DiffView)
+        await view.show_diff("test.py", parse_patch(patch, "test.py"))
+        view._run_search("needle", submitted=True)
+        assert [(match.row_index, match.side) for match in view._search.matches] == [
+            (0, "old"),
+            (0, "new"),
+        ]
+
+        await pilot.resize_terminal(80, 20)
+        await wait_until(lambda: not view.split and not view._virt.render_pending)
+        assert [(match.row_index, match.side) for match in view._search.matches] == [
+            (0, "old"),
+            (1, "new"),
+        ]
+        view.action_next_search_match()
+        assert view._search.matches[view._search.active_index].side == view.cursor_pane
+
+        view.mode = "split"
+        await wait_until(lambda: view.split and not view._virt.render_pending)
+        assert [(match.row_index, match.side) for match in view._search.matches] == [
+            (0, "old"),
+            (0, "new"),
+        ]
+        view.action_prev_search_match()
+        assert view._search.matches[view._search.active_index].side == view.cursor_pane
+
+        assert await view.toggle_current_file_fold()
+        assert view._folded_file_paths == frozenset({"test.py"})
+        assert not view._search.matches
+        assert not view._search.query
+        view.action_next_search_match()
+        assert view._all_lines[view.cursor_line].is_folded_file_placeholder
+
+        assert await view.toggle_current_file_fold()
+        view._run_search("needle", submitted=True)
+        assert len(view._search.matches) == 2
+        replacement = parse_patch("@@ -1,1 +1,1 @@\n replacement", "test.py")
+        await view.show_diff("test.py", replacement)
+        assert not view._search.query
+        assert not view._search.matches
+        view._run_search("needle", submitted=True)
+        assert not view._search.matches
 
 
 @pytest.mark.asyncio

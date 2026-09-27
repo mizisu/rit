@@ -165,7 +165,7 @@ def search_match_index_at_cursor(
         key=lambda match: (match.line_index, match.column),
     )
     for index in range(start, end):
-        if matches[index].side == current_side:
+        if matches[index].side in (current_side, "auto"):
             return index
     return -1
 
@@ -240,7 +240,7 @@ def next_search_match_index(
         key=lambda match: (match.row_index, match.column),
     )
     for index in range(equal_start, equal_end):
-        if matches[index].side != current_side:
+        if matches[index].side not in (current_side, "auto"):
             return index
 
     if equal_end < len(matches):

@@ -202,8 +202,8 @@ class DiffView(VerticalScroll):
     _file: var[PRFile | None] = var(None)
 
     _all_lines: list[DiffLine]
-    _rows_unified: list[RenderedRow]
-    _rows_split: list[RenderedRow]
+    _rows_unified: Sequence[RenderedRow]
+    _rows_split: Sequence[RenderedRow]
     _row_lookup_unified: dict[tuple[int, Literal["old", "new", "auto"]], int]
     _row_lookup_split: dict[int, int]
 
@@ -933,18 +933,10 @@ class DiffView(VerticalScroll):
         self._run_search(update.submit_query, submitted=True)
 
     def action_next_search_match(self) -> None:
-        self._search.jump(
-            1,
-            self._all_lines,
-            self._rows_for_current_mode() if self._search.query else (),
-        )
+        self._search.jump(1)
 
     def action_prev_search_match(self) -> None:
-        self._search.jump(
-            -1,
-            self._all_lines,
-            self._rows_for_current_mode() if self._search.query else (),
-        )
+        self._search.jump(-1)
 
     def _display_search_result(self, result: SearchResult) -> None:
         if result.dirty_lines:
@@ -1884,7 +1876,7 @@ class DiffView(VerticalScroll):
             return None
         return rows[row_index]
 
-    def _rows_for_current_mode(self) -> list[RenderedRow]:
+    def _rows_for_current_mode(self) -> Sequence[RenderedRow]:
         _render._ensure_rendered_rows_for_mode(self, split=self.split)
         return self._rows_split if self.split else self._rows_unified
 

@@ -164,7 +164,7 @@ def test_file_from_summary_preserves_patch_and_counts() -> None:
         deletions=2,
         changes=5,
         patch="diff --git a/old.py b/new.py",
-        previousFilename="old.py",
+        previous_filename="old.py",
     )
 
 
@@ -219,7 +219,7 @@ def test_diff_from_file_patch_restores_rest_metadata() -> None:
         filename="new.py",
         status="added",
         patch="@@ -0,0 +1 @@\n+new",
-        previousFilename="old.py",
+        previous_filename="old.py",
     )
 
     diff = file_projection.diff_from_file_patch(file)
@@ -256,7 +256,8 @@ def test_compact_word_ranges_preserve_highlighting_without_recomputation(
         assert isinstance(lines[index].old_segments, tuple)
         assert isinstance(lines[index].new_segments, tuple)
     assert lines[2].is_modified and not lines[2].has_word_diff
-    assert lines[2].old_segments == lines[2].new_segments == []
+    assert lines[2].old_segments == lines[2].new_segments == ()
+    assert lines[1].old_segments is lines[1].new_segments is lines[2].old_segments
     ranges = lines[0].old_segments, lines[0].new_segments
     cache = DiffPlanCache(compact)
     before = cache.prepare(compact)
@@ -281,9 +282,10 @@ def test_compact_word_ranges_preserve_highlighting_without_recomputation(
     for index in (2, 4):
         for diff in (compact, eager):
             highlighting.highlight_lines_for_diff_range(diff, index, index)
+        original = eager.hunks[0].lines[index]
         for side in ("old", "new"):
             attr = f"highlighted_{side}_content"
-            assert getattr(lines[index], attr) == getattr(eager.hunks[0].lines[index], attr)
+            assert getattr(lines[index], attr) == getattr(original, attr)
     assert cache.prepare(compact).hunks[0] is before.hunks[0]
     assert cache.revision == revision
 

@@ -70,7 +70,8 @@ class DiffSearchSession:
     """Keep query, result validity, navigation and highlight state together.
 
     Cursor coordinates are read at publication time, including after background
-    matching. The result callback performs only the Textual effects.
+    matching. The result callback performs only the Textual effects. The owner
+    refreshes on projection changes and clears on document replacement.
     """
 
     def __init__(
@@ -230,7 +231,9 @@ class DiffSearchSession:
     def refresh(self, lines: Sequence[DiffLine], rows: Sequence[RenderedRow]) -> None:
         """Invalidate background work and rebuild for a changed row projection."""
         self._generation += 1
-        matches = build_matches_from_rows(lines, rows, self._query) if self._query else []
+        matches = (
+            build_matches_from_rows(lines, rows, self._query) if self._query else []
+        )
         self._install(self._query, matches, -1)
         self.sync_cursor()
 
@@ -255,15 +258,12 @@ class DiffSearchSession:
             self._active_index = index
         return activation
 
-    def jump(
-        self,
-        direction: Literal[-1, 1],
-        lines: Sequence[DiffLine],
-        rows: Sequence[RenderedRow],
-    ) -> None:
-        """Rebuild and activate the next or previous match from the cursor."""
+    def jump(self, direction: Literal[-1, 1]) -> None:
+        """Navigate the installed results without rebuilding the search index."""
         if self._query:
-            self.refresh(lines, rows)
+            # A pending query must not replace the search being navigated.
+            self._generation += 1
+            self.sync_cursor()
         update = search_jump_update(
             query=self._query,
             match_count=len(self._matches),
