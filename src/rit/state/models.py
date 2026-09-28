@@ -134,7 +134,7 @@ class PRLabel(BaseModel):
 
     name: str = ""
     color: str = ""
-    description: str = ""
+    description: str | None = None
 
 
 class PRIssueComment(BaseModel):

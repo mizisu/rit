@@ -42,7 +42,6 @@ from rit.services.pr_file_view_states import (
     unmark_file_as_viewed as unmark_file_as_viewed_via_graphql,
 )
 from rit.services.pr_graphql_response import (
-    PullRequestGraphQLError,
     PullRequestNotFound,
     fetch_pull_request_all,
     fetch_pull_request_summary,
@@ -126,10 +125,10 @@ def translate_pull_request_graphql_errors() -> Iterator[None]:
     """Translate PR GraphQL parser errors into GitHub service errors."""
     try:
         yield
-    except PullRequestGraphQLError as error:
-        raise GitHubError(f"GraphQL error: {error}") from error
     except PullRequestNotFound as error:
         raise GitHubError(str(error)) from error
+    except ValueError as error:
+        raise GitHubError(f"GraphQL error: {error}") from error
 
 
 class GitHubService:

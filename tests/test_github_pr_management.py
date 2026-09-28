@@ -13,6 +13,8 @@ from rit.services.pr_graphql_response import (
     PullRequestGraphQLError,
     PullRequestNotFound,
 )
+from rit.state.models import LoadingState
+from rit.state.store import PRStore
 
 
 class CaptureGitHubService(GitHubService):
@@ -59,6 +61,45 @@ def test_translate_pull_request_graphql_errors_wraps_not_found_errors() -> None:
             raise PullRequestNotFound("PR #123 not found")
 
     assert isinstance(exc_info.value.__cause__, PullRequestNotFound)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("description", [None, "", "a label", 42])
+async def test_summary_label_validation_finishes_loading(description: object) -> None:
+    service = CaptureGitHubService(
+        outputs=[
+            json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "number": 123,
+                                "labels": {
+                                    "nodes": [
+                                        {"name": "label", "description": description}
+                                    ]
+                                },
+                            }
+                        }
+                    }
+                }
+            )
+        ]
+    )
+    store = PRStore(pr_number=123)
+    store._service = service
+
+    await store.load_pr_summary()
+
+    if description == 42:
+        assert store.state.pr_loading is LoadingState.ERROR
+        assert store.state.error is not None
+        assert "description" in store.state.error
+    else:
+        assert store.state.pr_loading is LoadingState.LOADED
+        assert store.state.pr is not None
+        assert store.state.pr.labels[0].description == description
+        assert store.state.error is None
 
 
 @pytest.mark.asyncio
