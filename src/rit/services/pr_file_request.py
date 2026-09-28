@@ -3,7 +3,11 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 
+from unidiff.errors import UnidiffParseError
+from unidiff.patch import PatchSet
+
 from rit.core.diff import parse_multi_file_patch_summaries
+from rit.services.gh_paginated_json import parse_paginated_items
 from rit.services.gh_request import GitHubInputRunner
 from rit.services.graphql_request import connection_nodes, mapping, run_graphql
 from rit.state.models import FileViewedState, PRFile
@@ -129,7 +133,33 @@ async def fetch_pr_files(
         )
     )
     try:
-        files, raw_diff = await asyncio.gather(metadata, patch)
+        try:
+            (files, _, _), raw_diff = await asyncio.gather(metadata, patch)
+        except RuntimeError as error:
+            if (
+                not patch.done()
+                or patch.cancelled()
+                or patch.exception() is not error
+                or "HTTP 406" not in str(error)
+            ):
+                raise
+            files, base, head = await metadata
+            result = await runner(
+                [
+                    "api",
+                    f"repos/{owner}/{repo}/pulls/{pr_number}/files?per_page=100",
+                    "--paginate",
+                ]
+            )
+            _, current_base, current_head = await _fetch_pr_file_metadata(
+                owner, repo, pr_number, total_count=1, per_page=1, runner=runner
+            )
+            if (base, head) != (current_base, current_head):
+                raise RuntimeError(
+                    "PR changed while loading files; refresh and try again"
+                )
+            await asyncio.to_thread(_populate_file_list_patches, files, result)
+            return files
     finally:
         for task in (metadata, patch):
             if not task.done():
@@ -148,7 +178,7 @@ async def _fetch_pr_file_metadata(
     total_count: int | None,
     per_page: int,
     runner: GitHubInputRunner,
-) -> list[PRFile]:
+) -> tuple[list[PRFile], str, str]:
     files: list[PRFile] = []
     after: str | None = None
     base_ref_oid = ""
@@ -189,7 +219,7 @@ async def _fetch_pr_file_metadata(
 
     if files and (not base_ref_oid or not head_ref_oid):
         raise ValueError("GitHub GraphQL response did not include PR base/head refs")
-    return files
+    return files, base_ref_oid, head_ref_oid
 
 
 async def fetch_file_content(
@@ -267,3 +297,50 @@ def _populate_file_patches(files: list[PRFile], raw_diff: str) -> None:
             raise RuntimeError(f"GitHub diff did not include {file.filename!r}")
         file.previous_filename = summary.old_filename
         file.patch = summary.patch
+
+
+def _populate_file_list_patches(files: list[PRFile], result: str) -> None:
+    patches: dict[str, PRFile] = {}
+    for item in parse_paginated_items(result):
+        data = dict(mapping(item))
+        if data.get("patch") is None:
+            data["patch"] = ""
+        file = PRFile.model_validate(data)
+        if not file.filename or file.filename in patches:
+            raise RuntimeError("GitHub returned an invalid changed-file list")
+        file.status = _STATUS_BY_CHANGE_TYPE.get(file.status.upper(), file.status)
+        patches[file.filename] = file
+
+    # ponytail: REST stops at 3,000 files; larger PRs need a local Git fallback.
+    if len(patches) != len(files) or patches.keys() != {
+        file.filename for file in files
+    }:
+        raise RuntimeError("GitHub returned an incomplete changed-file list")
+    for file in files:
+        patch = patches[file.filename]
+        if (file.status, file.additions, file.deletions) != (
+            patch.status,
+            patch.additions,
+            patch.deletions,
+        ):
+            raise RuntimeError("PR changed while loading files; refresh and try again")
+        if file.status in {"renamed", "copied"} and not patch.previous_filename:
+            raise RuntimeError(
+                f"GitHub diff did not include the source path for {file.filename!r}"
+            )
+        _validate_file_list_patch(patch)
+        file.previous_filename = patch.previous_filename
+        file.patch = patch.patch
+
+
+def _validate_file_list_patch(file: PRFile) -> None:
+    message = f"GitHub returned an incomplete or invalid patch for {file.filename!r}"
+    try:
+        patch = PatchSet("--- a/patch\n+++ b/patch\n" + file.patch, metadata_only=True)
+    except UnidiffParseError as error:
+        raise RuntimeError(message) from error
+    if len(patch) != 1 or (patch.added, patch.removed) != (
+        file.additions,
+        file.deletions,
+    ):
+        raise RuntimeError(message)

@@ -5,12 +5,13 @@ import pytest
 
 from rit.services.graphql_request import mapping
 from rit.services.pr_file_request import (
+    _populate_file_list_patches,
     fetch_file_content,
     fetch_pr_files,
     parse_pr_files_page,
 )
 from rit.state.file_projection import diff_from_file_patch
-from rit.state.models import PR, FileViewedState
+from rit.state.models import PR, FileViewedState, PRFile
 from rit.state.store import PRStore
 from rit.ui.widgets.diff_full_file_preview import build_full_file_diff
 
@@ -119,6 +120,150 @@ async def test_fetch_pr_files_uses_graphql_cursor_pagination_and_canonical_patch
     assert files[0].patch == MODIFIED_PATCH.rstrip("\n")
     assert files[1].patch == ADDED_PATCH.rstrip("\n")
     assert diff_calls == [CANONICAL_DIFF_ARGS]
+
+
+@pytest.mark.parametrize("changed_ref", [None, "baseRefOid", "headRefOid"])
+async def test_fetch_pr_files_falls_back_to_paginated_patches_on_diff_limit(
+    changed_ref: str | None,
+) -> None:
+    nodes = [
+        {
+            "path": f"file-{index}.py",
+            "changeType": "MODIFIED",
+            "additions": 1,
+            "deletions": 1,
+            "viewerViewedState": "VIEWED",
+        }
+        for index in range(301)
+    ]
+    body = "@@ -2,2 +2,2 @@\n-old\n+new\n keep"
+    rest_requested = False
+    cursors: list[str | None] = []
+
+    async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        nonlocal rest_requested
+        if args == CANONICAL_DIFF_ARGS:
+            raise RuntimeError(
+                "gh: diff exceeded the maximum number of files (HTTP 406)"
+            )
+        if args == [
+            "api",
+            "repos/owner/repo/pulls/123/files?per_page=100",
+            "--paginate",
+        ]:
+            rest_requested = True
+            return "\n".join(
+                json.dumps(
+                    [
+                        {
+                            "filename": node["path"],
+                            "status": "modified",
+                            "additions": 1,
+                            "deletions": 1,
+                            "patch": body,
+                        }
+                        for node in nodes[start : start + 100]
+                    ]
+                )
+                for start in range(0, len(nodes), 100)
+            )
+        assert args == ["api", "graphql", "--input", "-"]
+        assert input_text is not None
+        variables = json.loads(input_text)["variables"]
+        if variables["first"] == 1:
+            assert rest_requested
+            page = _files_page(nodes[:1])
+            if changed_ref is not None:
+                pr = dict(
+                    mapping(mapping(mapping(page["data"])["repository"])["pullRequest"])
+                )
+                pr[changed_ref] = "changed-revision"
+                page = {"data": {"repository": {"pullRequest": pr}}}
+            return json.dumps(page)
+        cursors.append(variables["after"])
+        start = int(variables["after"] or 0)
+        return json.dumps(
+            _files_page(
+                nodes[start : start + 100],
+                has_next_page=start < 300,
+                end_cursor=str(start + 100),
+            )
+        )
+
+    if changed_ref is not None:
+        with pytest.raises(RuntimeError, match="PR changed while loading"):
+            await fetch_pr_files("owner", "repo", 123, runner=runner)
+        return
+    files = await fetch_pr_files("owner", "repo", 123, runner=runner)
+
+    assert cursors == [None, "100", "200", "300"]
+    assert len(files) == 301
+    assert all(file.viewer_viewed_state is FileViewedState.VIEWED for file in files)
+    assert all(file.patch == body for file in files)
+    diff = diff_from_file_patch(files[-1])
+    assert diff.hunks[0].lines[0].old_line_no == 2
+    assert diff.hunks[0].lines[-1].new_line_no == 3
+
+
+@pytest.mark.parametrize(
+    ("patch", "additions", "deletions", "valid"),
+    [
+        ("@@ -1 +1 @@\n-old\n+new", 1, 1, True),
+        ("@@ -1 +1 @@\n-a\u2028b\n+c\u2028d", 1, 1, True),
+        (
+            "@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n\\ No newline at end of file",
+            1,
+            1,
+            True,
+        ),
+        (None, 0, 0, True),
+        (None, 1, 1, False),
+        ("@@ -1,2 +1,2 @@\n-old\n+new", 1, 1, False),
+        ("@@ -1 +1 @@\n-old\n+new", 2, 1, False),
+    ],
+)
+def test_file_list_patches_reject_incomplete_hunks(
+    patch: str | None,
+    additions: int,
+    deletions: int,
+    valid: bool,
+) -> None:
+    file = PRFile(
+        filename="new name.py",
+        status="renamed",
+        additions=additions,
+        deletions=deletions,
+    )
+    result = json.dumps(
+        [
+            {
+                "filename": file.filename,
+                "previous_filename": "old name.py",
+                "status": "renamed",
+                "additions": additions,
+                "deletions": deletions,
+                "patch": patch,
+            }
+        ]
+    )
+    if valid:
+        _populate_file_list_patches([file], result)
+        assert file.patch == (patch or "")
+        assert file.previous_filename == "old name.py"
+    else:
+        with pytest.raises(RuntimeError, match="incomplete or invalid patch"):
+            _populate_file_list_patches([file], result)
+
+
+@pytest.mark.parametrize(
+    "filenames", [[], ["a.py", "a.py"], ["a.py", "b.py"], ["b.py"]]
+)
+def test_file_list_patches_reject_incomplete_or_duplicate_file_lists(
+    filenames: list[str],
+) -> None:
+    result = json.dumps([{"filename": name} for name in filenames])
+    with pytest.raises(RuntimeError, match="changed-file list"):
+        _populate_file_list_patches([PRFile(filename="a.py")], result)
 
 
 @pytest.mark.parametrize("field", ["baseRefOid", "headRefOid"])

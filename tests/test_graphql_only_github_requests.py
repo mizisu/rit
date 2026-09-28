@@ -15,7 +15,13 @@ CANONICAL_DIFF_REQUEST = ast.parse(
 ).body
 
 
-def test_rest_is_limited_to_standalone_comments_and_canonical_diff() -> None:
+FILE_PATCHES_REQUEST = ast.parse(
+    '["api", f"repos/{owner}/{repo}/pulls/{pr_number}/files?per_page=100", "--paginate"]',
+    mode="eval",
+).body
+
+
+def test_rest_is_limited_to_standalone_comments_and_canonical_patches() -> None:
     violations: list[str] = []
     for path in SERVICES_DIR.glob("*.py"):
         tree = ast.parse(path.read_text(), filename=str(path))
@@ -30,9 +36,10 @@ def test_rest_is_limited_to_standalone_comments_and_canonical_diff() -> None:
                 continue
             if path.name in STANDALONE_REVIEW_COMMENT_MODULES:
                 continue
-            if path.name == "pr_file_request.py" and ast.dump(node) == ast.dump(
-                CANONICAL_DIFF_REQUEST
-            ):
+            if path.name == "pr_file_request.py" and ast.dump(node) in {
+                ast.dump(CANONICAL_DIFF_REQUEST),
+                ast.dump(FILE_PATCHES_REQUEST),
+            }:
                 continue
             violations.append(f"{path.name}:{node.lineno}")
 
