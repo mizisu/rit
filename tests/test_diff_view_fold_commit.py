@@ -146,6 +146,76 @@ async def test_fold_render_policy_tracks_source_lifecycle(
 
 
 @pytest.mark.asyncio
+async def test_split_mode_keeps_added_and_removed_files_in_blocks_after_folding() -> (
+    None
+):
+    app = FoldApp(mode="split")
+    for index, status in ((1, "removed"), (2, "added")):
+        app.store.state.files[index].status = status
+        hunk = app.source.hunks[index]
+        hunk.file_status = status
+        hunk.lines = [
+            DiffLine(
+                number if status == "removed" else None,
+                number if status == "added" else None,
+                f"line {number}" if status == "removed" else "",
+                f"line {number}" if status == "added" else "",
+                is_deleted=status == "removed",
+                is_added=status == "added",
+            )
+            for number in range(1, 31)
+        ]
+
+    async with app.run_test(size=(120, 22)):
+        view = app.view
+        await view.show_diff(app.source.filename, app.source)
+        for folded in (False, True, False):
+            if view._is_file_folded("two.py") != folded:
+                view._set_file_header_selection(1)
+                assert await view.toggle_current_file_fold()
+            assert view.split
+            assert 0 in view._split_blocks_by_line
+            for filename in ("two.py", "three.py"):
+                index = view.file_start_line_index(filename)
+                assert index is not None
+                if not view._is_file_folded(filename):
+                    assert index in view._unified_blocks_by_line
+
+
+@pytest.mark.asyncio
+async def test_fold_captures_viewport_after_pending_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = FoldApp(mode="split", virtual=True)
+    async with app.run_test(size=(120, 18)) as pilot:
+        view = app.view
+        await view.show_diff(app.source.filename, app.source)
+        await pilot.pause()
+        prepared = asyncio.Event()
+        build = view._build_render_plan
+
+        async def observed(*args, **kwargs):
+            result = await build(*args, **kwargs)
+            prepared.set()
+            return result
+
+        monkeypatch.setattr(view, "_build_render_plan", observed)
+        view._set_file_header_selection(1)
+        async with view.lock:
+            refresh = asyncio.create_task(view.toggle_current_file_fold())
+            await asyncio.wait_for(prepared.wait(), timeout=1)
+            view.styles.padding = (2, 0, 0, 0)
+        await refresh
+        await pilot.pause()
+
+        assert view._folded_file_paths == frozenset({"two.py"})
+        assert view.scroll_y == 0
+        header = view._get_file_header_widget(0)
+        assert header is not None
+        assert header.region.y == view.scrollable_content_region.y
+
+
+@pytest.mark.asyncio
 async def test_split_fold_retains_prefix_and_rebuilds_shifted_suffix() -> None:
     app = FoldApp(mode="split")
     async with app.run_test(size=(120, 22)) as pilot:
@@ -628,9 +698,7 @@ async def test_cancelled_preparation_cannot_publish_over_new_source(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("mode", "target_hunk"), [("unified", 0), ("split", 1)]
-)
+@pytest.mark.parametrize(("mode", "target_hunk"), [("unified", 0), ("split", 1)])
 async def test_cancelled_commit_finishes_mount_before_replacement(
     monkeypatch: pytest.MonkeyPatch,
     mode: Literal["unified", "split"],

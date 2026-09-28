@@ -186,9 +186,7 @@ def test_render_eligibility_uses_source_and_projection_sizes(
     )
     for split in (False, True):
         view.split = split
-        assert diff_blocks._should_use_unified_block_renderer(view) is (
-            blocks and not split
-        )
+        assert diff_blocks._should_use_unified_block_renderer(view) is blocks
         assert diff_blocks._should_use_split_block_renderer(view) is (blocks and split)
     assert diff_highlight._should_use_windowed_highlight_strategy(view) is blocks
     assert diff_blocks._block_chunk_limit(view) == (

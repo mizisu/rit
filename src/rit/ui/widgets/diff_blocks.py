@@ -41,7 +41,7 @@ def _should_use_block_renderer(view) -> bool:
 
 
 def _should_use_unified_block_renderer(view) -> bool:
-    return _should_use_block_renderer(view) and not view.split
+    return _should_use_block_renderer(view)
 
 
 def _should_use_split_block_renderer(view) -> bool:

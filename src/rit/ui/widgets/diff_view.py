@@ -2357,6 +2357,8 @@ class DiffView(VerticalScroll):
                 and self._file_navigation_revision != navigation_revision
             ):
                 return False
+            if fold_refresh and self.is_mounted:
+                self._reflow_retained_layout()
             _, desired = self._fold_projection(source, full_file=showing_full_file)
             if layout != (self.mode, self.size.width) or desired != folded_files:
                 return False
