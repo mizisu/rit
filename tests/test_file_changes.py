@@ -165,6 +165,42 @@ def test_sync_file_tree_to_diff_cursor_selects_known_cursor_file() -> None:
     assert file_tree.selected == ("two.py", False)
 
 
+@pytest.mark.parametrize(
+    ("filenames", "current", "expected"),
+    [
+        (["one.py", "two.py", "three.py"], "one.py", "two.py"),
+        (["one.py", "two.py", "three.py"], "two.py", "three.py"),
+        (["one.py", "two.py"], "two.py", None),
+        (["one.py"], "one.py", None),
+        (["one.py"], "missing.py", None),
+        ([], "one.py", None),
+    ],
+)
+def test_select_file_after_preserves_folds_without_wrapping(
+    monkeypatch: pytest.MonkeyPatch,
+    filenames: list[str],
+    current: str,
+    expected: str | None,
+) -> None:
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename=name, viewer_viewed_state=FileViewedState.VIEWED)
+        for name in filenames
+    ]
+    changes = FileChanges(store)
+    opened: list[tuple[str, bool, bool, bool]] = []
+
+    def open_file(
+        filename: str, *, focus_diff: bool, expand: bool, top_align: bool
+    ) -> None:
+        opened.append((filename, focus_diff, expand, top_align))
+
+    monkeypatch.setattr(changes, "open_file", open_file)
+    changes.select_file_after(current)
+
+    assert opened == ([(expected, True, False, True)] if expected is not None else [])
+
+
 def test_store_get_file_diff_parses_lazily_and_caches_status_metadata() -> None:
     patch = "@@ -1,1 +1,1 @@\n-old\n+new"
     store = PRStore()
@@ -1152,8 +1188,10 @@ async def test_file_changes_loads_lazy_file_diffs_as_combined_scroll() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("expand", [False, True])
 async def test_open_file_during_combined_load_does_not_render_single_file(
     monkeypatch: pytest.MonkeyPatch,
+    expand: bool,
 ) -> None:
     patch = "@@ -1,1 +1,1 @@\n-old\n+new"
     filenames = ["one.py", "two.py"]
@@ -1196,21 +1234,29 @@ async def test_open_file_during_combined_load_does_not_render_single_file(
 
         file_changes.diff_view.show_diff = counted_show_diff  # type: ignore[method-assign]
 
-        file_changes.open_file("two.py", focus_diff=True)
-        await pilot.pause()
-        await pilot.pause()
-
+        file_changes.open_file(
+            "two.py", focus_diff=True, expand=expand, top_align=not expand
+        )
         assert calls == []
 
         release_one.set()
-        await pilot.pause()
-        await pilot.pause()
-        await pilot.pause()
+        await wait_until(lambda: not file_changes._combined_render_worker_active)
+        await wait_until(lambda: not file_changes._file_render_worker_active)
 
         assert calls == ["All files"]
         assert file_changes.diff_view.current_file == "All files"
         assert file_changes.diff_view.cursor_line == 2
-        assert not file_changes.diff_view._folded_file_paths
+        assert file_changes.diff_view._folded_file_paths == (
+            frozenset() if expand else frozenset({"two.py"})
+        )
+        assert file_changes.diff_view.selected_file_header_path() == (
+            None if expand else "two.py"
+        )
+        if not expand:
+            assert (
+                file_changes.diff_view.scroll_y
+                == (file_changes.diff_view._hunk_header_top_offsets[1])
+            )
         assert store.state.files[1].viewer_viewed_state == FileViewedState.VIEWED
         assert store.state.selected_file == "two.py"
 
@@ -1769,6 +1815,72 @@ async def test_combined_diff_maps_pending_drafts_by_file_path() -> None:
         await pilot.pause()
 
         assert sorted(file_changes.diff_view._pending_comment_drafts_by_line) == [3]
+
+
+@pytest.mark.asyncio
+async def test_viewed_advance_top_aligns_virtual_files_through_folding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lines = "\n".join(f" line {line}" for line in range(1, 81))
+    patch = f"@@ -1,80 +1,80 @@\n{lines}"
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename=name, status="modified", patch=patch)
+        for name in ("one.py", "two.py", "three.py")
+    ]
+    store.state.files[-1].viewer_viewed_state = FileViewedState.VIEWED
+    store.state.file_diffs = {
+        file.filename: parse_patch(patch, file.filename) for file in store.state.files
+    }
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test(size=(100, 12)) as pilot:
+        changes = app.query_one(FileChanges)
+        view = changes.diff_view
+        monkeypatch.setattr(view, "VIRTUALIZE_LINE_THRESHOLD", 1)
+        monkeypatch.setattr(view, "VIRTUAL_WINDOW_RADIUS", 10)
+        monkeypatch.setattr(view, "VIRTUAL_WINDOW_SHIFT_MARGIN", 2)
+        changes.refresh_files()
+        await wait_until(lambda: not changes._combined_render_worker_active)
+        await wait_until(lambda: not changes._file_render_worker_active)
+        await pilot.pause()
+        view.focus()
+
+        for index in (0, 1):
+            file = store.state.files[index]
+            file.viewer_viewed_state = FileViewedState.VIEWED
+            changes.update_file_view_state(file.filename)
+            changes.select_file_after(file.filename)
+            await wait_until(
+                lambda: not view._fold_worker_active and not view._virt.render_pending
+            )
+            await pilot.pause()
+
+            target = store.state.files[index + 1].filename
+            header = view._get_file_header_widget(index + 1)
+            assert header is not None
+            assert header.region.y == view.scrollable_content_region.y
+            assert view.scroll_y == view._hunk_header_top_offsets[index + 1]
+            assert changes.current_diff_file_target() == target
+            assert view._is_file_folded(target) == (index == 1)
+            assert view.has_focus
+
+        await pilot.resize_terminal(100, 24)
+        await pilot.pause()
+        assert view.scroll_y == view._hunk_header_top_offsets[2]
+        assert view.selected_file_header_path() == "three.py"
+        changes.open_file("three.py", focus_diff=True)
+        await wait_until(lambda: not view._fold_worker_active and not view._virt.render_pending)
+        view.action_scroll_end()
+        await wait_until(lambda: not view._virt.render_pending)
+        await pilot.pause()
+        assert view._current_cursor_viewport_offset() == view.scrollable_content_region.height - 1
+        await view.show_diff("other.py", parse_patch(patch, "other.py"))
+        assert not view._file_scroll_padding.display
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from itertools import pairwise
 from typing import TYPE_CHECKING, ClassVar, Literal
 
 from textual import getters, on
@@ -8,8 +9,10 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal
 from textual.css.query import NoMatches
+from textual.message import Message
 from textual.reactive import reactive
 from textual.widgets import Static
+from textual.worker import Worker, WorkerState
 
 from rit.core.types import FileDiff
 from rit.state.models import LoadingState
@@ -85,6 +88,9 @@ class FileChanges(Horizontal):
         Binding("]", "next_file", "Next File", show=False),
     ]
 
+    class WorkspaceReady(Message):
+        """A current-revision diff finished rendering."""
+
     sidebar_width = reactive(35)  # Default width
 
     file_tree = getters.query_one(FileTree)
@@ -111,7 +117,7 @@ class FileChanges(Horizontal):
         self._drag_delta = 0
         self._is_dragging = False
         self._queued_file_render: (
-            tuple[int, str, FileDiff | None, bool, bool] | None
+            tuple[int, str, FileDiff | None, bool, bool, bool] | None
         ) = None
         self._file_render_request_revision = 0
         self._file_render_worker_active = False
@@ -171,6 +177,33 @@ class FileChanges(Horizontal):
         elif key == "ui.theme" and isinstance(value, str):
             self.diff_view.refresh_syntax_theme()
 
+    @on(Worker.StateChanged)
+    def _file_render_finished(self, event: Worker.StateChanged) -> None:
+        if (
+            event.worker.name == "file-diff-render"
+            and event.state == WorkerState.SUCCESS
+            and self.workspace_ready
+        ):
+            self.post_message(self.WorkspaceReady())
+
+    def reset_workspace(self) -> None:
+        """Discard render requests and cached documents for a superseded PR revision."""
+        self.workers.cancel_node(self)
+        self._file_render_request_revision += 1
+        self._queued_file_render = None
+        self._file_render_worker_active = False
+        self._combined_render_worker_active = False
+        self._render_session = FilesRenderSession()
+
+    @property
+    def workspace_ready(self) -> bool:
+        document = self._render_session.combined_document
+        return (
+            document is not None
+            and self.diff_view._source_diff is document.diff
+            and not self._file_render_worker_active
+        )
+
     def refresh_files(self) -> None:
         self.file_tree.refresh_files()
 
@@ -200,6 +233,15 @@ class FileChanges(Horizontal):
 
     def select_prev_file(self) -> None:
         self._select_relative_file(-1)
+
+    def select_file_after(self, filename: str) -> None:
+        """Advance without wrapping or changing the next file's fold state."""
+        for current, following in pairwise(self.store.state.files):
+            if current.filename == filename:
+                self.open_file(
+                    following.filename, focus_diff=True, expand=False, top_align=True
+                )
+                return
 
     def _select_relative_file(self, direction: Literal[-1, 1]) -> None:
         files = self.store.state.files
@@ -235,22 +277,28 @@ class FileChanges(Horizontal):
         *,
         focus_diff: bool,
         preserve_scroll_if_near_center: bool = False,
+        expand: bool = True,
+        top_align: bool = False,
     ) -> None:
-        """Open a file diff or jump within the combined diff."""
+        """Open a file diff, optionally retaining its fold state."""
         if not filename:
             return
 
-        self.diff_view.expand_file(filename)
+        if expand:
+            self.diff_view.expand_file(filename)
         self._render_session.clear_pending_location_jump()
         if self._jump_to_combined_file(
             filename,
             focus_diff=focus_diff,
             preserve_scroll_if_near_center=preserve_scroll_if_near_center,
+            top_align=top_align,
         ):
             self.file_tree.select_file(filename, emit_message=False)
             return
 
-        if self._queue_combined_file_jump(filename, focus_diff=focus_diff):
+        if self._queue_combined_file_jump(
+            filename, focus_diff=focus_diff, top_align=top_align
+        ):
             return
 
         if self.diff_view.current_file == filename:
@@ -258,6 +306,8 @@ class FileChanges(Horizontal):
             self.file_tree.select_file(filename, emit_message=False)
             if focus_diff:
                 self.diff_view.focus()
+            if top_align:
+                self.diff_view.scroll_file_to_top(filename)
             return
 
         self.store.state.selected_file = filename
@@ -267,6 +317,7 @@ class FileChanges(Horizontal):
             None,
             focus_diff=focus_diff,
             sync_tree_selection=False,
+            top_align=top_align,
         )
 
     def _uses_combined_files(self) -> bool:
@@ -277,13 +328,16 @@ class FileChanges(Horizontal):
     def _files_are_still_loading(self) -> bool:
         return self.store.state.files_loading == LoadingState.LOADING
 
-    def _queue_combined_file_jump(self, filename: str, *, focus_diff: bool) -> bool:
+    def _queue_combined_file_jump(
+        self, filename: str, *, focus_diff: bool, top_align: bool = False
+    ) -> bool:
         if self._files_are_still_loading():
             return False
         if not self._render_session.queue_combined_file_jump(
             self.store.state.files,
             filename,
             focus_diff=focus_diff,
+            top_align=top_align,
         ):
             return False
 
@@ -389,6 +443,7 @@ class FileChanges(Horizontal):
         *,
         focus_diff: bool,
         preserve_scroll_if_near_center: bool = False,
+        top_align: bool = False,
     ) -> bool:
         if not self._render_session.showing_combined_files:
             return False
@@ -404,12 +459,23 @@ class FileChanges(Horizontal):
             return False
 
         self.store.state.selected_file = filename
-        self.diff_view.jump_to_line_index(
-            line_index,
-            side="RIGHT",
-            focus=focus_diff,
-            preserve_scroll_if_near_center=preserve_scroll_if_near_center,
-        )
+        if self.diff_view._should_collapse_file(filename):
+            self.diff_view._restore_file_fold_target(
+                filename,
+                preserve_header_position=False,
+                viewport_offset=None,
+            )
+            if focus_diff:
+                self.diff_view.focus()
+        else:
+            self.diff_view.jump_to_line_index(
+                line_index,
+                side="RIGHT",
+                focus=focus_diff,
+                preserve_scroll_if_near_center=preserve_scroll_if_near_center,
+            )
+        if top_align:
+            self.diff_view.scroll_file_to_top(filename)
         return True
 
     def _combined_file_for_line(self, line_index: int) -> str | None:
@@ -417,6 +483,9 @@ class FileChanges(Horizontal):
 
     def current_diff_file_target(self) -> str | None:
         """Return the real file represented by the current diff cursor."""
+        header_path = self.diff_view.selected_file_header_path()
+        if header_path is not None:
+            return header_path
         if self._showing_combined_files:
             return (
                 self.diff_view.file_for_line_index(self.diff_view.cursor_line)
@@ -436,9 +505,7 @@ class FileChanges(Horizontal):
         self.file_tree.select_file(filename, emit_message=False)
 
     def _sync_combined_selection_for_cursor(self) -> None:
-        filename = self.diff_view.file_for_line_index(
-            self.diff_view.cursor_line
-        ) or self._combined_file_for_line(self.diff_view.cursor_line)
+        filename = self.current_diff_file_target()
         if filename is None:
             return
         if (
@@ -531,7 +598,9 @@ class FileChanges(Horizontal):
         filename = pending.filename
         focus_diff = pending.focus_diff
         self.file_tree.select_file(filename, emit_message=False)
-        return self._jump_to_combined_file(filename, focus_diff=focus_diff)
+        return self._jump_to_combined_file(
+            filename, focus_diff=focus_diff, top_align=pending.top_align
+        )
 
     def _apply_pending_location_jump(self, filename: str) -> bool:
         pending = self._render_session.take_pending_location_jump(filename)
@@ -575,6 +644,7 @@ class FileChanges(Horizontal):
         *,
         focus_diff: bool,
         sync_tree_selection: bool,
+        top_align: bool = False,
     ) -> int:
         self._file_render_request_revision += 1
         self._queued_file_render = (
@@ -583,6 +653,7 @@ class FileChanges(Horizontal):
             diff,
             focus_diff,
             sync_tree_selection,
+            top_align,
         )
         if self._file_render_worker_active:
             return self._file_render_request_revision
@@ -612,10 +683,12 @@ class FileChanges(Horizontal):
                 diff,
                 focus_diff,
                 sync_tree_selection,
+                top_align,
             ) = request
             if filename != COMBINED_DIFF_FILENAME and self._queue_combined_file_jump(
                 filename,
                 focus_diff=focus_diff,
+                top_align=top_align,
             ):
                 continue
 
@@ -647,6 +720,8 @@ class FileChanges(Horizontal):
                 self.file_tree.select_file(filename, emit_message=False)
             if focus_diff:
                 self.diff_view.focus()
+            if top_align:
+                self.diff_view.scroll_file_to_top(filename)
 
     @on(FileTree.FileSelected)
     def on_file_tree_file_selected(self, event: FileTree.FileSelected) -> None:

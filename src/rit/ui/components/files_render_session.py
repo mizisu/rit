@@ -34,6 +34,7 @@ class CombinedRenderRequest:
 class CombinedFileJump:
     filename: str
     focus_diff: bool
+    top_align: bool = False
 
 
 @dataclass(frozen=True)
@@ -130,6 +131,7 @@ class FilesRenderSession:
         filename: str,
         *,
         focus_diff: bool,
+        top_align: bool = False,
     ) -> bool:
         if not self.uses_combined_files(files):
             return False
@@ -137,6 +139,7 @@ class FilesRenderSession:
         self._pending_combined_file_jump = CombinedFileJump(
             filename=filename,
             focus_diff=focus_diff,
+            top_align=top_align,
         )
         return True
 

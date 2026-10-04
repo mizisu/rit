@@ -1,6 +1,8 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
+from textual.widgets import Tree
 
 from rit.app import RitApp
 from rit.core.diff import parse_patch
@@ -20,13 +22,19 @@ class CaptureFileChanges:
         self.updated.append(filename)
 
 
-def test_toggle_file_viewed_uses_combined_diff_cursor_file() -> None:
-    file = PRFile(filename="one.py")
+@pytest.mark.parametrize("state", list(FileViewedState))
+@pytest.mark.parametrize("diff_focused", [False, True])
+def test_toggle_file_viewed_advances_only_when_marking_in_diff(
+    state: FileViewedState,
+    diff_focused: bool,
+) -> None:
+    file = PRFile(filename="one.py", viewer_viewed_state=state)
     updates: list[str] = []
     collapsed: list[str] = []
+    advanced: list[str] = []
 
     class DiffView:
-        has_focus = True
+        has_focus = diff_focused
         current_file = "All files"
 
         def collapse_viewed_file(self, filename: str) -> None:
@@ -34,6 +42,14 @@ def test_toggle_file_viewed_uses_combined_diff_cursor_file() -> None:
 
     class FileChanges:
         diff_view = DiffView()
+        file_tree = SimpleNamespace(
+            query_one=lambda *_args: SimpleNamespace(
+                has_focus=True, cursor_node=SimpleNamespace(data="one.py")
+            )
+        )
+
+        def select_file_after(self, filename: str) -> None:
+            advanced.append(filename)
 
         def current_diff_file_target(self) -> str:
             return "one.py"
@@ -57,9 +73,13 @@ def test_toggle_file_viewed_uses_combined_diff_cursor_file() -> None:
 
     screen.action_toggle_file_viewed()
 
-    assert file.viewer_viewed_state == FileViewedState.VIEWED
-    assert collapsed == ["one.py"]
+    marking = state != FileViewedState.VIEWED
+    assert file.viewer_viewed_state == (
+        FileViewedState.VIEWED if marking else FileViewedState.UNVIEWED
+    )
+    assert collapsed == (["one.py"] if marking else [])
     assert updates == ["one.py"]
+    assert advanced == (["one.py"] if marking and diff_focused else [])
 
 
 @pytest.mark.asyncio
@@ -73,9 +93,11 @@ async def test_toggle_targets_new_file_when_focus_moves_during_viewed_refresh(
 
     patch = "@@ -1 +1 @@\n-old\n+new"
     files = [
-        PRFile(filename="one.py", status="modified", patch=patch),
-        PRFile(filename="two.py", status="modified", patch=patch),
+        PRFile(filename=name, status="modified", patch=patch)
+        for name in ("one.py", "two.py", "three.py", "four.py")
     ]
+    files[1].viewer_viewed_state = FileViewedState.VIEWED
+    files[3].viewer_viewed_state = FileViewedState.VIEWED
     app = RitApp(owner="test", repo="repo", pr_number=123)
 
     async with app.run_test(size=(120, 30)) as pilot:
@@ -89,14 +111,26 @@ async def test_toggle_targets_new_file_when_focus_moves_during_viewed_refresh(
             file.filename: parse_patch(patch, file.filename) for file in files
         }
 
+        fail_first = asyncio.Event()
+
         async def mark_file_as_viewed(_pr_id: str, filename: str) -> None:
-            assert filename in {"one.py", "two.py"}
+            if filename == "one.py":
+                await fail_first.wait()
+                raise GitHubError("failed")
+
+        async def unmark_file_as_viewed(_pr_id: str, _filename: str) -> None:
+            return None
 
         monkeypatch.setattr(store._service, "mark_file_as_viewed", mark_file_as_viewed)
+        monkeypatch.setattr(
+            store._service, "unmark_file_as_viewed", unmark_file_as_viewed
+        )
 
+        diff_view = screen.file_changes.diff_view
+        diff_view._manually_folded_files.add("three.py")
+        diff_view._expanded_viewed_files.add("four.py")
         screen.switch_tab(1)
         screen.file_changes.refresh_files()
-        diff_view = screen.file_changes.diff_view
         await wait_until(
             lambda: diff_view.current_file == "All files",
             timeout=2.0,
@@ -130,6 +164,12 @@ async def test_toggle_targets_new_file_when_focus_moves_during_viewed_refresh(
         monkeypatch.setattr(diff_view, "show_diff", blocked_show_diff)
 
         screen.action_toggle_file_viewed()
+        assert screen.file_changes.current_diff_file_target() == "two.py"
+        assert diff_view.selected_file_header_path() == "two.py"
+        assert screen.file_changes.file_tree.selected_file == "two.py"
+        assert "two.py" in diff_view._folded_file_paths
+        assert diff_view.scroll_y == diff_view._hunk_header_top_offsets[1]
+        assert diff_view.has_focus
         await asyncio.wait_for(refresh_started.wait(), timeout=2.0)
         refresh_worker = next(
             worker
@@ -137,19 +177,49 @@ async def test_toggle_targets_new_file_when_focus_moves_during_viewed_refresh(
             if worker.name == "diff-viewed-fold-refresh"
         )
 
-        second_line = diff_view.file_start_line_index("two.py")
-        assert second_line is not None
-        diff_view.jump_to_line_index(second_line, side="RIGHT", focus=True)
-        assert screen.file_changes.current_diff_file_target() == "two.py"
+        screen.file_changes.open_file("three.py", focus_diff=True, expand=False)
+        assert diff_view.selected_file_header_path() == "three.py"
+        assert "three.py" in diff_view._folded_file_paths
 
         continue_refresh.set()
         await refresh_worker.wait()
-        assert screen.file_changes.current_diff_file_target() == "two.py"
+        assert screen.file_changes.current_diff_file_target() == "three.py"
 
         screen.action_toggle_file_viewed()
+        assert files[2].viewer_viewed_state == FileViewedState.VIEWED
+        assert screen.file_changes.current_diff_file_target() == "four.py"
+        assert "four.py" not in diff_view._folded_file_paths
+        assert "four.py" in diff_view._expanded_viewed_files
+        assert diff_view.scroll_y == diff_view._hunk_header_top_offsets[3]
 
-        assert files[0].viewer_viewed_state == FileViewedState.VIEWED
-        assert files[1].viewer_viewed_state == FileViewedState.VIEWED
+        screen.action_toggle_file_viewed()
+        assert files[3].viewer_viewed_state == FileViewedState.UNVIEWED
+        assert screen.file_changes.current_diff_file_target() == "four.py"
+        screen.action_toggle_file_viewed()
+        assert files[3].viewer_viewed_state == FileViewedState.VIEWED
+        assert screen.file_changes.current_diff_file_target() == "four.py"
+        await wait_until(lambda: not diff_view._fold_worker_active)
+        assert diff_view.selected_file_header_path() == "four.py"
+        assert diff_view.scroll_y == diff_view._hunk_header_top_offsets[3]
+
+        fail_first.set()
+        await wait_until(
+            lambda: (
+                files[0].viewer_viewed_state == FileViewedState.UNVIEWED
+                and not diff_view._fold_worker_active
+            )
+        )
+        assert screen.file_changes.current_diff_file_target() == "four.py"
+        assert diff_view.scroll_y == diff_view._hunk_header_top_offsets[3]
+
+        file_tree = screen.file_changes.file_tree
+        file_tree.select_file("two.py", emit_message=False)
+        file_tree.query_one("#file-tree", Tree).focus()
+        await pilot.pause()
+        screen.action_toggle_file_viewed()
+        assert files[1].viewer_viewed_state == FileViewedState.UNVIEWED
+        assert screen.file_changes.current_diff_file_target() == "four.py"
+        assert file_tree.query_one("#file-tree", Tree).has_focus
 
 
 @pytest.mark.asyncio
