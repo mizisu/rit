@@ -108,20 +108,17 @@ Static {
     color: $foreground;
 }
 
-Markdown {
-    margin: 0 1;
+CommentCard .comment-content Static {
+    color: $text 85%;
 }
 
-MarkdownH1 {
-    color: $primary;
-    text-style: bold;
-    margin: 1 0;
+CommentCard .comment-content MarkdownHeader,
+CommentCard .comment-content MarkdownTableContent > .header {
+    color: $text 100%;
 }
 
-MarkdownH2 {
-    color: $secondary;
-    text-style: bold;
-    margin: 1 0;
+CommentCard.description-container .comment-header {
+    color: $text-muted;
 }
 
 Toast {

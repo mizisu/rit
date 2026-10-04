@@ -177,18 +177,14 @@ class PRTimeline(Vertical):
     PRTimeline .timeline-event {
         width: 1fr;
         height: auto;
-        padding: 0 1;
+        padding: 0 3;
         margin: 0 0 1 0;
         border: solid #363a4f;
         background: #1e2030;
     }
 
-    PRTimeline .timeline-event:hover {
-        background: #24273a;
-    }
-
     PRTimeline .timeline-event.--selected {
-        border: solid #8aadf4;
+        border-left: solid #8aadf4;
     }
 
     PRTimeline Collapsible.timeline-event {
@@ -196,12 +192,12 @@ class PRTimeline(Vertical):
     }
 
     PRTimeline Collapsible.timeline-event > CollapsibleTitle {
-        padding: 0 1;
+        padding: 0 3;
         color: $foreground;
     }
 
     PRTimeline Collapsible.timeline-event > Contents {
-        padding: 0 2;
+        padding: 0 4;
     }
     """
 
@@ -306,7 +302,7 @@ class PRTimeline(Vertical):
         description_card = self._description_card_widget()
         description_card.remove_class("timeline-loading")
         description_card.set_content(
-            f"[bold]{author_name}[/] [#6e738d]opened this PR[/]",
+            f"Description · {author_name}",
             pr.body or "*No description provided.*",
             markdown_base_url=self._markdown_base_url(),
         )

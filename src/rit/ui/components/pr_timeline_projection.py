@@ -105,7 +105,6 @@ def build_timeline_items(
     for thread in orphan_threads:
         items.append(TimelineItem(when=thread.created_at, kind="thread", thread=thread))
 
-    # ponytail: same-second merge/close pairing; use explicit links if GitHub exposes them.
     merged_times = {
         datetime_sort_key(event.created_at)
         for event in events

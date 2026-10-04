@@ -188,8 +188,10 @@ async def test_pr_info_keeps_long_reviewers_on_one_line_with_full_tooltip() -> N
                 .plain
                 for line in full_lines
             ]
-            assert rendered[0].endswith("…")
-            assert rendered[1].endswith("…")
+            for full_line, rendered_line in zip(full_lines[:2], rendered[:2]):
+                assert rendered_line.endswith("…") == (
+                    cell_len(full_line) > reviewers.content_size.width
+                )
             assert rendered[2] == "✓ @alice"
             assert isinstance(reviewers.tooltip, str)
             assert (
@@ -207,12 +209,16 @@ async def test_pr_info_keeps_long_reviewers_on_one_line_with_full_tooltip() -> N
 
 
 @pytest.mark.asyncio
-async def test_pr_description_uses_full_width_and_block_rhythm() -> None:
+async def test_pr_description_uses_document_width_and_block_rhythm() -> None:
     store = PRStore()
     store.state.pr = PR(
         number=1,
         title="Improve description rendering",
-        body="Opening context for reviewers.\n\n- First change\n- Second change",
+        body=(
+            "## Background\n\nOpening context for reviewers.\n\n"
+            "## Changes\n\n- First change\n  - Nested detail\n- Second change\n\n"
+            "1. Verify behavior\n2. Run tests"
+        ),
         user=PRUser(login="alice"),
     )
 
@@ -220,19 +226,43 @@ async def test_pr_description_uses_full_width_and_block_rhythm() -> None:
         def compose(self) -> ComposeResult:
             yield PRInfo(store)
 
-    app = TestApp()
-    async with app.run_test(size=(160, 40)):
-        await wait_until(lambda: len(app.query("MarkdownBulletList")) == 1)
+    app = TestApp(css_path=ROOT / "src/rit/rit.tcss")
+    async with app.run_test(size=(180, 40)) as pilot:
+        await wait_until(lambda: len(app.query("MarkdownList > Horizontal")) == 5)
+        await pilot.pause()
 
         description = app.query_one("#pr-description-card")
         main_content = app.query_one("#main-content")
         paragraph = app.query_one("Markdown > MarkdownParagraph")
         bullet_list = app.query_one("Markdown > MarkdownBulletList")
+        header = description.query_one(".comment-header", Static)
 
+        assert str(header.content) == "Description · alice"
         assert description.has_class("reading")
         assert description.region.width == main_content.content_region.width
+        assert 120 <= description.content_region.width <= 128
+        assert description.styles.background.hex == "#1E2030"
+        assert description.styles.border.top[0] == "solid"
+        assert description.styles.border.left[0] == "solid"
+        assert description.styles.border.top == description.styles.border.right
+        assert description.styles.border.left != description.styles.border.top
+        assert description.styles.padding.top == 1
+        assert description.styles.padding.left == description.styles.padding.right == 3
         assert paragraph.styles.margin.bottom == 1
-        assert bullet_list.styles.margin.bottom == 1
+        assert bullet_list.styles.margin.bottom == 0
+        for index, heading in enumerate(description.query("MarkdownHeader")):
+            assert heading.styles.margin.top == (0 if index == 0 else 2)
+            assert heading.styles.margin.bottom == 1
+        for paragraph in description.query("MarkdownList MarkdownParagraph"):
+            assert paragraph.styles.margin.bottom == 1
+        nested_item = description.query_one("MarkdownList MarkdownList > Horizontal")
+        assert nested_item.styles.margin.bottom == 0
+
+        for width in (80, 40):
+            await pilot.resize_terminal(width, 40)
+            await pilot.pause()
+            assert description.region.right <= main_content.content_region.right
+            assert description.content_region.width > 0
 
 
 def test_pr_info_mount_ignores_missing_scroll_widgets(
@@ -535,7 +565,7 @@ def test_pr_info_single_assignee_rendering_skips_iteration(
     assert assignees_widget.content == "@alice"
 
 
-def test_pr_info_css_uses_github_like_center_column() -> None:
+def test_pr_info_css_uses_document_sized_center_column() -> None:
     css = (ROOT / "src/rit/ui/components/pr_info.tcss").read_text()
 
     pr_info_block = css.split("PRInfo {", 1)[1].split("}", 1)[0]
@@ -544,7 +574,7 @@ def test_pr_info_css_uses_github_like_center_column() -> None:
     wide_block = css.split("PRInfo.-wide {", 1)[1].split("}", 1)[0]
 
     assert "align: center top;" in pr_info_block
-    assert "max-width: 152;" in layout_block
+    assert "max-width: 183;" in layout_block
     assert "width: 100%;" in layout_block
     assert "width: 1fr;" in main_scroll_block
     assert "scrollbar-gutter: stable;" in main_scroll_block

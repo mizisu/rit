@@ -29,11 +29,11 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Markdown, Static
+from textual.widgets import Static
 from textual_image._terminal import get_cell_size
 from textual_image.widget import TGPImage as TerminalImage
 
-from rit.ui.github_markdown import github_markdown_parser
+from rit.ui.github_markdown import GitHubMarkdown, github_markdown_parser
 from rit.ui.terminal_graphics import (
     configure_terminal_graphics,
     terminal_graphics_status_message,
@@ -739,7 +739,7 @@ def mount_markdown_image_parts(
             container.mount(MarkdownImageBlock(part.image, fetcher=image_fetcher))
         elif part.content:
             container.mount(
-                Markdown(part.content, parser_factory=github_markdown_parser)
+                GitHubMarkdown(part.content, parser_factory=github_markdown_parser)
             )
 
 

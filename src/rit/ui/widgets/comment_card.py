@@ -18,7 +18,7 @@ __all__ = (
 
 
 BODY_PREVIEW_RETIRE_DELAY = 0.8
-_PREVIEW_MARKDOWN_MARKERS = frozenset("<![`*_#>-")
+_PREVIEW_MARKDOWN_MARKERS = frozenset("<![`*_#>-+~")
 
 
 class CommentCard(Vertical):
@@ -30,22 +30,32 @@ class CommentCard(Vertical):
         width: 1fr;
         background: #1e2030;
         border: solid #363a4f;
-        padding: 1;
+        padding: 1 3;
         margin-bottom: 1;
     }
 
+    CommentCard.description-container {
+        margin-bottom: 2;
+    }
+
+    CommentCard.description-container .comment-header {
+        color: $text-muted;
+    }
+
     CommentCard.thread-comment {
+        background: transparent;
         border: none;
+        border-left: blank;
         margin-bottom: 0;
         padding: 1 1 1 1;
-        background: #1e2030;
     }
 
     CommentCard.thread-reply {
+        background: transparent;
         border: none;
+        border-left: solid #363a4f;
         margin-bottom: 0;
         padding: 1 1 1 3;
-        background: #24273a;
     }
 
     CommentCard.pending-draft {
@@ -53,8 +63,6 @@ class CommentCard(Vertical):
     }
 
     CommentCard.timeline-loading {
-        background: #1a1c29;
-        border: solid #2f3348;
         color: #6e738d;
     }
 
@@ -63,13 +71,9 @@ class CommentCard(Vertical):
         text-style: bold;
     }
 
-    CommentCard.pending-draft.--cursor-line {
-        background: #363a4f;
-    }
-
-    CommentCard.thread-comment.--cursor-line,
-    CommentCard.thread-reply.--cursor-line {
-        background: #363a4f;
+    CommentCard.--selected,
+    CommentCard.--cursor-line {
+        border-left: solid #8aadf4;
     }
 
     CommentCard.review-submit-pending-item {
@@ -131,20 +135,76 @@ class CommentCard(Vertical):
     }
 
     CommentCard .comment-content Markdown > MarkdownParagraph,
-    CommentCard .comment-content Markdown > MarkdownBulletList,
-    CommentCard .comment-content Markdown > MarkdownOrderedList,
-    CommentCard .comment-content Markdown > MarkdownBlockQuote {
+    CommentCard .comment-content Markdown > MarkdownBlockQuote,
+    CommentCard .comment-content MarkdownList MarkdownParagraph {
         margin: 0 0 1 0;
     }
 
-    CommentCard .comment-content MarkdownH1,
-    CommentCard .comment-content MarkdownH2,
-    CommentCard .comment-content MarkdownH3 {
-        margin: 1 0 0 0;
+    CommentCard .comment-content MarkdownHeader {
+        margin: 2 0 1 0;
+        color: $foreground;
+        background: transparent;
+        text-style: bold;
+    }
+
+    CommentCard .comment-content Markdown > MarkdownHeader:first-child {
+        margin: 0 0 1 0;
+    }
+
+    CommentCard .comment-content MarkdownBullet {
+        color: $foreground;
+    }
+
+    CommentCard .comment-content MarkdownBlockQuote {
+        background: transparent;
+        border-left: solid #6e738d;
+        padding: 0 2;
+    }
+
+    CommentCard .comment-content MarkdownBlockQuote > MarkdownParagraph {
+        margin-bottom: 1;
+    }
+
+    CommentCard .comment-content MarkdownBlockQuote > MarkdownParagraph:last-child {
+        margin: 0;
+    }
+
+    CommentCard .comment-content MarkdownHorizontalRule {
+        border-bottom: solid #363a4f;
+        margin: 1 0;
+    }
+
+    CommentCard .comment-content MarkdownTableContent {
+        keyline: thin #363a4f;
+    }
+
+    CommentCard .comment-content MarkdownTableContent > .header {
+        color: $foreground;
+        text-style: bold;
+    }
+
+    CommentCard .comment-content MarkdownBlock,
+    CommentCard .comment-content MarkdownTableCellContents {
+        link-color: #8aadf4;
+        link-background: transparent;
+        link-style: none;
+        link-color-hover: #b7bdf8;
+        link-background-hover: transparent;
+        link-style-hover: underline;
+    }
+
+    CommentCard .comment-content Markdown MarkdownBlock > .strong {
+        color: $text 95%;
+        text-style: bold;
+    }
+
+    CommentCard .comment-content Markdown MarkdownBlock > .code_inline {
+        color: $text 85%;
+        background: $foreground 6%;
     }
 
     CommentCard .comment-content MarkdownFence {
-        padding: 0 1;
+        padding: 0;
     }
 
     CommentCard .comment-content MarkdownH1 {
@@ -372,8 +432,8 @@ class CommentCard(Vertical):
         stripped = re.sub(r"\[[ xX]\]", " ", stripped)
         stripped = re.sub(r"<[^>]+>", " ", stripped)
         stripped = stripped.replace("```", " ").replace("`", "")
-        stripped = stripped.replace("**", "").replace("__", "")
-        stripped = stripped.lstrip("-*># ")
+        stripped = stripped.replace("**", "").replace("__", "").replace("~~", "")
+        stripped = stripped.lstrip("-+*># ")
         return _collapse_preview_whitespace(stripped)
 
 
@@ -382,7 +442,10 @@ def _has_body(body: str) -> bool:
 
 
 def _is_plain_body(body: str) -> bool:
-    return not _has_preview_markdown_marker(body)
+    return (
+        not _has_preview_markdown_marker(body)
+        and re.search(r"(?m)^ {0,3}\d{1,9}[.)][ \t]+", body) is None
+    )
 
 
 def _has_preview_markdown_marker(text: str) -> bool:

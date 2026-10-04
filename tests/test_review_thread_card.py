@@ -179,30 +179,24 @@ def test_thread_comment_cards_keep_breathing_room_between_meta_and_body() -> Non
     header_block = css.split("CommentCard.thread-comment .comment-header,", 1)[1].split(
         "}", 1
     )[0]
-    cursor_block = css.split("CommentCard.thread-comment.--cursor-line,", 1)[1].split(
-        "}", 1
-    )[0]
 
     assert "padding: 1 1 1 1;" in thread_block
     assert "padding: 1 1 1 3;" in reply_block
     assert "margin: 0 0 1 0;" in header_block
     assert "margin: 0;" not in header_block
-    assert "background: #363a4f;" in cursor_block
-    assert "border:" not in cursor_block
+    assert "border-left: solid #363a4f;" in reply_block
 
 
 def test_pending_drafts_keep_the_shared_comment_card_surface() -> None:
     """Pending drafts should not look like a separate card system."""
     css = CommentCard.DEFAULT_CSS
     pending_block = css.split("CommentCard.pending-draft {", 1)[1].split("}", 1)[0]
-    cursor_block = css.split("CommentCard.pending-draft.--cursor-line {", 1)[1].split(
-        "}", 1
-    )[0]
+    cursor_block = css.split("CommentCard.--cursor-line {", 1)[1].split("}", 1)[0]
 
     assert "border:" not in pending_block
     assert "background:" not in pending_block
-    assert "background: #363a4f;" in cursor_block
-    assert "border:" not in cursor_block
+    assert "border-left: solid #8aadf4;" in cursor_block
+    assert "background:" not in cursor_block
     assert "tint:" not in cursor_block
     assert "CommentCard.pending-draft .comment-header" not in css
 
@@ -270,15 +264,15 @@ def test_comment_card_markdown_headings_create_section_breaks() -> None:
     body_text_block = css.split("CommentCard .comment-content MarkdownParagraph,", 1)[
         1
     ].split("}", 1)[0]
-    heading_block = css.split("CommentCard .comment-content MarkdownH1,", 1)[1].split(
-        "}", 1
-    )[0]
+    heading_block = css.split("CommentCard .comment-content MarkdownHeader {", 1)[
+        1
+    ].split("}", 1)[0]
 
     assert "MarkdownBulletList" in body_text_block
     assert "margin: 0;" in body_text_block
-    assert "MarkdownH2" in heading_block
-    assert "MarkdownH3" in heading_block
-    assert "margin: 1 0 0 0;" in heading_block
+    assert "text-style: bold;" in heading_block
+    assert "background: transparent;" in heading_block
+    assert "margin: 2 0 1 0;" in heading_block
     assert "margin: 0;" not in heading_block
 
 
@@ -311,8 +305,8 @@ def test_pr_info_does_not_redefine_shared_comment_card_surface() -> None:
     assert "PRInfo CommentCard CollapsibleTitle" not in pr_info_css
     assert "PRInfo CommentCard Collapsible > Contents" not in pr_info_css
     assert "PRInfo .thread-resolved .thread-header" not in pr_info_css
-    assert "PRInfo CommentCard.description-container.--selected" in pr_info_css
-    assert "PRInfo CommentCard.comment-box.--selected" in pr_info_css
+    assert "PRInfo CommentCard.description-container.--selected" not in pr_info_css
+    assert "PRInfo CommentCard.comment-box.--selected" not in pr_info_css
 
 
 def test_timeline_inline_selection_frames_the_whole_thread() -> None:
@@ -323,13 +317,12 @@ def test_timeline_inline_selection_frames_the_whole_thread() -> None:
     border: solid #8aadf4;
 }"""
     assert whole_thread_border in pr_info_css
-    selected_comment_block = pr_info_css.split(
-        "PRInfo CommentCard.thread-comment.--selected,", 1
-    )[1].split("}", 1)[0]
-    assert "background: #363a4f;" in selected_comment_block
-    assert "border:" not in selected_comment_block
-    assert "CommentCard.thread-comment.--selected" not in shared_css
-    assert "CommentCard.thread-reply.--selected" not in shared_css
+    selected_comment_block = shared_css.split("CommentCard.--selected,", 1)[1].split(
+        "}", 1
+    )[0]
+    assert "border-left: solid #8aadf4;" in selected_comment_block
+    assert "background:" not in selected_comment_block
+    assert "PRInfo CommentCard.thread-comment.--selected" not in pr_info_css
 
 
 def test_pr_info_does_not_keep_legacy_comment_style_hooks() -> None:
