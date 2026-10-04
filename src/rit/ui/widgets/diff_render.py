@@ -268,6 +268,7 @@ def _clear_mounted_render_state(view: DiffView) -> None:
     view._inline_comment_editor_widget = None
     view._inline_comment_editor_layout_widget = None
     view._file_comment_editor_widget = None
+    view._file_comment_editor_layout_widget = None
     view._file_comment_editor_mounted_hunk_index = None
     view._row_anchor_widgets = {}
     view._file_header_widgets = {}

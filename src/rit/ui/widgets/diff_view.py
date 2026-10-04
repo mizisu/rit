@@ -262,6 +262,10 @@ class DiffView(VerticalScroll):
         )
         self._sticky_header_hunk: int | None = None
         self._sticky_header_width = 0
+        self._file_scroll_padding = Static("", id="diff-file-scroll-padding")
+        self._file_scroll_padding.styles.height = "100vh"
+        self._file_scroll_padding.styles.layer = "base"
+        self._file_scroll_padding.display = False
         self._line_index_by_new_number: dict[int, int] = {}
         self._line_index_by_old_number: dict[int, int] = {}
         self._new_line_number_bounds: tuple[int, int] | None = None
@@ -368,6 +372,7 @@ class DiffView(VerticalScroll):
         self._file_comment_editor_draft_index: int | None = None
         self._file_comment_editor_edit_target: PRComment | None = None
         self._file_comment_editor_widget: InlineCommentEditor | None = None
+        self._file_comment_editor_layout_widget: Widget | None = None
         self._file_comment_editor_mounted_hunk_index: int | None = None
         self._file_comment_editor_layout_height = 0
         self._pending_comment_jump: str | None = None  # "first" or "last"
@@ -376,6 +381,7 @@ class DiffView(VerticalScroll):
 
     def compose(self) -> ComposeResult:
         yield VerticalScroll(id="diff-content")
+        yield self._file_scroll_padding
         yield self._sticky_header
         with Horizontal(id="diff-search-bar"):
             yield Static("/", classes="search-prompt")
@@ -1288,6 +1294,27 @@ class DiffView(VerticalScroll):
                 return index
         return None
 
+    def scroll_file_to_top(self, filename: str) -> None:
+        """Align a file header, leaving room below even a folded final file."""
+        if not self.is_mounted or self._file_header_hunk_index(filename) is None:
+            return
+        self._file_scroll_padding.display = True
+        self._reflow_retained_layout()
+        top = _fold_state.LineAnchor(None, filename, header=True).top(
+            self, mounted=True
+        )
+        if top is None:
+            return
+        self.scroll_to(y=top, animate=False, immediate=True)
+        if self._virt.render_pending:
+            revision = self.view_revision
+
+            def reapply_scroll() -> None:
+                if self._is_current_view_revision(revision):
+                    self.scroll_file_to_top(filename)
+
+            self._virt.pending_scroll = reapply_scroll
+
     def selected_file_header_path(self) -> str | None:
         """Return the path targeted by the selected file header."""
         hunk_index = self._selected_file_header_hunk
@@ -1697,11 +1724,21 @@ class DiffView(VerticalScroll):
             update_existing=edit_target is not None,
             id="diff-file-comment-editor",
         )
-        if before is None:
-            container.mount(widget)
-        else:
-            container.mount(widget, before=before)
+        line_index = None
+        if self._diff is not None and 0 <= hunk_index < len(self._diff.hunks):
+            lines = self._diff.hunks[hunk_index].lines
+            if lines:
+                line_index = lines[0].line_index
+        layout_widget = _comments.mount_side_aware_widget(
+            self,
+            container,
+            widget,
+            side="new",
+            line_index=line_index,
+            before=before,
+        )
         self._file_comment_editor_widget = widget
+        self._file_comment_editor_layout_widget = layout_widget
         self._file_comment_editor_mounted_hunk_index = hunk_index
 
     def _focus_file_comment_editor(self) -> None:
@@ -1730,6 +1767,7 @@ class DiffView(VerticalScroll):
         self._file_comment_editor_target = target
         self._file_editor_state = None
         self._file_comment_editor_widget = None
+        self._file_comment_editor_layout_widget = None
         _virtual._rebuild_virtual_layout(self)
         await self._render_diff()
         self.call_after_refresh(self._focus_file_comment_editor)
@@ -1745,6 +1783,10 @@ class DiffView(VerticalScroll):
         if self._file_comment_editor_widget is not None:
             self._file_comment_editor_widget.close()
         self.focus()
+        if self._file_comment_editor_mounted_hunk_index is not None:
+            await _virtual._remove_mounted_file_comment_editor(
+                self, self._file_comment_editor_mounted_hunk_index
+            )
         self._file_comment_editor_hunk_index = None
         self._file_comment_editor_target = None
         self._file_comment_editor_initial_body = ""
@@ -2418,6 +2460,8 @@ class DiffView(VerticalScroll):
     ) -> None:
         with self.app.batch_update() if self.is_mounted else nullcontext():
             is_new_file = filename != self.current_file
+            if is_new_file:
+                self._file_scroll_padding.display = False
             selected_header_path = self.selected_file_header_path()
             plan, rendered_rows, planned_split = render_plan
             retained_prefix = (
@@ -2460,6 +2504,7 @@ class DiffView(VerticalScroll):
                 self._file_comment_editor_draft_index = None
                 self._file_comment_editor_edit_target = None
                 self._file_comment_editor_widget = None
+                self._file_comment_editor_layout_widget = None
                 self._file_comment_editor_mounted_hunk_index = None
                 self._selected_file_header_hunk = None
                 selected_header_path = None

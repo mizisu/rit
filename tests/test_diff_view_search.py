@@ -45,6 +45,9 @@ async def test_search_bar_moves_between_matches_with_n_and_N() -> None:
         assert search_bar.display is True
 
         search_input = diff_view.query_one("#diff-search-input", Input)
+        search_prompt = search_bar.query_one(".search-prompt")
+        assert search_input.content_region.x == search_prompt.region.right
+        assert search_input.content_region.y == search_prompt.content_region.y
         search_input.value = "match"
         await pilot.press("enter")
         await pilot.pause()

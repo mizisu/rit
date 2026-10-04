@@ -574,10 +574,11 @@ async def _remove_virtualized_lines(view, start: int, end: int) -> None:
 async def _remove_mounted_file_comment_editor(view, hunk_index: int) -> None:
     if view._file_comment_editor_mounted_hunk_index != hunk_index:
         return
-    editor = view._file_comment_editor_widget
+    editor = view._file_comment_editor_layout_widget or view._file_comment_editor_widget
     if editor is not None:
         await _remove_virtual_widgets(editor)
     view._file_comment_editor_widget = None
+    view._file_comment_editor_layout_widget = None
     view._file_comment_editor_mounted_hunk_index = None
 
 

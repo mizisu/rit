@@ -846,7 +846,13 @@ def _scroll_to_vertical_span(
     bottom_align: bool = False,
 ) -> None:
     if bottom_align:
-        view.scroll_end(animate=animate, immediate=True)
+        view.scroll_to(
+            y=_geometry.scroll_target_for_row_bottom(
+                (top, bottom), _viewport_geometry(view)
+            ),
+            animate=animate,
+            immediate=True,
+        )
         return
     viewport = _viewport_geometry(view)
     target_scroll = (

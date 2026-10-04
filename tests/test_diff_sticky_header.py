@@ -62,7 +62,13 @@ async def test_sticky_header_follows_viewport_not_cursor(
         assert view._virt.active is virtual
 
         for offset in (
-            40, boundary - 1, boundary - 0.25, boundary, boundary + 1, boundary + 40, 0
+            40,
+            boundary - 1,
+            boundary - 0.25,
+            boundary,
+            boundary + 1,
+            boundary + 40,
+            0,
         ):
             view.scroll_to(y=offset, animate=False, immediate=True)
             await wait_until(
@@ -108,8 +114,15 @@ async def test_sticky_header_follows_viewport_not_cursor(
         assert header.region.x == view.scrollable_content_region.x
         app.post_message(
             events.MouseScrollDown(
-                None, header.region.x + 3, header.region.y,
-                0, 0, 0, False, False, False,
+                None,
+                header.region.x + 3,
+                header.region.y,
+                0,
+                0,
+                0,
+                False,
+                False,
+                False,
             )
         )
         await wait_until(
@@ -122,8 +135,9 @@ async def test_sticky_header_follows_viewport_not_cursor(
 async def test_sticky_header_refreshes_metadata_folds_resize_and_preview() -> None:
     store, diff = _document()
     renamed = store.state.files[1]
-    renamed.previous_filename = "src/previous/location/with/a/long/path/two.py"
-    diff.hunks[1].file_old_path = renamed.previous_filename
+    previous_path = "src/previous/location/with/a/long/path/two.py"
+    renamed.previous_filename = previous_path
+    diff.hunks[1].file_old_path = previous_path
 
     class TestApp(App):
         def compose(self) -> ComposeResult:
@@ -133,10 +147,13 @@ async def test_sticky_header_refreshes_metadata_folds_resize_and_preview() -> No
     async with app.run_test(size=(140, 24)) as pilot:
         view = app.query_one(DiffView)
         await view.show_diff(diff.filename, diff)
-        view.scroll_to(y=view._hunk_header_top_offsets[1] + 30, animate=False)
-        await pilot.pause()
+        target_scroll = view._hunk_header_top_offsets[1] + 30
+        await wait_until(lambda: view.max_scroll_y >= target_scroll, timeout=5)
+        view.scroll_to(y=target_scroll, animate=False, immediate=True)
         header = view.query_one("#diff-sticky-header", Static)
-        assert renamed.previous_filename in str(header.content)
+        await wait_until(
+            lambda: previous_path in str(header.content), timeout=5
+        )
         renamed.viewer_viewed_state = FileViewedState.VIEWED
         view.refresh_header()
         assert str(header.content).endswith("Viewed")

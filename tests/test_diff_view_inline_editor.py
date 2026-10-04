@@ -1,3 +1,5 @@
+from typing import Literal
+
 import pytest
 from rich.style import Style
 from textual import events, on
@@ -97,6 +99,64 @@ async def test_file_headers_are_cursor_targets_for_file_comments() -> None:
         assert diff_view.selected_file_header_path() == "two.py"
         assert second_header.has_class("-selected")
         assert diff_view.cursor_line == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["unified", "split"])
+async def test_file_editor_matches_inline_editor_layout(
+    mode: Literal["unified", "split"],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode=mode)
+
+    app = TestApp()
+    async with app.run_test(size=(160, 60)) as pilot:
+        view = app.query_one(DiffView)
+        monkeypatch.setattr(view, "VIRTUALIZE_LINE_THRESHOLD", 0)
+        await view.show_diff("All files", _combined_two_file_diff())
+        assert await view.open_inline_comment_editor()
+        await pilot.pause()
+        assert view._set_file_header_selection(0)
+        assert await view.open_file_comment_editor()
+        await pilot.pause()
+
+        inline_editor = view.query_one(
+            "#diff-inline-comment-editor", InlineCommentEditor
+        )
+        file_editor = view.query_one("#diff-file-comment-editor", InlineCommentEditor)
+        inline_body = inline_editor.query_one(TextArea)
+        file_body = file_editor.query_one(TextArea)
+        assert file_body.has_focus
+
+        for width in (160, 80):
+            await pilot.resize_terminal(width, 60)
+            await pilot.pause()
+            assert file_editor.region.size == inline_editor.region.size
+            assert file_editor.region.x == inline_editor.region.x
+            assert file_body.region.size == inline_body.region.size
+            assert file_editor.region.width <= 96
+
+        layout = view._file_comment_editor_layout_widget
+        assert layout is not None
+        initial_height = layout.region.height
+        initial_line_top = view._line_top_offsets[0]
+        file_body.text = "\n".join(f"comment line {line}" for line in range(20))
+        await wait_until(lambda: layout.region.height > initial_height)
+        await wait_until(
+            lambda: view._file_comment_editor_height() == layout.region.height
+        )
+        assert view._line_top_offsets[0] - initial_line_top == (
+            layout.region.height - initial_height
+        )
+        assert file_body.has_focus
+
+        await view.close_file_comment_editor()
+        assert not layout.is_attached
+        assert view._file_comment_editor_widget is None
+        assert view._file_comment_editor_layout_widget is None
+        assert inline_editor.is_attached
 
 
 @pytest.mark.asyncio
