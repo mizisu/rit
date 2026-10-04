@@ -71,7 +71,6 @@ def file_from_summary(summary: ParsedFilePatchSummary) -> PRFile:
 def diff_from_file_patch(file: PRFile) -> FileDiff:
     """Parse a PR patch, compact word spans, and restore file metadata."""
     diff = parse_patch(file.patch, file.filename)
-    # ponytail: large single-file parse peaks remain; pack during refinement if needed.
     for hunk in diff.hunks:
         for line in hunk.lines:
             line.old_segments = _word_diff_ranges(line.old_segments)
