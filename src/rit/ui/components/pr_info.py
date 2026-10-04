@@ -12,11 +12,13 @@ from textual.containers import Container, Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import var
-from textual.widgets import Button, Rule, Static
+from textual.widget import Widget
+from textual.widgets import Button, OptionList, Static
 
 from rit.state.models import PRComment
 from rit.state.reviewer_status import ReviewerDisplayState, derive_reviewer_states
 from rit.state.store import PRStore
+from rit.ui.components.pr_overview import PRChecks, PRFilesSummary, SummaryOptionList
 from rit.ui.components.pr_timeline import PRTimeline
 from rit.ui.pr_status import PR_STATUS_LABELS as _PR_STATUS_LABELS
 
@@ -52,6 +54,8 @@ class PRInfo(Container):
         super().__init__()
         self.store = store
         self._timeline: PRTimeline | None = None
+        self._sidebar_focus: Widget | None = None
+        self._sidebar_widget: VerticalScroll | None = None
         self._title_widget: Static | None = None
         self._status_widget: Static | None = None
         self._stats_widget: Static | None = None
@@ -78,39 +82,47 @@ class PRInfo(Container):
                     yield Static("Loading...", classes="pr-title", id="pr-title")
                     yield Static("", id="pr-status")
                 yield Static("", classes="stats-bar", id="pr-stats")
-                yield Rule()
                 yield PRTimeline(self.store, id="pr-timeline")
 
-            with Vertical(classes="sidebar", id="sidebar"):
-                with Vertical(classes="sidebar-section"):
-                    with Horizontal(classes="sidebar-section-heading"):
-                        yield Static("Reviewers", classes="sidebar-section-title")
-                        yield Button(
-                            _EDIT_ICON,
-                            id="edit-reviewers",
-                            name="Edit reviewers",
-                            tooltip="Edit reviewers",
-                            compact=True,
-                            flat=True,
+            with VerticalScroll(classes="sidebar", id="sidebar"):
+                with Vertical(id="sidebar-metadata"):
+                    with Vertical(classes="sidebar-section"):
+                        with Horizontal(classes="sidebar-section-heading"):
+                            yield Static("Reviewers", classes="sidebar-section-title")
+                            yield Button(
+                                _EDIT_ICON,
+                                id="edit-reviewers",
+                                name="Edit reviewers",
+                                tooltip="Edit reviewers",
+                                compact=True,
+                                flat=True,
+                            )
+                        yield Static(
+                            "Loading...", classes="placeholder", id="pr-reviewers"
                         )
-                    yield Static("Loading...", classes="placeholder", id="pr-reviewers")
 
-                with Vertical(classes="sidebar-section"):
-                    with Horizontal(classes="sidebar-section-heading"):
-                        yield Static("Assignees", classes="sidebar-section-title")
-                        yield Button(
-                            _EDIT_ICON,
-                            id="edit-assignees",
-                            name="Edit assignees",
-                            tooltip="Edit assignees",
-                            compact=True,
-                            flat=True,
+                    with Vertical(classes="sidebar-section"):
+                        with Horizontal(classes="sidebar-section-heading"):
+                            yield Static("Assignees", classes="sidebar-section-title")
+                            yield Button(
+                                _EDIT_ICON,
+                                id="edit-assignees",
+                                name="Edit assignees",
+                                tooltip="Edit assignees",
+                                compact=True,
+                                flat=True,
+                            )
+                        yield Static(
+                            "Loading...", classes="placeholder", id="pr-assignees"
                         )
-                    yield Static("Loading...", classes="placeholder", id="pr-assignees")
 
-                with Vertical(classes="sidebar-section"):
-                    yield Static("Labels", classes="sidebar-section-title")
-                    yield Static("Loading...", classes="placeholder", id="pr-labels")
+                    with Vertical(classes="sidebar-section"):
+                        yield Static("Labels", classes="sidebar-section-title")
+                        yield Static(
+                            "Loading...", classes="placeholder", id="pr-labels"
+                        )
+                yield PRChecks(self.store)
+                yield PRFilesSummary(self.store)
 
     def on_mount(self) -> None:
         self._update_layout_state()
@@ -124,6 +136,8 @@ class PRInfo(Container):
 
         if self.store.state.pr:
             self.refresh_pr_data()
+        if self.is_mounted:
+            self.refresh_overview()
 
     def on_resize(self, event: events.Resize) -> None:
         self._update_layout_state()
@@ -153,6 +167,52 @@ class PRInfo(Container):
                 is_resolved=event.is_resolved,
             )
         )
+
+    @property
+    def sidebar_has_focus(self) -> bool:
+        if not self.is_mounted:
+            return False
+        if self._sidebar_widget is None:
+            self._sidebar_widget = self.query_one("#sidebar", VerticalScroll)
+        return self._sidebar_widget.has_focus_within
+
+    def focus_main(self) -> None:
+        """Return to the timeline without changing its selection or scroll."""
+        if self.sidebar_has_focus:
+            self._sidebar_focus = self.screen.focused
+        self.query_one("#main-scroll", VerticalScroll).focus(scroll_visible=False)
+
+    def focus_sidebar(self) -> None:
+        """Restore the last sidebar control without moving the document."""
+        controls = self._sidebar_controls()
+        if controls:
+            target = (
+                self._sidebar_focus if self._sidebar_focus in controls else controls[0]
+            )
+            target.focus(scroll_visible=False)
+
+    def _sidebar_controls(self) -> list[Widget]:
+        sidebar = self.query_one("#sidebar")
+        return [
+            widget for widget in self.screen.focus_chain if sidebar in widget.ancestors
+        ]
+
+    def move_sidebar_focus(self, direction: int) -> None:
+        controls = self._sidebar_controls()
+        if not controls:
+            return
+        focused = self.screen.focused
+        index = controls.index(focused) if focused in controls else 0
+        controls[max(0, min(index + direction, len(controls) - 1))].focus()
+
+    @on(SummaryOptionList.MoveFocus)
+    def _move_sidebar_focus(self, event: SummaryOptionList.MoveFocus) -> None:
+        event.stop()
+        self.move_sidebar_focus(event.direction)
+
+    def refresh_overview(self) -> None:
+        self.query_one(PRChecks).refresh_data()
+        self.query_one(PRFilesSummary).refresh_data()
 
     def refresh_summary(self) -> None:
         self._update_header()
@@ -215,9 +275,7 @@ class PRInfo(Container):
 
         title_widget = self._static_widget("_title_widget", "#pr-title")
         title_widget.styles.max_width = cell_len(f"{pr.title} #{pr.number}")
-        title_widget.update(
-            f"[bold underline]{pr.title}[/bold underline] [#6e738d]#{pr.number}[/]"
-        )
+        title_widget.update(f"[bold]{pr.title}[/bold] [#6e738d]#{pr.number}[/]")
 
         status_widget = self._static_widget("_status_widget", "#pr-status")
         status_widget.update(
@@ -375,13 +433,26 @@ class PRInfo(Container):
         return f"[#eed49f]●[/] {name}"
 
     def next_item(self) -> None:
-        self._timeline_widget().next_item()
+        if self.sidebar_has_focus:
+            self.move_sidebar_focus(1)
+        else:
+            self._timeline_widget().next_item()
 
     def prev_item(self) -> None:
-        self._timeline_widget().prev_item()
+        if self.sidebar_has_focus:
+            self.move_sidebar_focus(-1)
+        else:
+            self._timeline_widget().prev_item()
 
     def toggle_current(self) -> None:
-        self._timeline_widget().toggle_current()
+        if self.sidebar_has_focus:
+            focused = self.screen.focused
+            if isinstance(focused, OptionList):
+                focused.action_select()
+            elif isinstance(focused, Button):
+                focused.press()
+        else:
+            self._timeline_widget().toggle_current()
 
     def center_current(self) -> None:
         """Center the selected timeline item in the main viewport."""

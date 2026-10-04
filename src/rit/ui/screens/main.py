@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Literal
+from urllib.parse import urlsplit
 
 from textual import events, getters, on
 from textual.app import ComposeResult
@@ -9,7 +10,7 @@ from textual.containers import VerticalScroll
 from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.screen import Screen
-from textual.widgets import Input, TabbedContent, TabPane, TextArea, Tree
+from textual.widgets import Button, Input, TabbedContent, TabPane, TextArea, Tree
 from textual.worker import Worker, WorkerState
 
 from rit.app import RitApp
@@ -24,6 +25,7 @@ from rit.state.models import (
 from rit.state.store import GitHubError, PRStore, UnsupportedInlineCommentTarget
 from rit.ui.components.file_changes import FileChanges
 from rit.ui.components.pr_info import PRInfo
+from rit.ui.components.pr_overview import FileGroup, PRChecks
 from rit.ui.messages import Flash
 from rit.ui.screens.branch_picker import BranchPickerScreen
 from rit.ui.screens.comment_delete import CommentDeleteScreen
@@ -109,6 +111,14 @@ def _reviewer_candidate_result(
 
 
 _PR_INFO_BINDINGS = [
+    Binding(
+        "H",
+        "focus_left",
+        "Move Focus",
+        key_display="shift+h/l",
+        group=_NAVIGATION_GROUP,
+    ),
+    Binding("L", "focus_right", show=False),
     Binding("ctrl+g", "scroll_to_bottom", "Bottom", show=False),
     Binding("z", "center_current", "Center", show=False),
     Binding("j", "cursor_down", "", group=_NAVIGATION_GROUP),
@@ -193,6 +203,10 @@ class MainScreen(Screen[None]):
         self.store.set_message_sink(self._post_store_message)
         self._pr_info_refresh_pending = False
         self._files_load_requested = False
+        self._files_revision_changed = False
+        self._pr_overview_refs = ("", "")
+        self._pr_overview_refresh_pending = False
+        self._pending_overview_file: tuple[str, tuple[str, str]] | None = None
 
     def compose(self) -> ComposeResult:
         yield Header(
@@ -217,10 +231,21 @@ class MainScreen(Screen[None]):
     def _load_files_on_demand(self) -> None:
         if self._files_load_requested:
             return
-        if self.store.state.files_loading != LoadingState.IDLE:
+        loading = self.store.state.files_loading
+        if loading != LoadingState.IDLE and not (
+            loading == LoadingState.ERROR and self._pending_overview_file is not None
+        ):
             return
         self._files_load_requested = True
-        self.run_worker(self.store.load_files(), name="load-pr-files")
+        self.run_worker(self._load_pr_files(), name="load-pr-files", group="pr-files")
+
+    async def _load_pr_files(self) -> None:
+        await self.store.load_files()
+        if self.store.state.files_loading == LoadingState.ERROR:
+            self._pending_overview_file = None
+            self._files_load_requested = False
+        else:
+            self._apply_pending_overview_file()
 
     def _post_store_message(self, message) -> None:
         if isinstance(message, PRStore.FileSelected):
@@ -234,6 +259,7 @@ class MainScreen(Screen[None]):
         target_tab_id = _TAB_IDS[tab_index]
 
         if self.tabbed_content.active != target_tab_id:
+            self.set_focus(None)
             self.tabbed_content.active = target_tab_id
 
         self.current_tab = tab_index
@@ -259,6 +285,7 @@ class MainScreen(Screen[None]):
         self.current_tab = tab_index
 
         if tab_id == "pr-info":
+            self._pending_overview_file = None
             self._refresh_pending_pr_info()
         elif tab_id == "files":
             self._load_files_on_demand()
@@ -310,6 +337,113 @@ class MainScreen(Screen[None]):
     def on_pr_loaded(self, event: PRStore.PRLoaded) -> None:
         self.header.update_from_pr(event.pr)
         self.pr_info.refresh_pr_data()
+        refs = (event.pr.base_sha, event.pr.head_sha)
+        if not all(refs) or refs == self._pr_overview_refs:
+            return
+        if all(self._pr_overview_refs):
+            self._invalidate_files_workspace()
+        self._pr_overview_refs = refs
+        self.run_worker(
+            self.store.load_pr_overview(),
+            name="load-pr-overview",
+            group="pr-overview",
+            exclusive=True,
+        )
+
+    def _invalidate_files_workspace(self) -> None:
+        if not self._files_load_requested:
+            return
+        self.workers.cancel_group(self, "pr-files")
+        self.file_changes.reset_workspace()
+        self.store.state.files_loading = LoadingState.IDLE
+        self._files_load_requested = False
+        self._pending_overview_file = None
+        self._files_revision_changed = True
+        if self.current_tab == 1:
+            self._load_files_on_demand()
+
+    @on(FileChanges.WorkspaceReady)
+    def on_workspace_ready(self) -> None:
+        if self.file_changes.workspace_ready:
+            self._files_revision_changed = False
+            self.refresh_bindings()
+
+    @on(PRStore.OverviewUpdated)
+    def on_overview_updated(self) -> None:
+        self._pr_overview_refresh_pending = True
+        if self.current_tab == 0:
+            self._refresh_pending_overview()
+
+    def _refresh_pending_overview(self) -> None:
+        if self._pr_overview_refresh_pending:
+            self._pr_overview_refresh_pending = False
+            self.pr_info.refresh_overview()
+
+    @on(Button.Pressed, "#refresh-checks")
+    def _refresh_checks(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.run_worker(
+            self.store.load_pr_checks(refresh=True), name="refresh-pr-checks"
+        )
+
+    @on(Button.Pressed, "#refresh-file-summary")
+    def _refresh_file_summary(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.run_worker(self._reload_file_summary(), name="refresh-pr-file-summary")
+
+    async def _reload_file_summary(self) -> None:
+        await self.store.load_pr_summary()
+        await self.store.load_pr_file_summary(refresh=True)
+
+    @on(PRChecks.OpenURLRequested)
+    def _open_check_url(self, event: PRChecks.OpenURLRequested) -> None:
+        event.stop()
+        try:
+            url = urlsplit(event.url)
+        except ValueError:
+            return
+        if url.scheme in {"http", "https"} and url.netloc:
+            self.app.open_url(event.url)
+
+    @on(FileGroup.OpenFileRequested)
+    def _open_overview_file(self, event: FileGroup.OpenFileRequested) -> None:
+        event.stop()
+        pr = self.store.state.pr
+        snapshot = self.store.state.file_summary.loaded_value
+        if pr is None or snapshot is None:
+            return
+        metadata = snapshot.metadata
+        refs = (pr.base_sha, pr.head_sha)
+        if (metadata.base_sha, metadata.head_sha) != refs:
+            self.notify(
+                "PR changed; refresh the changed-file summary", severity="warning"
+            )
+            return
+        self._pending_overview_file = (event.filename, refs)
+        self.store.state.selected_file = event.filename
+        self.switch_tab(1)
+        self._load_files_on_demand()
+        self._apply_pending_overview_file()
+
+    def _apply_pending_overview_file(self) -> None:
+        pending = self._pending_overview_file
+        if pending is None or self.store.state.files_loading != LoadingState.LOADED:
+            return
+        self._pending_overview_file = None
+        filename, refs = pending
+        pr = self.store.state.pr
+        if self.current_tab != 1 or pr is None or (pr.base_sha, pr.head_sha) != refs:
+            return
+        if self.store._get_file(filename) is None:
+            self.notify(
+                f"Could not find {filename} in the current diff",
+                severity="warning",
+                markup=False,
+            )
+            return
+        self.file_changes.open_file(
+            filename, focus_diff=True, expand=True, top_align=True
+        )
 
     @on(PRStore.PRDiscussionLoaded)
     def on_pr_discussion_loaded(self, _event: PRStore.PRDiscussionLoaded) -> None:
@@ -333,6 +467,7 @@ class MainScreen(Screen[None]):
             self.pr_info.refresh_thread_metadata()
 
     def _refresh_pending_pr_info(self) -> None:
+        self._refresh_pending_overview()
         if not self._pr_info_refresh_pending:
             return
 
@@ -343,9 +478,13 @@ class MainScreen(Screen[None]):
     @on(PRStore.FilesLoaded)
     def on_files_loaded(self, _event: PRStore.FilesLoaded) -> None:
         self.file_changes.refresh_files()
+        self._apply_pending_overview_file()
 
     @on(PRStore.ErrorOccurred)
     def on_store_error(self, event: PRStore.ErrorOccurred) -> None:
+        if event.source == "load_files":
+            self._pending_overview_file = None
+            self._files_load_requested = False
         self.notify(event.error, title="Error", severity="error", markup=False)
 
     def _copy_branch(self, branch: str | None, *, label: str) -> None:
@@ -426,33 +565,48 @@ class MainScreen(Screen[None]):
 
     def action_scroll_half_page_down(self) -> None:
         if self.current_tab == 0:
-            scroll = self.pr_info.query_one("#main-scroll", VerticalScroll)
+            sidebar = self.pr_info.sidebar_has_focus
+            scroll = self.pr_info.query_one(
+                "#sidebar" if sidebar else "#main-scroll", VerticalScroll
+            )
             scroll.scroll_relative(
                 y=scroll.size.height // 2,
                 duration=0.2,
                 easing="out_cubic",
-                on_complete=self.pr_info.select_first_visible_item,
+                on_complete=None if sidebar else self.pr_info.select_first_visible_item,
             )
 
     def action_scroll_half_page_up(self) -> None:
         if self.current_tab == 0:
-            scroll = self.pr_info.query_one("#main-scroll", VerticalScroll)
+            sidebar = self.pr_info.sidebar_has_focus
+            scroll = self.pr_info.query_one(
+                "#sidebar" if sidebar else "#main-scroll", VerticalScroll
+            )
             scroll.scroll_relative(
                 y=-(scroll.size.height // 2),
                 duration=0.2,
                 easing="out_cubic",
-                on_complete=self.pr_info.select_first_visible_item,
+                on_complete=None if sidebar else self.pr_info.select_first_visible_item,
             )
 
     def action_scroll_to_top(self) -> None:
         if self.current_tab == 0:
-            scroll = self.pr_info.query_one("#main-scroll", VerticalScroll)
+            sidebar = self.pr_info.sidebar_has_focus
+            scroll = self.pr_info.query_one(
+                "#sidebar" if sidebar else "#main-scroll", VerticalScroll
+            )
             scroll.scroll_home(animate=False)
-            self.pr_info.select_first_item()
+            if not sidebar:
+                self.pr_info.select_first_item()
 
     def action_scroll_to_bottom(self) -> None:
         if self.current_tab == 0:
-            self.pr_info.select_last_item()
+            if self.pr_info.sidebar_has_focus:
+                self.pr_info.query_one("#sidebar", VerticalScroll).scroll_end(
+                    animate=False
+                )
+            else:
+                self.pr_info.select_last_item()
 
     def action_center_current(self) -> None:
         if self.current_tab == 0:
@@ -1454,6 +1608,25 @@ class MainScreen(Screen[None]):
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if self._text_entry_has_focus() or self._comment_editor_has_focus():
             return False
+        if (
+            self.current_tab == 1
+            and self._files_revision_changed
+            and action in {"comment", "delete_comment", "review", "toggle_file_viewed"}
+        ):
+            return False
+        if (
+            self.is_mounted
+            and self.current_tab == 0
+            and action
+            in {
+                "toggle_resolve",
+                "delete_comment",
+                "open_thread_in_diff",
+                "center_current",
+            }
+            and self.pr_info.sidebar_has_focus
+        ):
+            return False
         return super().check_action(action, parameters)
 
     def _text_entry_has_focus(self) -> bool:
@@ -1484,6 +1657,9 @@ class MainScreen(Screen[None]):
         return "tree" if self.file_changes.file_tree.has_focus_within else None
 
     def action_focus_left(self) -> None:
+        if self.current_tab == 0:
+            self.pr_info.focus_main()
+            return
         target = self._current_files_focus_target()
         if target is None:
             if self.current_tab == 1 and self.file_changes.file_tree.display:
@@ -1500,6 +1676,9 @@ class MainScreen(Screen[None]):
             self._focus_files_tree()
 
     def action_focus_right(self) -> None:
+        if self.current_tab == 0:
+            self.pr_info.focus_sidebar()
+            return
         target = self._current_files_focus_target()
         if target is None:
             if self.current_tab == 1:
@@ -1657,12 +1836,18 @@ class MainScreen(Screen[None]):
             self.post_message(Flash("PR not loaded yet", style="warning", duration=2.0))
             return
 
+        advance = (
+            self.file_changes.diff_view.has_focus
+            and file.viewer_viewed_state != FileViewedState.VIEWED
+        )
         if self.store.viewed_files.toggle(filename, self._on_file_viewed_toggled):
             self.run_worker(
                 self._sync_file_viewed(filename),
                 exclusive=False,
                 name="sync-file-viewed",
             )
+        if advance:
+            self.file_changes.select_file_after(filename)
 
     def _on_file_viewed_toggled(self, filename: str, state: FileViewedState) -> None:
         if state == FileViewedState.VIEWED:

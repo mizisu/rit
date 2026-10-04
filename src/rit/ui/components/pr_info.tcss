@@ -11,7 +11,7 @@ PRInfo #pr-info-layout {
     layout: horizontal;
     height: 100%;
     width: 100%;
-    max-width: 152;
+    max-width: 183;
 }
 
 /* Scroll container for main content */
@@ -28,18 +28,133 @@ PRInfo .main-content {
     padding: 1 2;
 }
 
-/* Wide screen: center the GitHub-like main/sidebar layout as one unit. */
+/* Center the document and sidebar as one unit. */
 PRInfo.-wide {
     padding: 0;
 }
 
-/* Sidebar (right side) - fixed width, no scroll */
+/* Sidebar owns its scroll independently of the document. */
 PRInfo .sidebar {
-    width: 25;
+    width: 38;
     height: 100%;
     padding: 1 2;
-    background: #24273a;
+    background: transparent;
     border-left: solid #363a4f;
+    scrollbar-gutter: stable;
+}
+
+PRInfo.-wide .sidebar {
+    width: 44;
+}
+
+PRInfo .sidebar:focus-within {
+    border-left: solid $primary;
+}
+
+PRInfo .sidebar Button {
+    border: none !important;
+    text-style: bold !important;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    background-tint: transparent;
+    tint: transparent;
+}
+
+PRInfo #sidebar-metadata {
+    height: auto;
+}
+
+PRInfo #pr-checks-section .sidebar-section-title,
+PRInfo #pr-files-summary-count {
+    width: 1fr;
+}
+
+PRInfo SummaryOptionList {
+    width: 100%;
+    height: auto;
+    max-height: 10;
+    border: none;
+    background: transparent;
+    background-tint: transparent;
+    padding: 0;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    overflow-x: hidden;
+}
+
+PRInfo SummaryOptionList:focus {
+    border: none;
+    background-tint: transparent;
+}
+
+PRInfo SummaryOptionList > .option-list--option {
+    padding: 0;
+    color: $foreground;
+    text-style: none;
+}
+
+PRInfo SummaryOptionList > .option-list--option-highlighted {
+    color: $foreground;
+    background: transparent;
+    text-style: none;
+}
+
+PRInfo SummaryOptionList > .option-list--option-hover {
+    color: $foreground;
+    background: $primary 12%;
+}
+
+PRInfo SummaryOptionList:focus > .option-list--option-highlighted {
+    color: $foreground;
+    background: $primary 30%;
+    text-style: bold;
+}
+
+PRInfo .file-summary-group {
+    height: auto;
+    margin-top: 1;
+}
+
+PRInfo .file-group-totals {
+    width: auto;
+    height: 1;
+    margin-left: 1;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+    overflow-x: hidden;
+}
+
+PRInfo .file-group-heading {
+    width: 100%;
+    height: 1;
+}
+
+PRInfo .file-group-heading:focus-within {
+    background: $primary 30%;
+}
+
+PRInfo .file-group-count {
+    width: auto;
+    height: 1;
+    margin-left: 1;
+    color: $text-muted;
+}
+
+PRInfo .file-group-heading:focus-within .file-group-count {
+    color: $foreground;
+    text-style: bold;
+}
+
+PRInfo .file-group-toggle {
+    width: 1fr;
+    height: 1;
+    min-width: 0;
+    border: none;
+    padding: 0;
+    background: transparent !important;
+    color: $foreground !important;
+    text-align: left;
+    content-align: left middle;
 }
 
 /* PR Header */
@@ -95,7 +210,9 @@ PRInfo .sidebar-section-heading {
 }
 
 PRInfo #edit-reviewers,
-PRInfo #edit-assignees {
+PRInfo #edit-assignees,
+PRInfo #refresh-checks,
+PRInfo #refresh-file-summary {
     width: 3;
     min-width: 3;
     height: 1;
@@ -107,21 +224,30 @@ PRInfo #edit-assignees {
 }
 
 PRInfo #edit-reviewers:hover,
-PRInfo #edit-assignees:hover {
-    background: #363a4f;
-    color: $text;
+PRInfo #edit-assignees:hover,
+PRInfo #refresh-checks:hover,
+PRInfo #refresh-file-summary:hover,
+PRInfo .file-group-toggle:hover {
+    background: $primary 12%;
+    color: $foreground;
 }
 
 PRInfo #edit-reviewers:focus,
-PRInfo #edit-assignees:focus {
-    background: $primary;
-    color: $background;
+PRInfo #edit-assignees:focus,
+PRInfo #refresh-checks:focus,
+PRInfo #refresh-file-summary:focus,
+PRInfo .file-group-toggle:focus {
+    background: $primary 30%;
+    color: $foreground;
+    text-style: bold;
 }
 
 PRInfo .sidebar-section-title {
     text-style: bold;
     color: #6e738d;
     width: auto;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
 }
 
 PRInfo #edit-reviewers,
@@ -141,16 +267,6 @@ PRInfo ReviewThreadItem.--thread {
 
 PRInfo CommentCard.pending-review-summary .comment-header {
     color: #eed49f;
-}
-
-PRInfo CommentCard.description-container:hover,
-PRInfo CommentCard.comment-box:hover {
-    background: #24273a;
-}
-
-PRInfo CommentCard.thread-comment:hover,
-PRInfo CommentCard.thread-reply:hover {
-    background: #2f3348;
 }
 
 /* Placeholder text */
@@ -174,34 +290,32 @@ PRInfo.-compact #main-scroll {
 }
 
 PRInfo.-compact .sidebar {
-    layout: horizontal;
     width: 100%;
-    height: auto;
+    height: 40%;
+    max-height: 14;
+    min-height: 5;
     border-left: none;
     border-top: solid #363a4f;
 }
 
-PRInfo.-compact .sidebar-section {
+PRInfo.-compact .sidebar:focus-within {
+    border-left: none;
+    border-top: solid $primary;
+}
+
+PRInfo.-compact #sidebar-metadata {
+    layout: horizontal;
+    margin-bottom: 1;
+}
+
+PRInfo.-compact #sidebar-metadata .sidebar-section {
     width: 1fr;
     margin-bottom: 0;
 }
 
 /* Selected item highlight */
-PRInfo CommentCard.description-container.--selected {
-    border: solid #8aadf4;
-}
-
-PRInfo CommentCard.comment-box.--selected {
-    border: solid #8aadf4;
-}
-
-PRInfo CommentCard.thread-comment.--selected,
-PRInfo CommentCard.thread-reply.--selected {
-    background: #363a4f;
-}
-
 PRInfo Collapsible.--selected {
-    border: solid #8aadf4;
+    border-left: solid #8aadf4;
 }
 
 PRInfo Collapsible.--thread.--selected,

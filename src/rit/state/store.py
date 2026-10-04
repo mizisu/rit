@@ -58,6 +58,7 @@ from rit.state.models import (
     ReviewThread,
     ReviewThreadInfo,
 )
+from rit.state.overview_resource import OverviewResource
 from rit.state.pending_review import (
     UnsupportedInlineCommentTarget,
     plan_inline_comment_submission,
@@ -78,6 +79,7 @@ from rit.state.pending_review_visibility import (
 from rit.state.pending_review_workspace import PendingReviewWorkspace
 from rit.state.pr_management import plan_assignee_selection, plan_reviewer_selection
 from rit.state.pr_merge import merge_pr_discussion, merge_pr_summary
+from rit.state.pr_overview import PRChecksSnapshot, PRFilesSnapshot
 from rit.state.review_annotations import ReviewAnnotationIndex
 
 __all__ = (
@@ -92,6 +94,12 @@ __all__ = (
 class PRStoreState:
     pr_loading: LoadingState = LoadingState.IDLE
     files_loading: LoadingState = LoadingState.IDLE
+    checks: OverviewResource[str, PRChecksSnapshot] = field(
+        default_factory=OverviewResource[str, PRChecksSnapshot]
+    )
+    file_summary: OverviewResource[tuple[str, str], PRFilesSnapshot] = field(
+        default_factory=OverviewResource[tuple[str, str], PRFilesSnapshot]
+    )
 
     pr: PR | None = None
     files: list[PRFile] = field(default_factory=list)
@@ -130,6 +138,9 @@ class PRStore:
         files: list[PRFile]
         loaded_count: int = 0
         total_count: int = 0
+
+    class OverviewUpdated(Message):
+        """Checks or changed-file summary state changed, without diff work."""
 
     @dataclass
     class FileSelected(Message):
@@ -232,6 +243,59 @@ class PRStore:
             self._post_message(
                 self.ErrorOccurred(error=str(e), source="load_pr_summary")
             )
+
+    async def load_pr_overview(self) -> None:
+        """Load sidebar data independently of the description and diff workspace."""
+        await asyncio.gather(self.load_pr_checks(), self.load_pr_file_summary())
+
+    async def load_pr_checks(self, *, refresh: bool = False) -> None:
+        """Refresh live checks independently of the diff workspace."""
+        if not self._overview_refs()[1]:
+            return
+
+        async def fetch(head: str) -> PRChecksSnapshot:
+            snapshot = await self._service.get_pr_checks(head)
+            if snapshot.head_sha != head:
+                raise GitHubError("GitHub returned checks for a different PR head")
+            return snapshot
+
+        await self._state.checks.load(
+            current_key=lambda: self._overview_refs()[1],
+            fetch=fetch,
+            on_change=self._post_overview_update,
+            refresh=refresh,
+        )
+
+    async def load_pr_file_summary(self, *, refresh: bool = False) -> None:
+        """Prepare one metadata-only snapshot, never populating the diff workspace."""
+        if not all(self._overview_refs()):
+            return
+
+        async def fetch(refs: tuple[str, str]) -> PRFilesSnapshot:
+            metadata = await self._service.get_pr_file_metadata(
+                self.pr_number,
+                validate=True,
+                refresh=refresh,
+            )
+            if (metadata.base_sha, metadata.head_sha) != refs:
+                raise GitHubError(
+                    "PR changed while loading files; refresh and try again"
+                )
+            return await asyncio.to_thread(PRFilesSnapshot.from_metadata, metadata)
+
+        await self._state.file_summary.load(
+            current_key=self._overview_refs,
+            fetch=fetch,
+            on_change=self._post_overview_update,
+            refresh=refresh,
+        )
+
+    def _post_overview_update(self) -> None:
+        self._post_message(self.OverviewUpdated())
+
+    def _overview_refs(self) -> tuple[str, str]:
+        pr = self._state.pr
+        return (pr.base_sha, pr.head_sha) if pr is not None else ("", "")
 
     async def load_pr_discussion(self) -> None:
         async def load_discussion() -> PR:

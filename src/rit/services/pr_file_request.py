@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable
 from dataclasses import dataclass
 
 from unidiff.errors import UnidiffParseError
@@ -11,6 +12,7 @@ from rit.services.gh_paginated_json import parse_paginated_items
 from rit.services.gh_request import GitHubInputRunner
 from rit.services.graphql_request import connection_nodes, mapping, run_graphql
 from rit.state.models import FileViewedState, PRFile
+from rit.state.pr_overview import PRFileMetadata
 
 __all__ = (
     "fetch_file_content",
@@ -110,10 +112,13 @@ async def fetch_pr_files(
     total_count: int | None = None,
     per_page: int = 100,
     runner: GitHubInputRunner,
+    metadata: Awaitable[PRFileMetadata] | None = None,
 ) -> list[PRFile]:
     """Load metadata and GitHub's canonical patch concurrently, without blobs."""
-    metadata = asyncio.create_task(
-        _fetch_pr_file_metadata(
+    metadata_task = asyncio.ensure_future(
+        metadata
+        if metadata is not None
+        else fetch_pr_file_metadata(
             owner,
             repo,
             pr_number,
@@ -134,7 +139,7 @@ async def fetch_pr_files(
     )
     try:
         try:
-            (files, _, _), raw_diff = await asyncio.gather(metadata, patch)
+            snapshot, raw_diff = await asyncio.gather(metadata_task, patch)
         except RuntimeError as error:
             if (
                 not patch.done()
@@ -143,7 +148,8 @@ async def fetch_pr_files(
                 or "HTTP 406" not in str(error)
             ):
                 raise
-            files, base, head = await metadata
+            snapshot = await metadata_task
+            files = [file.model_copy() for file in snapshot.files]
             result = await runner(
                 [
                     "api",
@@ -154,20 +160,44 @@ async def fetch_pr_files(
             _, current_base, current_head = await _fetch_pr_file_metadata(
                 owner, repo, pr_number, total_count=1, per_page=1, runner=runner
             )
-            if (base, head) != (current_base, current_head):
+            if (snapshot.base_sha, snapshot.head_sha) != (current_base, current_head):
                 raise RuntimeError(
                     "PR changed while loading files; refresh and try again"
                 )
             await asyncio.to_thread(_populate_file_list_patches, files, result)
             return files
     finally:
-        for task in (metadata, patch):
+        for task in (metadata_task, patch):
             if not task.done():
                 task.cancel()
-        await asyncio.gather(metadata, patch, return_exceptions=True)
+        await asyncio.gather(metadata_task, patch, return_exceptions=True)
 
+    files = [file.model_copy() for file in snapshot.files]
     await asyncio.to_thread(_populate_file_patches, files, raw_diff)
     return files
+
+
+async def fetch_pr_file_metadata(
+    owner: str,
+    repo: str,
+    pr_number: int,
+    *,
+    total_count: int | None = None,
+    per_page: int = 100,
+    runner: GitHubInputRunner,
+) -> PRFileMetadata:
+    """Fetch a complete metadata snapshot without downloading patches."""
+    files, base, head = await _fetch_pr_file_metadata(
+        owner,
+        repo,
+        pr_number,
+        total_count=total_count,
+        per_page=per_page,
+        runner=runner,
+    )
+    if not base or not head:
+        raise ValueError("GitHub GraphQL response did not include PR base/head refs")
+    return PRFileMetadata(base, head, tuple(files))
 
 
 async def _fetch_pr_file_metadata(
@@ -183,6 +213,7 @@ async def _fetch_pr_file_metadata(
     after: str | None = None
     base_ref_oid = ""
     head_ref_oid = ""
+    seen_cursors: set[str] = set()
     while True:
         page = parse_pr_files_page(
             await run_graphql(
@@ -213,8 +244,9 @@ async def _fetch_pr_file_metadata(
             break
         if not page.has_next_page:
             break
-        if not page.end_cursor or page.end_cursor == after:
+        if not page.end_cursor or page.end_cursor in seen_cursors:
             raise ValueError("GitHub GraphQL file pagination returned no next cursor")
+        seen_cursors.add(page.end_cursor)
         after = page.end_cursor
 
     if files and (not base_ref_oid or not head_ref_oid):
@@ -311,7 +343,6 @@ def _populate_file_list_patches(files: list[PRFile], result: str) -> None:
         file.status = _STATUS_BY_CHANGE_TYPE.get(file.status.upper(), file.status)
         patches[file.filename] = file
 
-    # ponytail: REST stops at 3,000 files; larger PRs need a local Git fallback.
     if len(patches) != len(files) or patches.keys() != {
         file.filename for file in files
     }:
