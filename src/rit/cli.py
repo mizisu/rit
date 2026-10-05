@@ -59,7 +59,8 @@ def main(pr_ref: str) -> None:
     owner, repo, pr_number = parse_pr_reference(pr_ref)
 
     app = RitApp(owner=owner, repo=repo, pr_number=pr_number)
-    app.run()
+    with app.tmux_navigation:
+        app.run()
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from textual.signal import Signal
 from textual.widgets import Input, TextArea
 
 from rit.services.gh_cli import GhCliError, run_gh
+from rit.services.tmux_navigation import TmuxNavigation
 from rit.state.settings import Settings
 from rit.ui.messages import Flash, SettingChanged
 from rit.ui.terminal_graphics import configure_terminal_graphics
@@ -58,6 +59,7 @@ class RitApp(App):
         self.owner = owner
         self.repo = repo
         self.pr_number = pr_number
+        self.tmux_navigation = TmuxNavigation()
 
     @cached_property
     def settings(self) -> Settings:
@@ -85,6 +87,13 @@ class RitApp(App):
 
     def on_mount(self) -> None:
         from rit.ui.screens.main import MainScreen
+
+        self.app_suspend_signal.subscribe(
+            self, lambda _: self.tmux_navigation.pause(), immediate=True
+        )
+        self.app_resume_signal.subscribe(
+            self, lambda _: self.tmux_navigation.resume(), immediate=True
+        )
 
         self.run_worker(
             asyncio.to_thread(configure_terminal_graphics),

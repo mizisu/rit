@@ -434,10 +434,20 @@ class TestRitApp:
             assert files.diff_view.region.y == files.region.y
             assert copy_button.region.right <= branches.content_region.right
 
-    async def test_app_starts(self, app: RitApp) -> None:
-        """Test that the app starts without errors."""
-        async with app.run_test() as pilot:
+    async def test_app_starts(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Mount the app and connect terminal suspension to pane ownership."""
+        _stub_initial_loads(monkeypatch)
+        app = RitApp()
+        calls: list[str] = []
+        monkeypatch.setattr(app.tmux_navigation, "pause", lambda: calls.append("pause"))
+        monkeypatch.setattr(
+            app.tmux_navigation, "resume", lambda: calls.append("resume")
+        )
+        async with app.run_test():
             assert app.is_running
+            app.app_suspend_signal.publish(app)
+            app.app_resume_signal.publish(app)
+            assert calls == ["pause", "resume"]
 
     async def test_app_has_main_screen(self, app: RitApp) -> None:
         """Test that the app shows the main screen."""
@@ -700,7 +710,7 @@ class TestRitApp:
             await pilot.pause()
 
             await pilot.press("e")
-            await pilot.press("L")
+            await pilot.press("ctrl+l")
             await pilot.pause()
 
             assert diff_view.has_focus

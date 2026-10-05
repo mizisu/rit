@@ -300,7 +300,7 @@ async def test_single_category_and_mixed_prs_preserve_choices_and_handle_empty_e
         assert "Loading" in str(status.content)
 
 
-async def test_shift_focus_and_first_file_selection_wait_for_lazy_diff_loading(
+async def test_ctrl_focus_and_first_file_selection_wait_for_lazy_diff_loading(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     started = asyncio.Event()
@@ -360,14 +360,14 @@ async def test_shift_focus_and_first_file_selection_wait_for_lazy_diff_loading(
             "next_item",
             lambda: timeline_calls.append("next"),
         )
-        await pilot.press("L")
+        await pilot.press("ctrl+l")
         assert screen.pr_info.sidebar_has_focus
         await pilot.press("j")
         assert not timeline_calls
         options = screen.query_one("#summary-files-implementation", SummaryOptionList)
         options.focus()
         options.highlighted = 1
-        await pilot.press("H", "L")
+        await pilot.press("ctrl+h", "ctrl+l")
         assert options.has_focus and options.highlighted == 1
         assert store.state.files_loading == LoadingState.IDLE
         assert not calls

@@ -112,13 +112,13 @@ def _reviewer_candidate_result(
 
 _PR_INFO_BINDINGS = [
     Binding(
-        "H",
+        "ctrl+h",
         "focus_left",
         "Move Focus",
-        key_display="shift+h/l",
+        key_display="ctrl+h/l",
         group=_NAVIGATION_GROUP,
     ),
-    Binding("L", "focus_right", show=False),
+    Binding("ctrl+l", "focus_right", show=False),
     Binding("ctrl+g", "scroll_to_bottom", "Bottom", show=False),
     Binding("z", "center_current", "Center", show=False),
     Binding("j", "cursor_down", "", group=_NAVIGATION_GROUP),
@@ -152,12 +152,10 @@ _FILES_BINDINGS = [
         key_display="ctrl+h/l",
         group=_NAVIGATION_GROUP,
     ),
-    Binding("H", "focus_left", "", group=_NAVIGATION_GROUP, show=False),
     Binding("c", "comment", "Comment / Edit", group=_COMMENT_GROUP),
     Binding("d", "delete_comment", "Delete Comment", group=_COMMENT_GROUP),
     Binding("ctrl+s", "review", "Review", group=_REVIEW_GROUP),
     Binding("ctrl+l", "focus_right", "", group=_NAVIGATION_GROUP, show=False),
-    Binding("L", "focus_right", "", group=_NAVIGATION_GROUP, show=False),
     Binding("e", "focus_file_tree", "File Tree", group=_NAVIGATION_GROUP),
     Binding(
         "E",
@@ -1587,8 +1585,8 @@ class MainScreen(Screen[None]):
     def on_key(self, event: events.Key) -> None:
         if self._text_entry_has_focus() or self._comment_editor_has_focus():
             return
-        if self.current_tab == 1 and event.key in {"ctrl+h", "ctrl+l", "H", "L"}:
-            if event.key in {"ctrl+h", "H"}:
+        if self.current_tab == 1 and event.key in {"ctrl+h", "ctrl+l"}:
+            if event.key == "ctrl+h":
                 self.action_focus_left()
             else:
                 self.action_focus_right()
