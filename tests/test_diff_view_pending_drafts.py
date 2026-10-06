@@ -682,13 +682,14 @@ async def test_open_inline_comment_editor_on_line_starts_new_draft() -> None:
         await pilot.pause()
         await pilot.pause()
 
-        editor = app.query_one("#diff-inline-comment-editor")
-        draft = app.query_one("#pending-draft-1-right-0")
+        editor = app.screen.query_one("#diff-inline-comment-editor")
+        draft = diff_view.query_one("#pending-draft-1-right-0")
         body = editor.query_one("#comment-editor-body", TextArea)
 
         assert body.text == ""
         assert diff_view.inline_comment_draft_index() is None
-        assert editor.region.y > draft.region.y
+        assert draft.is_attached
+        assert editor not in diff_view.walk_children()
 
 
 @pytest.mark.asyncio
@@ -717,11 +718,11 @@ async def test_open_inline_comment_editor_prefills_selected_draft() -> None:
         diff_view.focus()
         await pilot.pause()
 
-        assert await diff_view.open_inline_comment_editor() is True
+        assert await diff_view.open_inline_comment_editor(edit=True) is True
         await pilot.pause()
         await pilot.pause()
 
-        editor = app.query_one("#diff-inline-comment-editor")
+        editor = app.screen.query_one("#diff-inline-comment-editor")
         body = editor.query_one("#comment-editor-body", TextArea)
 
         assert body.text == "hello draft"

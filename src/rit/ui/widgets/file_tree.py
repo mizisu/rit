@@ -487,7 +487,7 @@ class FileTree(Vertical):
             Counter(
                 comment.path for comment in self.store.state.pending_review.comments
             )
-            if self.store is not None
+            if self.store is not None and self.store.state.scope.kind == "all"
             else {}
         )
         self._render_directory_contents(
@@ -617,12 +617,16 @@ class FileTree(Vertical):
             filtered_files = self._all_files
 
         self.file_count = len(filtered_files)
-        if not force and len(filtered_files) == len(self._filtered_files) and all(
-            current is previous
-            for current, previous in zip(
-                filtered_files,
-                self._filtered_files,
-                strict=True,
+        if (
+            not force
+            and len(filtered_files) == len(self._filtered_files)
+            and all(
+                current is previous
+                for current, previous in zip(
+                    filtered_files,
+                    self._filtered_files,
+                    strict=True,
+                )
             )
         ):
             return

@@ -3212,8 +3212,13 @@ async def test_virtualized_large_diff_preserves_height_without_tall_buffers(
         assert diff_view.query_one("#virtual-buffer-bottom").size.height == 0
 
         for target in (750, maximum_y):
-            diff_view.scroll_to(y=target, animate=False)
-            await wait_until(lambda: _diff_view_render_idle(diff_view), timeout=5.0)
+            diff_view.scroll_to(y=target, animate=False, immediate=True)
+            await wait_until(
+                lambda: (
+                    diff_view.scroll_y == target and _diff_view_render_idle(diff_view)
+                ),
+                timeout=5.0,
+            )
             await pilot.pause()
             assert diff_view.scroll_y == target
             assert diff_view.virtual_size.height == total_height

@@ -1,13 +1,11 @@
 from types import SimpleNamespace
 from typing import Literal
+from unittest.mock import Mock, patch
 
 import pytest
-from textual.css.query import NoMatches
 from textual.events import Key
 
-from rit.core.types import DiffLine
 from rit.ui.screens.main import _FILES_BINDINGS, _PR_INFO_BINDINGS, MainScreen
-from rit.ui.widgets.diff_cursor_side import resolve_active_pane_for_line
 
 
 def test_pane_focus_bindings_use_only_ctrl_h_l() -> None:
@@ -57,220 +55,30 @@ def test_ctrl_navigation_does_not_steal_editor_input(
     assert screen.check_action("focus_right", ()) is False
 
 
-class MissingFileTree:
-    has_focus_within = False
-
-    def query_one(self, *_args) -> None:
-        raise NoMatches("missing")
-
-
-class ExplodingFileTree:
-    has_focus_within = False
-
-    def query_one(self, *_args) -> None:
-        raise RuntimeError("query failed")
-
-
-class ExplodingFocusTree:
-    def focus(self) -> None:
-        raise RuntimeError("focus failed")
-
-
-class QueryingFileTree:
-    has_focus_within = False
-
-    def query_one(self, *_args) -> ExplodingFocusTree:
-        return ExplodingFocusTree()
-
-
-class FocusTarget:
-    has_focus_within = False
-    split = False
-    active_pane = "new"
-
-    def __init__(self) -> None:
-        self.focused = False
-
-    def focus(self) -> None:
-        self.focused = True
-
-
-class SingleSidedFocusTarget(FocusTarget):
-    split = True
-
-    def __init__(self, line: DiffLine) -> None:
-        super().__init__()
-        self.line = line
-
-    def _focus_entry_pane(
-        self,
-        preferred_pane: Literal["old", "new"],
-    ) -> Literal["old", "new"]:
-        return resolve_active_pane_for_line(self.line, preferred_pane)
-
-
-class ToggleFileChanges:
-    def __init__(self, tree: FocusTarget) -> None:
-        self.file_tree = SimpleNamespace(
-            display=False,
-            has_focus_within=False,
-            query_one=lambda *_args: tree,
-        )
-        self.toggled = False
-
-    def toggle_file_tree(self) -> None:
-        self.toggled = True
-        self.file_tree.display = True
-
-
-def test_current_files_focus_target_returns_none_when_file_tree_is_not_mounted() -> (
-    None
-):
-    class TestScreen(MainScreen):
-        @property
-        def file_changes(self):
-            return SimpleNamespace(
-                diff_view=SimpleNamespace(has_focus_within=False),
-                file_tree=MissingFileTree(),
-            )
-
-    screen = TestScreen(owner="test", repo="repo", pr_number=123)
-    screen.current_tab = 1
-
-    assert screen._current_files_focus_target() is None
-
-
-def test_current_files_focus_target_reraises_unexpected_query_errors() -> None:
-    class TestScreen(MainScreen):
-        @property
-        def file_changes(self):
-            return SimpleNamespace(
-                diff_view=SimpleNamespace(has_focus_within=False),
-                file_tree=ExplodingFileTree(),
-            )
-
-    screen = TestScreen(owner="test", repo="repo", pr_number=123)
-    screen.current_tab = 1
-
-    with pytest.raises(RuntimeError, match="query failed"):
-        screen._current_files_focus_target()
-
-
-def test_focus_files_diff_focuses_diff_when_no_files_widget_has_focus() -> None:
-    diff_view = FocusTarget()
-
-    class TestScreen(MainScreen):
-        @property
-        def file_changes(self):
-            return SimpleNamespace(diff_view=diff_view, file_tree=MissingFileTree())
-
-    screen = TestScreen(owner="test", repo="repo", pr_number=123)
-    screen.current_tab = 1
-
-    screen._focus_files_diff(preserve_existing_focus=True)
-
-    assert diff_view.focused is True
-
-
-def test_focus_files_tree_ignores_missing_file_tree() -> None:
-    class TestScreen(MainScreen):
-        @property
-        def file_changes(self):
-            return SimpleNamespace(file_tree=MissingFileTree())
-
-    screen = TestScreen(owner="test", repo="repo", pr_number=123)
-    screen.current_tab = 1
-
-    screen._focus_files_tree()
-
-
-def test_focus_files_tree_reraises_unexpected_focus_errors() -> None:
-    class TestScreen(MainScreen):
-        @property
-        def file_changes(self):
-            return SimpleNamespace(file_tree=QueryingFileTree())
-
-    screen = TestScreen(owner="test", repo="repo", pr_number=123)
-    screen.current_tab = 1
-
-    with pytest.raises(RuntimeError, match="focus failed"):
-        screen._focus_files_tree()
-
-
-def test_focus_file_tree_syncs_tree_to_current_diff_file_before_focus() -> None:
-    tree = FocusTarget()
-    calls: list[str] = []
-
-    class FileChanges:
-        file_tree = SimpleNamespace(
-            display=True,
-            has_focus_within=False,
-            query_one=lambda *_args: tree,
-        )
-
-        def sync_file_tree_to_diff_cursor(self) -> None:
-            calls.append("sync")
-
-    file_changes = FileChanges()
-
-    class TestScreen(MainScreen):
-        @property
-        def file_changes(self):
-            return file_changes
-
-    screen = TestScreen(owner="test", repo="repo", pr_number=123)
-    screen.current_tab = 1
-
-    screen.action_focus_file_tree()
-
-    assert calls == ["sync"]
-    assert tree.focused is True
-
-
-def test_toggle_file_tree_focuses_tree_when_opening() -> None:
-    tree = FocusTarget()
-    file_changes = ToggleFileChanges(tree)
-
-    class TestScreen(MainScreen):
-        @property
-        def file_changes(self):
-            return file_changes
-
-    screen = TestScreen(owner="test", repo="repo", pr_number=123)
-    screen.current_tab = 1
-
-    screen.action_toggle_file_tree()
-
-    assert file_changes.toggled is True
-    assert tree.focused is True
-
-
-@pytest.mark.parametrize(
-    ("line", "expected_pane"),
-    [
-        (DiffLine(old_line_no=None, new_line_no=1, is_added=True), "new"),
-        (DiffLine(old_line_no=1, new_line_no=None, is_deleted=True), "old"),
-    ],
-)
-def test_focus_right_from_tree_uses_visible_side_for_single_sided_line(
-    line: DiffLine,
-    expected_pane: Literal["old", "new"],
+@pytest.mark.parametrize("tab", [0, 1])
+@pytest.mark.parametrize("direction", ["left", "right"])
+@pytest.mark.parametrize("moved", [True, False])
+def test_focus_delegates_to_selected_tab_before_tmux(
+    tab: int, direction: Literal["left", "right"], moved: bool
 ) -> None:
-    diff_view = SingleSidedFocusTarget(line)
-    file_tree = SimpleNamespace(
-        has_focus_within=True,
-        query_one=lambda *_args: FocusTarget(),
-    )
+    screen = MainScreen()
+    screen.current_tab = tab
+    panels = [Mock(spec=["move_focus"]), Mock(spec=["move_focus"])]
+    panels[tab].move_focus.return_value = moved
+    navigation = Mock(spec=["select_pane"])
+    with (
+        patch.object(MainScreen, "app", SimpleNamespace(tmux_navigation=navigation)),
+        patch.object(MainScreen, "pr_info", panels[0]),
+        patch.object(MainScreen, "file_changes", panels[1]),
+    ):
+        if direction == "left":
+            screen.action_focus_left()
+        else:
+            screen.action_focus_right()
 
-    class TestScreen(MainScreen):
-        @property
-        def file_changes(self):
-            return SimpleNamespace(diff_view=diff_view, file_tree=file_tree)
-
-    screen = TestScreen(owner="test", repo="repo", pr_number=123)
-    screen.current_tab = 1
-
-    screen.action_focus_right()
-
-    assert diff_view.focused is True
-    assert diff_view.active_pane == expected_pane
+    panels[tab].move_focus.assert_called_once_with(direction)
+    panels[1 - tab].move_focus.assert_not_called()
+    if moved:
+        navigation.select_pane.assert_not_called()
+    else:
+        navigation.select_pane.assert_called_once_with(direction)

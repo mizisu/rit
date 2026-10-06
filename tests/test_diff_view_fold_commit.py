@@ -559,14 +559,6 @@ async def test_fold_preserves_inline_and_file_drafts_and_hidden_targets(
         body.insert(" draft")
         body.selection = type(body.selection)((0, 1), (0, 5))
         selection, history = body.selection, body.history
-        header = view._file_header_hunk_index("three.py")
-        assert header is not None
-        view._set_file_header_selection(header)
-        assert await view.open_file_comment_editor()
-        await pilot.pause()
-        file_editor = view._file_comment_editor_widget
-        assert file_editor is not None and file_editor.is_open
-        file_editor.query_one(TextArea).insert("file draft")
         prepared, release = asyncio.Event(), asyncio.Event()
         build = view._build_render_plan
 
@@ -580,15 +572,13 @@ async def test_fold_preserves_inline_and_file_drafts_and_hidden_targets(
         refresh = asyncio.create_task(app.reconcile())
         try:
             await asyncio.wait_for(prepared.wait(), timeout=1)
-            await pilot.press("x")
+            assert body.has_focus
         finally:
             release.set()
         await refresh
         await pilot.pause()
         inline = view._inline_comment_editor_widget
-        file_editor = view._file_comment_editor_widget
         assert inline is not None and inline.is_open
-        assert file_editor is not None and file_editor.is_open
         body = inline.query_one(TextArea)
         assert body.text == "unsaved draft"
         assert body.selection == selection and body.history is history
@@ -596,27 +586,22 @@ async def test_fold_preserves_inline_and_file_drafts_and_hidden_targets(
         assert body.text == "unsaved"
         body.action_redo()
         assert body.text == "unsaved draft"
-        assert file_editor.query_one(TextArea).text == "file draftx"
+        assert body.has_focus
         assert view._inline_comment_editor_target == ("two.py", 20, "LEFT")
         assert view._inline_comment_editor_line_index == view.line_index_for_location(
             "two.py", 20, "LEFT"
         )
-        assert view._file_comment_editor_hunk_index == view._file_header_hunk_index(
-            "three.py"
-        )
-
         app.store.state.files[1].viewer_viewed_state = FileViewedState.VIEWED
         await app.reconcile()
-        assert view._inline_comment_editor_widget is None
+        assert view._inline_comment_editor_widget is inline
+        assert body.has_focus
         assert view._inline_comment_editor_target == ("two.py", 20, "LEFT")
         view._expanded_viewed_files.add("two.py")
         await app.reconcile()
         inline = view._inline_comment_editor_widget
         assert inline is not None and inline.is_open
         assert inline.query_one(TextArea).text == "unsaved draft"
-        file_editor = view._file_comment_editor_widget
-        assert file_editor is not None
-        assert file_editor.query_one(TextArea).text == "file draftx"
+        await view.close_inline_comment_editor()
         index = view._line_index_by_file_old_number[("two.py", 10)]
         view.jump_to_line_index(index, side="LEFT", focus=True)
         assert await view.open_inline_comment_editor()
@@ -625,9 +610,22 @@ async def test_fold_preserves_inline_and_file_drafts_and_hidden_targets(
         assert inline is not None
         assert inline.query_one(TextArea).text == ""
         assert view._inline_comment_editor_target == ("two.py", 10, "LEFT")
+        await view.close_inline_comment_editor()
+
+        header = view._file_header_hunk_index("three.py")
+        assert header is not None
+        view._set_file_header_selection(header)
+        assert await view.open_file_comment_editor()
         file_editor = view._file_comment_editor_widget
         assert file_editor is not None
-        assert file_editor.query_one(TextArea).text == "file draftx"
+        file_body = file_editor.query_one(TextArea)
+        file_body.insert("file draft")
+        app.store.state.files[2].viewer_viewed_state = FileViewedState.VIEWED
+        await app.reconcile()
+        assert view._file_comment_editor_widget is file_editor
+        assert file_body.text == "file draft"
+        assert file_body.has_focus
+        assert view.file_comment_target() == "three.py"
 
 
 @pytest.mark.asyncio

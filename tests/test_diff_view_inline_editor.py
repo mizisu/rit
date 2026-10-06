@@ -1,8 +1,8 @@
+import asyncio
 from typing import Literal
 
 import pytest
-from rich.style import Style
-from textual import events, on
+from textual import on
 from textual.app import App, ComposeResult
 from textual.widgets import Button, Static, TextArea
 
@@ -11,8 +11,10 @@ from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.state.models import PRComment, PRFile, PRUser, ReviewThread
 from rit.state.store import PRStore
 from rit.ui.components.file_changes import FileChanges
+from rit.ui.screens.comment_submit import CommentSubmitScreen
 from rit.ui.widgets.comment_editor import InlineCommentEditor
 from rit.ui.widgets.diff_view import DiffView
+from rit.ui.widgets.review_thread_card import ReviewThreadItem
 from tests.conftest import wait_until
 
 
@@ -70,15 +72,12 @@ async def test_file_headers_are_cursor_targets_for_file_comments() -> None:
         await pilot.pause()
         await pilot.pause()
 
-        editor = app.query_one("#diff-file-comment-editor")
+        assert isinstance(app.screen, CommentSubmitScreen)
+        editor = app.screen.query_one("#diff-file-comment-editor")
         context = editor.query_one(".comment-editor-context", Static)
-        first_line = app.query_one("#line-0")
-        assert first_header.region.y < editor.region.y < first_line.region.y
+        assert editor not in diff_view.walk_children()
         assert str(context.content) == "Entire file: one.py"
         assert diff_view.file_comment_target() == "one.py"
-        assert diff_view._file_comment_editor_height() == (
-            editor.region.height + editor.styles.margin.height
-        )
 
         await diff_view.close_file_comment_editor()
         await pilot.pause()
@@ -116,47 +115,42 @@ async def test_file_editor_matches_inline_editor_layout(
         view = app.query_one(DiffView)
         monkeypatch.setattr(view, "VIRTUALIZE_LINE_THRESHOLD", 0)
         await view.show_diff("All files", _combined_two_file_diff())
-        assert await view.open_inline_comment_editor()
-        await pilot.pause()
-        assert view._set_file_header_selection(0)
-        assert await view.open_file_comment_editor()
-        await pilot.pause()
+        for width in (160, 80, 44):
+            await pilot.resize_terminal(width, 30)
+            sizes = []
+            for kind in ("inline", "file"):
+                if kind == "inline":
+                    assert await view.open_inline_comment_editor()
+                else:
+                    view._set_file_header_selection(0)
+                    assert view.selected_file_header_path() == "one.py"
+                    assert await view.open_file_comment_editor()
+                assert isinstance(app.screen, CommentSubmitScreen)
+                editor = app.screen.editor
+                body = editor.query_one(TextArea)
+                await wait_until(
+                    lambda body=body, editor=editor: (
+                        body.has_focus and editor.region.width > 0
+                    )
+                )
+                dialog = app.screen.query_one("#comment-submit-dialog")
+                sizes.append(dialog.region.size)
+                assert abs(dialog.region.center[0] - width / 2) <= 1
+                assert app.screen.region.contains_region(dialog.region)
+                assert editor.region.width <= 88
+                assert not await view.open_inline_comment_editor()
+                assert not await view.open_file_comment_editor()
 
-        inline_editor = view.query_one(
-            "#diff-inline-comment-editor", InlineCommentEditor
-        )
-        file_editor = view.query_one("#diff-file-comment-editor", InlineCommentEditor)
-        inline_body = inline_editor.query_one(TextArea)
-        file_body = file_editor.query_one(TextArea)
-        assert file_body.has_focus
-
-        for width in (160, 80):
-            await pilot.resize_terminal(width, 60)
-            await pilot.pause()
-            assert file_editor.region.size == inline_editor.region.size
-            assert file_editor.region.x == inline_editor.region.x
-            assert file_body.region.size == inline_body.region.size
-            assert file_editor.region.width <= 96
-
-        layout = view._file_comment_editor_layout_widget
-        assert layout is not None
-        initial_height = layout.region.height
-        initial_line_top = view._line_top_offsets[0]
-        file_body.text = "\n".join(f"comment line {line}" for line in range(20))
-        await wait_until(lambda: layout.region.height > initial_height)
-        await wait_until(
-            lambda: view._file_comment_editor_height() == layout.region.height
-        )
-        assert view._line_top_offsets[0] - initial_line_top == (
-            layout.region.height - initial_height
-        )
-        assert file_body.has_focus
-
-        await view.close_file_comment_editor()
-        assert not layout.is_attached
-        assert view._file_comment_editor_widget is None
-        assert view._file_comment_editor_layout_widget is None
-        assert inline_editor.is_attached
+                close_editor = (
+                    view.close_inline_comment_editor
+                    if kind == "inline"
+                    else view.close_file_comment_editor
+                )
+                await asyncio.gather(close_editor(), close_editor())
+                assert len(app.screen_stack) == 1
+                assert not editor.is_attached
+                await wait_until(lambda: view.has_focus)
+            assert sizes[0] == sizes[1]
 
 
 @pytest.mark.asyncio
@@ -207,8 +201,10 @@ async def test_file_editor_tracks_selected_draft_reply_and_new_comment(
             (0, "", None, None),
         ):
             view._comment_cursor_index = cursor
-            assert await view.open_file_comment_editor()
-            editor = view.query_one("#diff-file-comment-editor", InlineCommentEditor)
+            assert await view.open_file_comment_editor(edit=cursor != 0)
+            editor = app.screen.query_one(
+                "#diff-file-comment-editor", InlineCommentEditor
+            )
             body = editor.query_one(TextArea)
             await wait_until(lambda body=body: body.has_focus)
             assert body.text == text
@@ -221,6 +217,26 @@ async def test_file_editor_tracks_selected_draft_reply_and_new_comment(
             assert view.file_comment_draft_index() is None
             assert view.file_comment_edit_target() is None
             await wait_until(lambda: view.has_focus)
+
+        view._comment_cursor_index = 4
+        assert view.selected_reply_comment() == reply
+        assert await view.open_reply_comment_editor()
+        assert view.reply_comment_target() == reply
+        assert isinstance(app.screen, CommentSubmitScreen)
+        assert app.screen.editor.query_one(TextArea).text == ""
+        assert not await view.open_inline_comment_editor()
+        assert not await view.open_file_comment_editor()
+        assert not await view.open_reply_comment_editor()
+        await view.close_reply_comment_editor()
+        assert view.reply_comment_target() is None
+
+        thread_widget = view._file_comment_widgets_by_hunk[0][0]
+        assert isinstance(thread_widget, ReviewThreadItem)
+        thread_widget.collapsed = True
+        view._comment_cursor_index = 3
+        assert view.active_review_comment() is None
+        assert view.selected_reply_comment() == root
+        assert not await view.open_file_comment_editor(edit=True)
 
         assert store.state.pending_review.comments[2].body == "second draft"
         assert reply.body == "reply"
@@ -258,7 +274,9 @@ async def test_editor_buttons_keep_keys_from_diff_and_file_navigation() -> None:
             else:
                 view._set_file_header_selection(0)
                 assert await view.open_file_comment_editor()
-            editor = view.query_one(f"#diff-{kind}-comment-editor", InlineCommentEditor)
+            editor = app.screen.query_one(
+                f"#diff-{kind}-comment-editor", InlineCommentEditor
+            )
             body = editor.query_one(TextArea)
             await wait_until(lambda body=body: body.has_focus)
             body.text = "keep this draft"
@@ -357,7 +375,7 @@ async def test_selecting_visible_file_header_preserves_scroll_position() -> None
 
 
 @pytest.mark.asyncio
-async def test_open_inline_comment_editor_mounts_below_current_line() -> None:
+async def test_open_inline_comment_editor_overlays_current_line() -> None:
     patch = "@@ -1,1 +1,1 @@\n-old\n+new"
 
     class TestApp(App):
@@ -377,19 +395,19 @@ async def test_open_inline_comment_editor_mounts_below_current_line() -> None:
         await pilot.pause()
         await pilot.pause()
 
-        line_widget = app.query_one("#line-0")
-        editor = app.query_one("#diff-inline-comment-editor")
+        assert isinstance(app.screen, CommentSubmitScreen)
+        editor = app.screen.query_one("#diff-inline-comment-editor")
         body = editor.query_one("#comment-editor-body", TextArea)
         context = editor.query_one(".comment-editor-context", Static)
 
-        assert editor.region.y > line_widget.region.y
+        assert editor not in diff_view.walk_children()
         assert body.region.height >= 5
         assert diff_view.inline_comment_target() == ("test.py", 1, "LEFT")
         assert str(context.content) == "Selected: test.py:1 (old)"
 
 
 @pytest.mark.asyncio
-async def test_mouse_move_ignores_removed_inline_editor_before_refresh() -> None:
+async def test_closing_overlay_removes_editor_and_restores_diff_focus() -> None:
     class TestApp(App[None]):
         def compose(self) -> ComposeResult:
             yield DiffView(mode="unified", id="diff-view")
@@ -403,24 +421,15 @@ async def test_mouse_move_ignores_removed_inline_editor_before_refresh() -> None
         for _ in range(2):
             assert await view.open_inline_comment_editor()
             await pilot.pause()
-            body = view.query_one("#comment-editor-body", TextArea)
+            body = app.screen.query_one("#comment-editor-body", TextArea)
             x, y, _, _ = body.region
             x += 1
             assert body.is_attached
             assert app.screen.get_widget_at(x, y)[0] is body
-            mouse_move = events.MouseMove(None, x, y, 1, 0, 0, False, False, False)
-            await app.on_event(mouse_move)
-            assert mouse_move.style != Style.null()
 
-            with app.batch_update():
-                await view.close_inline_comment_editor()
-                assert not body.is_attached
-                assert app.screen.get_widget_at(x, y)[0] is body
-                mouse_move = events.MouseMove(None, x, y, 1, 0, 0, False, False, False)
-                await app.on_event(mouse_move)
-                assert mouse_move.style == Style.null()
-
-            await pilot.pause()
+            await view.close_inline_comment_editor()
+            await wait_until(lambda: view.has_focus)
+            assert not body.is_attached
             assert app.screen.get_widget_at(x, y)[0] is not body
 
 
@@ -464,11 +473,11 @@ async def test_open_inline_comment_editor_prefills_selected_submitted_comment() 
         await pilot.pause()
 
         assert diff_view.active_review_comment() == comment
-        assert await diff_view.open_inline_comment_editor() is True
+        assert await diff_view.open_inline_comment_editor(edit=True) is True
         await pilot.pause()
         await pilot.pause()
 
-        editor = app.query_one("#diff-inline-comment-editor")
+        editor = app.screen.query_one("#diff-inline-comment-editor")
         body = editor.query_one("#comment-editor-body", TextArea)
         title = editor.query_one(".comment-editor-title", Static)
 
@@ -477,9 +486,20 @@ async def test_open_inline_comment_editor_prefills_selected_submitted_comment() 
         assert diff_view.inline_comment_edit_target() == comment
         assert diff_view.inline_comment_draft_index() is None
 
+        await diff_view.close_inline_comment_editor()
+        thread_widget = diff_view._comment_widgets_by_line[1][0]
+        assert isinstance(thread_widget, ReviewThreadItem)
+        thread_widget.collapsed = True
+        assert diff_view.active_review_comment() is None
+        assert diff_view.selected_reply_comment() == comment
+        assert not await diff_view.open_inline_comment_editor(edit=True)
+        assert await diff_view.open_reply_comment_editor()
+        assert diff_view.reply_comment_target() == comment
+        await diff_view.close_reply_comment_editor()
+
 
 @pytest.mark.asyncio
-async def test_virtualized_diff_tracks_growing_inline_editor_height() -> None:
+async def test_growing_overlay_preserves_virtualized_diff_geometry() -> None:
     patch = "@@ -1,40 +1,40 @@\n" + "\n".join(f" line {line}" for line in range(1, 41))
 
     class TestApp(App):
@@ -502,24 +522,17 @@ async def test_virtualized_diff_tracks_growing_inline_editor_height() -> None:
         await pilot.pause()
         await pilot.pause()
 
-        layout = diff_view._inline_comment_editor_layout_widget
-        assert layout is not None
-        await wait_until(lambda: layout.region.height > 0)
-        initial_layout_height = layout.region.height
         initial_virtual_height = diff_view._virtual_content_height
-        initial_next_line_top = diff_view._line_top_offsets[2]
-
-        body = app.query_one("#comment-editor-body", TextArea)
+        initial_offsets = list(diff_view._line_top_offsets)
+        initial_scroll = diff_view.scroll_y
+        body = app.screen.query_one("#comment-editor-body", TextArea)
+        initial_body_height = body.region.height
         body.text = "\n".join(f"comment line {line}" for line in range(20))
-        await wait_until(lambda: layout.region.height > initial_layout_height)
-        await pilot.pause()
+        await wait_until(lambda: body.region.height > initial_body_height)
 
-        height_delta = layout.region.height - initial_layout_height
-        assert diff_view._inline_comment_editor_height() == layout.region.height
-        assert (
-            diff_view._virtual_content_height - initial_virtual_height == height_delta
-        )
-        assert diff_view._line_top_offsets[2] - initial_next_line_top == height_delta
+        assert diff_view._virtual_content_height == initial_virtual_height
+        assert diff_view._line_top_offsets == initial_offsets
+        assert diff_view.scroll_y == initial_scroll
         assert body.text.endswith("comment line 19")
         assert body.has_focus is True
 
@@ -552,7 +565,7 @@ async def test_open_inline_comment_editor_uses_visual_selection_range() -> None:
         assert await diff_view.open_inline_comment_editor() is True
         await pilot.pause()
 
-        editor = app.query_one("#diff-inline-comment-editor")
+        editor = app.screen.query_one("#diff-inline-comment-editor")
         context = editor.query_one(".comment-editor-context", Static)
 
         assert diff_view.inline_comment_target() == ("test.py", 4, "RIGHT")

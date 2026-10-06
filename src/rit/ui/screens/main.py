@@ -7,7 +7,6 @@ from textual import events, getters, on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import VerticalScroll
-from textual.css.query import NoMatches
 from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widgets import Button, Input, TabbedContent, TabPane, TextArea, Tree
@@ -301,31 +300,10 @@ class MainScreen(Screen[None]):
             if self.pr_info.cancel_comment_refresh():
                 self._pr_info_refresh_pending = True
             self.call_after_refresh(
-                lambda: self._focus_files_diff(preserve_existing_focus=True)
+                lambda: (
+                    self.file_changes.restore_focus() if self.current_tab == 1 else None
+                )
             )
-
-    def _focus_files_diff(self, *, preserve_existing_focus: bool = False) -> None:
-        if self.current_tab != 1:
-            return
-        if preserve_existing_focus and self._current_files_focus_target() is not None:
-            return
-
-        try:
-            self.file_changes.diff_view.focus()
-        except NoMatches:
-            pass
-
-    def _focus_files_tree(self, *, preserve_existing_focus: bool = False) -> None:
-        if self.current_tab != 1:
-            return
-        if preserve_existing_focus and self._current_files_focus_target() is not None:
-            return
-
-        try:
-            tree = self.file_changes.file_tree.query_one("#file-tree", Tree)
-            tree.focus()
-        except NoMatches:
-            pass
 
     def watch_current_tab(self, old_tab: int, new_tab: int) -> None:
         self._refresh_tab_bindings()
@@ -1850,76 +1828,24 @@ class MainScreen(Screen[None]):
             isinstance(ancestor, InlineCommentEditor) for ancestor in focused.ancestors
         )
 
-    def _current_files_focus_target(self) -> str | None:
-        if self.current_tab != 1:
-            return None
-
-        diff_view = self.file_changes.diff_view
-        if diff_view.has_focus_within:
-            return diff_view.active_pane if diff_view.split else "diff"
-
-        try:
-            self.file_changes.file_tree.query_one("#file-tree", Tree)
-        except NoMatches:
-            return None
-        return "tree" if self.file_changes.file_tree.has_focus_within else None
+    def _move_focus(self, direction: Literal["left", "right"]) -> None:
+        panel = self.pr_info if self.current_tab == 0 else self.file_changes
+        if not panel.move_focus(direction):
+            self.app.tmux_navigation.select_pane(direction)
 
     def action_focus_left(self) -> None:
-        if self.current_tab == 0:
-            self.pr_info.focus_main()
-            return
-        target = self._current_files_focus_target()
-        if target is None:
-            if self.current_tab == 1 and self.file_changes.file_tree.display:
-                self._focus_files_tree()
-            return
-
-        diff_view = self.file_changes.diff_view
-        if target == "new":
-            diff_view.active_pane = "old"
-            diff_view.focus()
-            return
-
-        if target in {"old", "diff"} and self.file_changes.file_tree.display:
-            self._focus_files_tree()
+        self._move_focus("left")
 
     def action_focus_right(self) -> None:
-        if self.current_tab == 0:
-            self.pr_info.focus_sidebar()
-            return
-        target = self._current_files_focus_target()
-        if target is None:
-            if self.current_tab == 1:
-                self.file_changes.diff_view.focus()
-            return
-
-        diff_view = self.file_changes.diff_view
-        if target == "tree":
-            if diff_view.split:
-                diff_view.active_pane = diff_view._focus_entry_pane("old")
-            diff_view.focus()
-            return
-
-        if target == "old" and diff_view.split:
-            diff_view.active_pane = "new"
-            diff_view.focus()
+        self._move_focus("right")
 
     def action_focus_file_tree(self) -> None:
-        if self.current_tab != 1:
-            return
-        if not self.file_changes.file_tree.display:
-            self.file_changes.show_file_tree()
-        self.file_changes.sync_file_tree_to_diff_cursor()
-        self._focus_files_tree()
+        if self.current_tab == 1:
+            self.file_changes.focus_file_tree()
 
     def action_toggle_file_tree(self) -> None:
-        if self.current_tab != 1:
-            return
-
-        was_hidden = not self.file_changes.file_tree.display
-        self.file_changes.toggle_file_tree()
-        if was_hidden:
-            self._focus_files_tree()
+        if self.current_tab == 1:
+            self.file_changes.toggle_file_tree()
 
     def action_prev_file(self) -> None:
         self.file_changes.select_prev_file()

@@ -1,4 +1,4 @@
-"""Logical anchors and editor drafts retained across projection commits."""
+"""Logical anchors retained across projection commits."""
 
 from __future__ import annotations
 
@@ -6,13 +6,10 @@ from bisect import bisect_right
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-from textual.widgets import TextArea
-
 from rit.core.types import DiffLine
 from rit.ui.widgets import diff_cursor as _cursor
 
 if TYPE_CHECKING:
-    from rit.ui.widgets.comment_editor import InlineCommentEditor
     from rit.ui.widgets.diff_view import DiffView
 
 
@@ -209,53 +206,3 @@ class FoldState:
             )
         if view.split:
             view._sync_split_horizontal_scroll(self.split_scroll_x)
-
-
-@dataclass
-class EditorState:
-    body: TextArea
-    is_open: bool
-    focus_id: str | None
-    navigation_revision: int
-
-    @classmethod
-    def capture(
-        cls,
-        view: DiffView,
-        editor: InlineCommentEditor,
-        previous: EditorState | None = None,
-    ) -> EditorState:
-        focused = view.screen.focused
-        body = editor.query_one("#comment-editor-body", TextArea)
-        focus_id = (
-            focused.id
-            if focused is not None and focused in editor.walk_children()
-            else None
-        )
-        if (
-            focus_id is None
-            and previous is not None
-            and previous.body is body
-            and view.has_focus
-            and previous.navigation_revision == view._file_navigation_revision
-        ):
-            focus_id = previous.focus_id
-        return cls(body, editor.is_open, focus_id, view._file_navigation_revision)
-
-    def restore(self, view: DiffView, editor: InlineCommentEditor) -> None:
-        body = editor.query_one("#comment-editor-body", TextArea)
-        if body is not self.body:
-            body.text = self.body.text
-            body.history = self.body.history
-            body.selection = self.body.selection
-        editor.set_class(not self.is_open, "-hidden")
-        if (
-            self.focus_id
-            and self.is_open
-            and view._file_navigation_revision == self.navigation_revision
-            and (view.screen.focused is None or view.has_focus)
-        ):
-            view.screen.set_focus(
-                editor.query_one(f"#{self.focus_id}"), scroll_visible=False
-            )
-        self.focus_id = None

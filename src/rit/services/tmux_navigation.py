@@ -4,7 +4,7 @@ import os
 import shlex
 import subprocess
 from types import TracebackType
-from typing import Self
+from typing import Literal, Self
 
 
 class TmuxNavigation:
@@ -59,11 +59,22 @@ class TmuxNavigation:
         if self._pane is None or self._restore is None:
             return
         restored = self._tmux(
-            "if-shell", "-t", self._pane, "-F",
-            f"#{{==:#{{@rit_nav}},{self._identity}}}", self._restore,
+            "if-shell",
+            "-t",
+            self._pane,
+            "-F",
+            f"#{{==:#{{@rit_nav}},{self._identity}}}",
+            self._restore,
         )
         if restored is not None:
             self._restore = None
+
+    def select_pane(self, direction: Literal["left", "right"]) -> None:
+        """Move outward while the application owns its tmux pane."""
+        if self._pane is not None and self._restore is not None:
+            self._tmux(
+                "select-pane", "-t", self._pane, "-L" if direction == "left" else "-R"
+            )
 
     def _tmux(self, *args: str) -> str | None:
         return self._run("tmux", *args)

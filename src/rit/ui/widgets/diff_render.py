@@ -265,11 +265,6 @@ def _clear_mounted_render_state(view: DiffView) -> None:
     view._pending_file_comment_widgets_by_hunk = {}
     view._file_comment_widgets_by_hunk = {}
     view._file_comment_annotation_widgets_by_hunk = {}
-    view._inline_comment_editor_widget = None
-    view._inline_comment_editor_layout_widget = None
-    view._file_comment_editor_widget = None
-    view._file_comment_editor_layout_widget = None
-    view._file_comment_editor_mounted_hunk_index = None
     view._row_anchor_widgets = {}
     view._file_header_widgets = {}
     view._hunk_header_widgets = {}
@@ -803,7 +798,6 @@ def _render_hunk(
         container.mount(file_header_widget)
         view._register_file_header_widget(hunk_index, file_header_widget)
         _comments.mount_file_comments_for_hunk(view, container, hunk_index)
-        view._mount_file_comment_editor(container, hunk_index)
 
     if is_folded_file:
         return
@@ -1000,11 +994,6 @@ def _mount_split_lines(
                 container.mount(widget, before=before)
             else:
                 container.mount(widget)
-            view._mount_inline_comment_editor(
-                container,
-                line.line_index,
-                before=before,
-            )
             _comments.mount_pending_drafts_for_line(
                 view, container, line.line_index, before=before
             )
@@ -1023,11 +1012,6 @@ def _mount_split_lines(
                     view, container, block_lines, before=before
                 )
                 for block_line in block_lines:
-                    view._mount_inline_comment_editor(
-                        container,
-                        block_line.line_index,
-                        before=before,
-                    )
                     _comments.mount_pending_drafts_for_line(
                         view,
                         container,
@@ -1048,11 +1032,6 @@ def _mount_split_lines(
                 view, container, block_lines, before=before
             )
             for block_line in block_lines:
-                view._mount_inline_comment_editor(
-                    container,
-                    block_line.line_index,
-                    before=before,
-                )
                 _comments.mount_pending_drafts_for_line(
                     view,
                     container,
@@ -1077,11 +1056,6 @@ def _mount_split_lines(
             container.mount(widget, before=before)
         else:
             container.mount(widget)
-        view._mount_inline_comment_editor(
-            container,
-            line.line_index,
-            before=before,
-        )
         _comments.mount_pending_drafts_for_line(
             view, container, line.line_index, before=before
         )
@@ -1092,11 +1066,6 @@ def _mount_split_lines(
     if block_lines:
         _blocks._render_split_line_block(view, container, block_lines, before=before)
         for block_line in block_lines:
-            view._mount_inline_comment_editor(
-                container,
-                block_line.line_index,
-                before=before,
-            )
             _comments.mount_pending_drafts_for_line(
                 view,
                 container,
@@ -1132,11 +1101,6 @@ def _mount_unified_lines(
                 container.mount(widget, before=before)
             else:
                 container.mount(widget)
-            view._mount_inline_comment_editor(
-                container,
-                line.line_index,
-                before=before,
-            )
             _comments.mount_pending_drafts_for_line(
                 view, container, line.line_index, before=before
             )
@@ -1155,11 +1119,6 @@ def _mount_unified_lines(
                     view, container, block_lines, before=before
                 )
                 for block_line in block_lines:
-                    view._mount_inline_comment_editor(
-                        container,
-                        block_line.line_index,
-                        before=before,
-                    )
                     _comments.mount_pending_drafts_for_line(
                         view,
                         container,
@@ -1180,11 +1139,6 @@ def _mount_unified_lines(
                 view, container, block_lines, before=before
             )
             for block_line in block_lines:
-                view._mount_inline_comment_editor(
-                    container,
-                    block_line.line_index,
-                    before=before,
-                )
                 _comments.mount_pending_drafts_for_line(
                     view,
                     container,
@@ -1204,11 +1158,6 @@ def _mount_unified_lines(
             container.mount(widget, before=before)
         else:
             container.mount(widget)
-        view._mount_inline_comment_editor(
-            container,
-            line.line_index,
-            before=before,
-        )
         _comments.mount_pending_drafts_for_line(
             view, container, line.line_index, before=before
         )
@@ -1219,11 +1168,6 @@ def _mount_unified_lines(
     if block_lines:
         _blocks._render_unified_line_block(view, container, block_lines, before=before)
         for block_line in block_lines:
-            view._mount_inline_comment_editor(
-                container,
-                block_line.line_index,
-                before=before,
-            )
             _comments.mount_pending_drafts_for_line(
                 view,
                 container,

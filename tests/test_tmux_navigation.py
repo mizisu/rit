@@ -9,6 +9,7 @@ import tempfile
 import tty
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Literal
 from unittest.mock import Mock
 
 import pytest
@@ -162,6 +163,58 @@ def test_navigation_restores_real_pane_state(server: TmuxServer) -> None:
     )
 
 
+def test_navigation_selects_neighbors_of_its_own_pane(
+    server: TmuxServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pane = server.command("display-message", "-p", "#{pane_id}")
+    window = server.command("display-message", "-p", "#{window_id}")
+    right = server.command(
+        "split-window", "-h", "-t", pane, "-P", "-F", "#{pane_id}", "/bin/sh"
+    )
+    left = server.command(
+        "split-window", "-hb", "-t", pane, "-P", "-F", "#{pane_id}", "/bin/sh"
+    )
+    server.command("select-pane", "-t", right)
+    pid = server.command("display-message", "-p", "#{pid}")
+    monkeypatch.setenv("TMUX", f"{server.socket},{pid},0")
+    monkeypatch.setenv("TMUX_PANE", pane)
+    monkeypatch.setattr(os, "isatty", lambda _: True)
+    server.command("set-option", "-s", "@rit-navigation-enabled", "1")
+    with TmuxNavigation() as navigation:
+        navigation.select_pane("left")
+        assert server.command("display-message", "-p", "-t", window, "#{pane_id}") == left
+        navigation.select_pane("right")
+        assert server.command("display-message", "-p", "-t", window, "#{pane_id}") == right
+        navigation.pause()
+        navigation.select_pane("left")
+        assert server.command("display-message", "-p", "-t", window, "#{pane_id}") == right
+
+
+@pytest.mark.parametrize(("direction", "flag"), [("left", "-L"), ("right", "-R")])
+def test_navigation_selects_panes_only_while_active(
+    monkeypatch: pytest.MonkeyPatch,
+    direction: Literal["left", "right"],
+    flag: str,
+) -> None:
+    monkeypatch.setenv("TMUX", "test socket")
+    monkeypatch.setenv("TMUX_PANE", "%7")
+    monkeypatch.setattr(os, "isatty", lambda _: True)
+    monkeypatch.setattr(TmuxNavigation, "_run", staticmethod(lambda *_: "start time"))
+    navigation = TmuxNavigation()
+    command = Mock(side_effect=["1", "", "", "", ""])
+    monkeypatch.setattr(navigation, "_tmux", command)
+
+    navigation.select_pane(direction)
+    command.assert_not_called()
+    with navigation:
+        command.reset_mock()
+        navigation.select_pane(direction)
+        command.assert_called_once_with("select-pane", "-t", "%7", flag)
+    command.reset_mock()
+    navigation.select_pane(direction)
+    command.assert_not_called()
+
+
 @pytest.mark.parametrize("phase", ["snapshot", "claim", "restore"])
 def test_navigation_handles_uncertain_commands(
     monkeypatch: pytest.MonkeyPatch, phase: str
@@ -199,7 +252,8 @@ def test_navigation_is_opt_in(monkeypatch: pytest.MonkeyPatch, reason: str) -> N
     navigation = TmuxNavigation()
     monkeypatch.setattr(navigation, "_tmux", command)
     with navigation:
-        pass
+        navigation.select_pane("left")
+        navigation.select_pane("right")
     if reason == "no-plugin":
         command.assert_called_once_with(
             "show-options", "-sqv", "@rit-navigation-enabled"

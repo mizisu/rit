@@ -49,19 +49,14 @@ def _should_use_split_block_renderer(view) -> bool:
 
 
 def _can_render_in_unified_block(view, line: DiffLine) -> bool:
-    if line.line_index in view._comment_threads_by_line:
-        return False
-    if line.line_index in view._pending_comment_drafts_by_line:
-        return False
-    return line.line_index != getattr(view, "_inline_comment_editor_line_index", None)
+    return (
+        line.line_index not in view._comment_threads_by_line
+        and line.line_index not in view._pending_comment_drafts_by_line
+    )
 
 
 def _can_render_in_split_block(view, line: DiffLine) -> bool:
-    if line.line_index in view._comment_threads_by_line:
-        return False
-    if line.line_index in view._pending_comment_drafts_by_line:
-        return False
-    return line.line_index != getattr(view, "_inline_comment_editor_line_index", None)
+    return _can_render_in_unified_block(view, line)
 
 
 def _compute_unified_block_static_rows(

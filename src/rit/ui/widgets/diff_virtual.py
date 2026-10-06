@@ -104,12 +104,6 @@ def _rebuild_virtual_layout(view) -> None:
         line_count=len(view._all_lines),
         extra_heights_by_line=_extra_heights_by_line(view),
         extra_heights_by_hunk=_extra_heights_by_hunk(view),
-        inline_editor_line_index=getattr(
-            view, "_inline_comment_editor_line_index", None
-        ),
-        inline_editor_height=view._inline_comment_editor_height(),
-        file_editor_hunk_index=getattr(view, "_file_comment_editor_hunk_index", None),
-        file_editor_height=view._file_comment_editor_height(),
     )
     view._hunk_header_top_offsets = geometry.hunk_header_top_offsets
     view._line_top_offsets = geometry.line_top_offsets
@@ -534,22 +528,12 @@ async def _remove_virtualized_lines(view, start: int, end: int) -> None:
     pending_draft_layout_widgets_map = getattr(
         view, "_pending_comment_layout_widgets_by_line", {}
     )
-    inline_editor_line = getattr(view, "_inline_comment_editor_line_index", None)
-    inline_editor_widget = getattr(view, "_inline_comment_editor_widget", None)
-    inline_editor_layout_widget = getattr(
-        view, "_inline_comment_editor_layout_widget", None
-    )
 
     for line_idx in range(start, end + 1):
         comments = comment_widgets_map.pop(line_idx, [])
         widgets.extend(comment_layout_widgets_map.pop(line_idx, []) or comments)
         drafts = pending_draft_widgets_map.pop(line_idx, [])
         widgets.extend(pending_draft_layout_widgets_map.pop(line_idx, []) or drafts)
-
-        if line_idx == inline_editor_line and inline_editor_widget is not None:
-            widgets.append(inline_editor_layout_widget or inline_editor_widget)
-            view._inline_comment_editor_layout_widget = None
-            view._inline_comment_editor_widget = None
 
         block = view._unified_blocks_by_line.get(line_idx)
         if block is None:
@@ -571,17 +555,6 @@ async def _remove_virtualized_lines(view, start: int, end: int) -> None:
     await _remove_virtual_widgets(*widgets)
 
 
-async def _remove_mounted_file_comment_editor(view, hunk_index: int) -> None:
-    if view._file_comment_editor_mounted_hunk_index != hunk_index:
-        return
-    editor = view._file_comment_editor_layout_widget or view._file_comment_editor_widget
-    if editor is not None:
-        await _remove_virtual_widgets(editor)
-    view._file_comment_editor_widget = None
-    view._file_comment_editor_layout_widget = None
-    view._file_comment_editor_mounted_hunk_index = None
-
-
 async def _remove_mounted_file_comment_annotations(view, hunk_index: int) -> None:
     widgets = view._file_comment_annotation_widgets_by_hunk.pop(hunk_index, ())
     view._pending_file_comment_widgets_by_hunk.pop(hunk_index, None)
@@ -594,7 +567,6 @@ async def _clear_virtual_file_headers(view) -> None:
         hunk_index, header_widget = view._file_header_widgets.popitem()
         await _remove_virtual_widgets(header_widget)
         await _remove_mounted_file_comment_annotations(view, hunk_index)
-        await _remove_mounted_file_comment_editor(view, hunk_index)
 
 
 async def _clear_virtual_hunk_headers(view) -> None:
@@ -618,7 +590,6 @@ async def _remove_stale_virtual_file_headers(
     for hunk_index, _ in stale_headers:
         view._file_header_widgets.pop(hunk_index, None)
         await _remove_mounted_file_comment_annotations(view, hunk_index)
-        await _remove_mounted_file_comment_editor(view, hunk_index)
 
 
 async def _remove_stale_virtual_hunk_headers(
@@ -722,11 +693,6 @@ async def _sync_visible_virtual_file_headers(
         view._register_file_header_widget(hunk_index, header_widget)
         _comments.mount_file_comments_for_hunk(
             view,
-            container,
-            hunk_index,
-            before=anchor,
-        )
-        view._mount_file_comment_editor(
             container,
             hunk_index,
             before=anchor,
@@ -1133,7 +1099,6 @@ async def _run_virtual_window_render_for_request(view, request_token: int) -> No
             ):
                 _set_virtual_window_from_viewport(view)
                 view._virt.coalesced_center = None
-            view._capture_comment_editors()
             await _render_virtual_window_and_finalize(view)
     finally:
         _RENDER_REQUEST_CONTEXT.reset(token)
@@ -1164,7 +1129,6 @@ async def _render_virtual_window_and_finalize(view) -> None:
             if not updated:
                 await view._render_diff(finalize=False)
             await view._await_content_mounts()
-            view._restore_comment_editors()
         except Exception:
             if view._is_current_render_request(request_token):
                 view._virt.render_pending = False
@@ -1187,7 +1151,6 @@ async def _render_virtual_window_and_finalize(view) -> None:
         view._virt.coalesced_center = None
         if not _set_virtual_window_from_viewport(view):
             break
-        view._capture_comment_editors()
 
     # A queued compositor repaint may run before Textual's next layout.
     view._reflow_retained_layout()

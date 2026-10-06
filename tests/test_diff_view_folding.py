@@ -270,9 +270,12 @@ async def test_enter_on_selected_pending_draft_does_not_fold_file() -> None:
     async with app.run_test() as pilot:
         file_changes = app.query_one(FileChanges)
         file_changes.refresh_files()
-        await wait_until(lambda: file_changes.diff_view.current_file == "All files")
         await wait_until(
-            lambda: len(file_changes.diff_view.query("CommentCard.pending-draft")) == 1
+            lambda: (
+                file_changes.workspace_ready
+                and len(file_changes.diff_view.query("CommentCard.pending-draft")) == 1
+            ),
+            timeout=2.0,
         )
 
         diff_view = file_changes.diff_view

@@ -66,12 +66,10 @@ class CursorDrivenVirtualRenderView:
         self.revealed = False
         self.is_mounted = True
         self.mounted = False
-        self.editors_restored = False
-        self.editor_captures = 0
         self.layout_reflows = 0
 
     def _reflow_retained_layout(self) -> None:
-        assert self.mounted and self.editors_restored
+        assert self.mounted
         self.layout_reflows += 1
 
     def run_worker(
@@ -80,17 +78,9 @@ class CursorDrivenVirtualRenderView:
         coroutine.close()
         raise AssertionError("Catch up before releasing the current render batch")
 
-    def _capture_comment_editors(self) -> None:
-        assert self._virt.render_pending
-        self.editor_captures += 1
-
     async def _await_content_mounts(self) -> None:
         assert self._virt.render_pending
         self.mounted = True
-
-    def _restore_comment_editors(self) -> None:
-        assert self.mounted
-        self.editors_restored = True
 
     def _is_current_render_request(self, request_token: int) -> bool:
         return request_token == self._render_request_token
@@ -100,7 +90,7 @@ class CursorDrivenVirtualRenderView:
 
     def _finalize_render_state_if_current(self, request_token: int) -> None:
         assert self._is_current_render_request(request_token)
-        assert self.mounted and self.editors_restored
+        assert self.mounted
         self.finalized.append((self._virt.rendered_start, self._virt.rendered_end))
 
 
@@ -622,7 +612,7 @@ async def test_wheel_scroll_covers_viewport_and_survives_widget_retirement(
         body.move_cursor((0, 7))
         await pilot.pause()
         line = view.cursor_line
-        for step, center in enumerate((line + 3, line - 3, line + 120, line)):
+        for center in (line + 3, line - 3, line + 120, line):
             diff_virtual._set_virtual_window_around(view, center)
             view._virt.render_pending = True
             await diff_virtual._run_virtual_window_render_for_request(
@@ -631,12 +621,8 @@ async def test_wheel_scroll_covers_viewport_and_survives_widget_retirement(
             await wait_until(lambda: not view._virt.render_pending, timeout=5.0)
             await pilot.pause()
             current = view._inline_comment_editor_widget
-            if step == 2:
-                assert current is None
-                continue
-            assert current is not None
-            if step < 2:
-                assert current is editor
+            assert current is not None and current is editor
+            assert body.has_focus
             current_body = current.query_one(TextArea)
             assert current_body.text == "draft kept while scrolling"
             assert current_body.cursor_location == (0, 7)
@@ -926,7 +912,7 @@ async def test_cursor_driven_virtual_render_reveals_before_releasing_batch(
 
     await diff_virtual._render_virtual_window_and_finalize(view)
 
-    assert view.mounted and view.editors_restored
+    assert view.mounted
     assert len(view.refresh_callbacks) == 1
     assert view.revealed is True
     assert view.layout_reflows == 2
@@ -983,8 +969,7 @@ async def test_pending_viewport_catches_up_before_releasing_render_batch(
     for callback in view.refresh_callbacks:
         callback()
     assert view.finalized == [(17, 33)]
-    assert view.editor_captures == 1
-    assert view.editors_restored
+    assert view.mounted
     assert view.revealed is cursor_driven
     assert not view._virt.render_pending
 
