@@ -43,6 +43,7 @@ from rit.ui.components.pr_timeline_projection import (
     review_has_summary,
     review_timeline_time,
 )
+from rit.ui.screens.comment_submit import CommentSubmitScreen
 from rit.ui.widgets.comment_card import CommentCard
 from rit.ui.widgets.comment_editor import InlineCommentEditor
 from rit.ui.widgets.review_thread_card import ReviewThreadItem
@@ -226,7 +227,7 @@ class PRTimeline(Vertical):
         self._timeline_render_signature: tuple[object, ...] | None = None
         self._description_card: CommentCard | None = None
         self._comments_container: Vertical | None = None
-        self._issue_comment_editor: InlineCommentEditor | None = None
+        self._issue_comment_screen: CommentSubmitScreen | None = None
         self._body_mount_index = 0
 
     def compose(self) -> ComposeResult:
@@ -241,12 +242,6 @@ class PRTimeline(Vertical):
 
         with Vertical(id="comments-container"):
             yield from self._compose_loading_cards()
-        yield InlineCommentEditor(
-            kind="issue",
-            title="Add comment",
-            placeholder="Write a PR-level comment...",
-            id="issue-comment-editor",
-        )
 
     def _compose_loading_cards(self) -> ComposeResult:
         yield CommentCard(
@@ -272,10 +267,21 @@ class PRTimeline(Vertical):
         self._scroll_container = container
 
     def start_issue_comment(self) -> None:
-        self._issue_comment_editor_widget().open()
+        if self._issue_comment_screen is not None:
+            return
+        editor = InlineCommentEditor(
+            kind="issue",
+            title="Add comment",
+            placeholder="Write a PR-level comment...",
+            id="issue-comment-editor",
+        )
+        self._issue_comment_screen = CommentSubmitScreen(editor, owner=self)
+        self.app.push_screen(self._issue_comment_screen)
 
     def close_issue_comment(self) -> None:
-        self._issue_comment_editor_widget().close()
+        if self._issue_comment_screen is not None:
+            self._issue_comment_screen.dismiss()
+            self._issue_comment_screen = None
 
     def _description_card_widget(self) -> CommentCard:
         if self._description_card is None:
@@ -286,13 +292,6 @@ class PRTimeline(Vertical):
         if self._comments_container is None:
             self._comments_container = self.query_one("#comments-container", Vertical)
         return self._comments_container
-
-    def _issue_comment_editor_widget(self) -> InlineCommentEditor:
-        if self._issue_comment_editor is None:
-            self._issue_comment_editor = self.query_one(
-                "#issue-comment-editor", InlineCommentEditor
-            )
-        return self._issue_comment_editor
 
     def refresh_description(self, pr: PR | None) -> None:
         if not pr:

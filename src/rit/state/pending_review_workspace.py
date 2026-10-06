@@ -275,6 +275,51 @@ class PendingReviewWorkspace:
         )
         self.obsolete_review_ids.intersection_update(present_ids)
 
+    async def queue_reply_comment(
+        self,
+        draft: PendingReviewComment,
+        *,
+        adapter: PendingReviewAdapter,
+        pr_number: int,
+        head_sha: Callable[[], str],
+        on_sync: ReviewSyncObserver,
+        draft_index: int | None = None,
+    ) -> PendingReviewComment:
+        """Save a reply alongside the other pending review comments."""
+        if not draft.is_reply or not draft.reply_thread_id:
+            raise ValueError("Reply thread is unavailable")
+        body = draft.body.strip()
+        if not body:
+            raise ValueError("Comment cannot be empty")
+        original = None
+        if draft_index is not None:
+            if not 0 <= draft_index < len(self.comments):
+                raise ValueError("Selected reply draft no longer exists")
+            original = self.comments[draft_index]
+            if original.reply_to_id != draft.reply_to_id:
+                raise ValueError("Selected reply draft no longer exists")
+        snapshot = self._snapshot()
+        if original is not None:
+            draft = original.model_copy(update={"body": body})
+            self.comments = list(self.comments)
+            assert draft_index is not None
+            self.comments[draft_index] = draft
+        else:
+            draft = draft.model_copy(update={"body": body})
+            self.comments = sorted([*self.comments, draft], key=_sort_key)
+        self.drafts_are_canonical = True
+        self._revision += 1
+        return await self._sync_saved_comment(
+            draft,
+            snapshot=snapshot,
+            removed_comment=original,
+            adapter=adapter,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            on_sync=on_sync,
+            after_local_save=None,
+        )
+
     async def queue_file_comment(
         self,
         body: str,

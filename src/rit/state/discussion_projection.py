@@ -152,25 +152,35 @@ def merge_recent_submitted_discussion(
     if not recent.review_comments:
         return reviews, review_threads
 
-    if not review_threads:
-        for comments in recent.review_comments.values():
-            for comment in comments:
-                review_threads.append(thread_from_submitted_comment(comment))
-        return reviews, review_threads
-
-    comment_ids = {
-        comment.id
-        for thread in review_threads
-        for comment in thread.comments
-        if comment.id
-    }
+    comment_thread_indices = (
+        {
+            comment.id: index
+            for index, thread in enumerate(review_threads)
+            for comment in thread.comments
+            if comment.id
+        }
+        if review_threads
+        else {}
+    )
     for comments in recent.review_comments.values():
         for comment in comments:
-            if comment.id and comment.id in comment_ids:
+            if comment.id and comment.id in comment_thread_indices:
                 continue
-            review_threads.append(thread_from_submitted_comment(comment))
+            thread_index = comment_thread_indices.get(comment.in_reply_to_id or 0)
+            if thread_index is None:
+                thread_index = len(review_threads)
+                review_threads.append(thread_from_submitted_comment(comment))
+            else:
+                thread = review_threads[thread_index]
+                review_threads[thread_index] = thread.model_copy(
+                    update={
+                        "comments_connection": NodeList.from_nodes(
+                            [*thread.comments, comment]
+                        )
+                    }
+                )
             if comment.id:
-                comment_ids.add(comment.id)
+                comment_thread_indices[comment.id] = thread_index
 
     return reviews, review_threads
 

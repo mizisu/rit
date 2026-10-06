@@ -4,6 +4,7 @@ from collections.abc import Collection, Iterable, Sequence
 from typing import Literal
 
 from rit.state.models import (
+    NodeList,
     PendingReviewComment,
     PRComment,
     PRReview,
@@ -146,6 +147,8 @@ def review_thread_is_pending_draft(
     """Return whether a raw review thread should be replaced by local drafts."""
     draft_ids = {draft.review_comment_id for draft in drafts if draft.review_comment_id}
     for comment in thread.comments:
+        if comment.in_reply_to_id is not None:
+            continue
         review_id = comment.pull_request_review_id
         if review_id in hidden_review_ids:
             return True
@@ -163,6 +166,32 @@ def review_thread_is_pending_draft(
     return False
 
 
+def without_pending_replies(
+    thread: ReviewThread,
+    *,
+    drafts: Sequence[PendingReviewComment],
+    hidden_review_ids: Sequence[int],
+) -> ReviewThread:
+    """Keep published discussion visible while drafts have their own cards."""
+    draft_ids = {draft.review_comment_id for draft in drafts if draft.is_reply}
+    comments = [
+        comment
+        for comment in thread.comments
+        if not (
+            comment.in_reply_to_id is not None
+            and (
+                comment.pull_request_review_id in hidden_review_ids
+                or comment.id in draft_ids
+            )
+        )
+    ]
+    if len(comments) == len(thread.comments):
+        return thread
+    return thread.model_copy(
+        update={"comments_connection": NodeList.from_nodes(comments)}
+    )
+
+
 def pending_draft_matches_review_comment(
     draft: PendingReviewComment,
     comment: PRComment,
@@ -170,6 +199,8 @@ def pending_draft_matches_review_comment(
     thread: ReviewThread | None = None,
 ) -> bool:
     """Return whether a PR review comment represents the same draft."""
+    if draft.reply_to_id != comment.in_reply_to_id:
+        return False
     comment_path = comment.path or (thread.path if thread is not None else "")
     if draft.path != comment_path or draft.body != comment.body:
         return False
@@ -252,6 +283,8 @@ def _timeline_comment_from_draft(
         "subject_type": draft.subject_type,
         "pull_request_review_id": pending_review_id,
         "start_side": draft.start_side or "",
+        "in_reply_to_id": draft.reply_to_id,
+        "review_thread_id": draft.reply_thread_id,
     }
     if draft.is_file_level:
         data.update(

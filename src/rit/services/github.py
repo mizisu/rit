@@ -52,8 +52,12 @@ from rit.services.pr_graphql_response import (
 from rit.services.pr_issue_comment_request import (
     create_issue_comment as create_issue_comment_via_graphql,
 )
+from rit.services.pr_merge_status import fetch_pr_merge_status
 from rit.services.pr_review_comment_request import (
     create_review_comment as create_review_comment_via_rest,
+)
+from rit.services.pr_review_comment_request import (
+    create_review_comment_reply as create_review_comment_reply_via_rest,
 )
 from rit.services.pr_review_comment_request import (
     delete_review_comment as delete_review_comment_via_graphql,

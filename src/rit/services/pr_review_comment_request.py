@@ -94,6 +94,31 @@ async def create_review_comment(
     )
 
 
+async def create_review_comment_reply(
+    repo_full_name: str,
+    pr_number: int,
+    root_comment_id: int,
+    *,
+    body: str,
+    runner: GitHubInputRunner,
+) -> PRComment:
+    """Post a reply to a top-level review comment through REST."""
+    request = GitHubInputRequest(
+        args=(
+            "api",
+            "--method",
+            "POST",
+            f"/repos/{repo_full_name}/pulls/{pr_number}/comments/{root_comment_id}/replies",
+            "--input",
+            "-",
+        ),
+        input_text=json.dumps({"body": body}),
+    )
+    return parse_created_review_comment_response(
+        await run_input_request(request, runner)
+    )
+
+
 def update_review_comment_request(
     comment_node_id: str,
     *,

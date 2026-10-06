@@ -309,7 +309,7 @@ class TestRitApp:
             assert scroll.scroll_y == 0
 
             await pilot.press("c")
-            body = screen.pr_info.query_one("#comment-editor-body", TextArea)
+            body = app.screen.query_one("#comment-editor-body", TextArea)
             await wait_until(lambda: body.has_focus)
             await pilot.pause()
             position = scroll.scroll_y
@@ -361,8 +361,10 @@ class TestRitApp:
             assert branches.region.x == status.region.right + 2
             assert branches.region.height == 1
             assert branches.region.bottom <= screen.tabbed_content.region.y
-            assert files.file_tree.region.y == files.region.y
-            assert files.diff_view.region.y == files.region.y
+            scope_bar = files.query_one("#review-scope-bar")
+            assert scope_bar.region.y == files.region.y
+            assert files.file_tree.region.y == scope_bar.region.bottom
+            assert files.diff_view.region.y == scope_bar.region.bottom
             assert files.diff_view.region.bottom == files.region.bottom
             assert copy_button.region.x == label.region.right + 1
             branch_region = branches.region
@@ -431,7 +433,7 @@ class TestRitApp:
             await pilot.pause()
             assert branches.region.right == screen.header.content_region.right
             assert files.diff_view.region.x == files.region.x
-            assert files.diff_view.region.y == files.region.y
+            assert files.diff_view.region.y == scope_bar.region.bottom
             assert copy_button.region.right <= branches.content_region.right
 
     async def test_app_starts(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -915,6 +917,8 @@ class TestRitApp:
 
             await pilot.press("ctrl+o")
             assert isinstance(app.screen, FilePickerScreen)
+            assert app.screen.styles.background.a == 0
+            assert screen in app._background_screens
             await pilot.press("t", "w", "o", "enter")
             await wait_until(
                 lambda: (
@@ -1007,7 +1011,7 @@ class TestRitApp:
             await pilot.pause()
             await pilot.pause()
 
-            editor = diff_view.query_one("#diff-file-comment-editor")
+            editor = app.screen.query_one("#diff-file-comment-editor")
             editor.query_one("#comment-editor-body", TextArea).text = "whole file"
             await pilot.press("ctrl+s")
             await wait_until(
@@ -1028,9 +1032,18 @@ class TestRitApp:
 
             await pilot.press("c")
             await wait_until(
-                lambda: diff_view.query_one("#comment-editor-body", TextArea).has_focus
+                lambda: app.screen.query_one("#comment-editor-body", TextArea).has_focus
             )
-            body = diff_view.query_one("#comment-editor-body", TextArea)
+            assert app.screen.query_one("#comment-editor-body", TextArea).text == ""
+            assert diff_view.file_comment_draft_index() is None
+            await pilot.press("escape")
+            await wait_until(lambda: diff_view.has_focus)
+
+            await pilot.press("C")
+            await wait_until(
+                lambda: app.screen.query_one("#comment-editor-body", TextArea).has_focus
+            )
+            body = app.screen.query_one("#comment-editor-body", TextArea)
             assert body.text == "whole file"
             body.text = "edited file draft"
             await pilot.press("ctrl+s")
@@ -1111,6 +1124,7 @@ class TestRitApp:
             screen = cast(MainScreen, app.screen)
             screen.store.state.pr = PR(number=123, head_sha="deadbeef")
             screen.store._service = CommentService()  # type: ignore[assignment]
+            screen.switch_tab(1)
             diff_view = screen.file_changes.diff_view
             await diff_view.show_diff("All files", source_diff)
             await pilot.pause()
@@ -1304,7 +1318,7 @@ class TestRitApp:
             assert refresh_calls == 1
 
     @pytest.mark.parametrize("file_level", [False, True])
-    async def test_update_submitted_comment_from_diff_view(
+    async def test_reply_and_edit_submitted_comment_from_diff_view(
         self,
         app: RitApp,
         file_level: bool,
@@ -1340,6 +1354,37 @@ class TestRitApp:
         class UpdateService:
             def __init__(self) -> None:
                 self.updated: list[tuple[str, str]] = []
+                self.replied: list[tuple[int, str]] = []
+                self.fail_reply = True
+
+            async def create_review_comment_reply(
+                self, pr_number: int, root_comment_id: int, body: str
+            ) -> PRComment:
+                if self.fail_reply:
+                    raise RuntimeError("reply failed")
+                self.replied.append((root_comment_id, body))
+                return comment.model_copy(
+                    update={
+                        "id": 502,
+                        "node_id": "PRRC_502",
+                        "body": body,
+                        "in_reply_to_id": root_comment_id,
+                        "pull_request_review_id": 92,
+                    }
+                )
+
+            async def get_pr_all(self, pr_number: int) -> PR:
+                updated_thread = thread.model_copy(
+                    update={
+                        "comments_connection": NodeList(
+                            nodes=[comment.model_copy(update={"body": "after"})]
+                        )
+                    }
+                )
+                return PR(
+                    number=pr_number,
+                    review_threads_connection=NodeList(nodes=[updated_thread]),
+                )
 
             async def update_review_comment(
                 self,
@@ -1367,22 +1412,40 @@ class TestRitApp:
             if file_level:
                 diff_view._set_file_header_selection(0)
             diff_view.focus()
+            await pilot.press("C")
+            assert app.screen is screen
             await pilot.press("j")
             assert diff_view.active_review_comment() == comment
 
             kind = "file" if file_level else "inline"
             await pilot.press("c")
             await wait_until(
-                lambda: len(diff_view.query(f"#diff-{kind}-comment-editor")) == 1,
+                lambda: bool(app.screen.query("#diff-reply-comment-editor"))
+            )
+            body = app.screen.query_one("#comment-editor-body", TextArea)
+            await wait_until(lambda: body.has_focus)
+            assert body.text == ""
+            assert diff_view.reply_comment_target() == comment
+            assert app.screen.query("#comment-editor-queue")
+            assert app.screen.query("#comment-editor-post")
+            body.text = "discarded reply"
+            await pilot.press("escape")
+            await wait_until(lambda: diff_view.has_focus)
+            assert diff_view.reply_comment_target() is None
+            assert service.replied == []
+
+            await pilot.press("C")
+            await wait_until(
+                lambda: len(app.screen.query(f"#diff-{kind}-comment-editor")) == 1,
                 timeout=1,
             )
-            body = diff_view.query_one("#comment-editor-body", TextArea)
+            body = app.screen.query_one("#comment-editor-body", TextArea)
             await wait_until(lambda: body.has_focus)
             assert body.text == "before"
             assert str(
-                diff_view.query_one(".comment-editor-title", Static).content
+                app.screen.query_one(".comment-editor-title", Static).content
             ) == (f"Edit {kind} comment")
-            assert not diff_view.query("#comment-editor-post")
+            assert not app.screen.query("#comment-editor-post")
             body.text = "after"
 
             await pilot.press("ctrl+s")
@@ -1398,6 +1461,126 @@ class TestRitApp:
             assert diff_view.inline_comment_edit_target() is None
             assert diff_view.file_comment_edit_target() is None
             assert diff_view.file_comment_target() is None
+            await screen.workers.wait_for_complete()
+
+            if file_level:
+                diff_view._set_file_header_selection(0)
+            diff_view._comment_cursor_index = 1
+            await pilot.press("c")
+            await wait_until(
+                lambda: bool(app.screen.query("#diff-reply-comment-editor"))
+            )
+            body = app.screen.query_one("#comment-editor-body", TextArea)
+            await wait_until(lambda: body.has_focus)
+            assert body.text == ""
+            body.text = "new reply"
+            await pilot.click("#comment-editor-post")
+            await screen.workers.wait_for_complete()
+            assert body.is_attached
+            assert body.text == "new reply"
+            assert service.replied == []
+
+            service.fail_reply = False
+            post_button = app.screen.query_one("#comment-editor-post", Button)
+            await wait_until(lambda: not post_button.has_class("-active"))
+            await pilot.click("#comment-editor-post")
+            await wait_until(lambda: service.replied)
+            await screen.workers.wait_for_complete()
+            assert service.replied == [(501, "new reply")]
+            assert diff_view.reply_comment_target() is None
+            assert diff_view.has_focus
+            assert len(screen.store.state.review_threads) == 1
+            assert [c.body for c in screen.store.state.review_threads[0].comments] == [
+                "after",
+                "new reply",
+            ]
+
+    async def test_reply_ctrl_s_saves_pending_and_shift_c_edits_it(
+        self,
+        app: RitApp,
+    ) -> None:
+        from rit.ui.screens.main import MainScreen
+        from tests.test_review_replies import PendingReplyService
+
+        root = PRComment(
+            id=501,
+            body="root",
+            path="preview.py",
+            line=1,
+            side="RIGHT",
+            pull_request_review_id=90,
+        )
+        thread = ReviewThread(
+            id="thread-501",
+            path=root.path,
+            line=1,
+            diff_side="RIGHT",
+            comments_connection=NodeList(nodes=[root]),
+        )
+        service = PendingReplyService(thread)
+        source_diff = parse_patch("@@ -1 +1 @@\n-old\n+new", root.path)
+
+        async with app.run_test() as pilot:
+            screen = cast(MainScreen, app.screen)
+            screen.store._service = service
+            await screen.store.refresh_review_data()
+            screen.store.state.file_diffs = {root.path: source_diff}
+            screen.switch_tab(1)
+            view = screen.file_changes.diff_view
+            await view.show_diff(root.path, source_diff)
+            view.cursor_line = 1
+            view._comment_cursor_index = 1
+            view.focus()
+            await pilot.press("c")
+            await wait_until(
+                lambda: bool(app.screen.query("#diff-reply-comment-editor"))
+            )
+            body = app.screen.query_one(TextArea)
+            await wait_until(lambda: body.has_focus)
+            body.text = "pending reply"
+            service.fail_create = True
+            await pilot.press("ctrl+s")
+            await screen.workers.wait_for_complete()
+            assert body.is_attached and body.text == "pending reply"
+            assert screen.store.state.pending_review.comments == []
+
+            service.fail_create = False
+            await pilot.press("ctrl+s")
+            await screen.workers.wait_for_complete()
+            assert service.posted == []
+            assert view.has_focus
+            assert len(screen.store.state.pending_review.comments) == 1
+            draft = screen.store.state.pending_review.comments[0]
+            assert draft.is_reply and draft.body == "pending reply"
+            assert view.query(".pending-draft")
+
+            view._comment_cursor_index = 1
+            await pilot.press("C")
+            await wait_until(
+                lambda: bool(app.screen.query("#diff-reply-comment-editor"))
+            )
+            body = app.screen.query_one(TextArea)
+            await wait_until(lambda: body.has_focus)
+            assert body.text == "pending reply"
+            assert view.reply_comment_draft_index() == 0
+            body.text = "edited pending reply"
+            await pilot.press("ctrl+s")
+            await screen.workers.wait_for_complete()
+            assert service.updated == [
+                (draft.review_comment_node_id, "edited pending reply")
+            ]
+            assert service.posted == []
+
+            view._comment_cursor_index = 1
+            await pilot.press("C")
+            await wait_until(
+                lambda: bool(app.screen.query("#diff-reply-comment-editor"))
+            )
+            await pilot.click("#comment-editor-post")
+            await screen.workers.wait_for_complete()
+            assert service.posted == ["edited pending reply"]
+            assert screen.store.state.pending_review.comments == []
+            assert view.reply_comment_target() is None
 
     async def test_delete_inline_comment_draft_requires_selected_draft(
         self,

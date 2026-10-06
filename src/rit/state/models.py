@@ -118,7 +118,7 @@ class PRUser(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     login: str = ""
-    node_id: str = Field(default="", validation_alias=AliasChoices("id", "node_id"))
+    node_id: str = Field(default="", validation_alias=AliasChoices("node_id", "id"))
     avatar_url: str = Field(
         default="", validation_alias=AliasChoices("avatarUrl", "avatar_url")
     )
@@ -219,6 +219,7 @@ class PRComment(BaseModel):
         ),
     )
     outdated: bool = False
+    review_thread_id: str = ""
     subject_type: str = Field(
         default="line", validation_alias=AliasChoices("subjectType", "subject_type")
     )
@@ -257,6 +258,11 @@ class PRComment(BaseModel):
             return self.original_line
         return self.line if self.line is not None else self.original_line
 
+    @field_validator("side", "start_side", mode="before")
+    @classmethod
+    def parse_optional_side(cls, value: object) -> object:
+        return "" if value is None else value
+
     @field_validator("in_reply_to_id", mode="before")
     @classmethod
     def parse_reply_to(cls, v: object) -> object:
@@ -292,6 +298,12 @@ class PendingReviewComment(BaseModel):
     subject_type: Literal["line", "file"] = "line"
     review_comment_id: int = 0
     review_comment_node_id: str = ""
+    reply_to_id: int | None = None
+    reply_thread_id: str = ""
+
+    @property
+    def is_reply(self) -> bool:
+        return self.reply_to_id is not None
 
     @property
     def is_file_level(self) -> bool:
@@ -442,6 +454,12 @@ class PRReview(BaseModel):
         default=None, validation_alias=AliasChoices("author", "user")
     )
     body: str = ""
+    commit_sha: str = Field(
+        default="",
+        validation_alias=AliasChoices(
+            AliasPath("commit", "oid"), "commit_id", "commit_sha"
+        ),
+    )
     state: ReviewState = ReviewState.PENDING
     created_at: datetime = Field(
         default_factory=datetime_min_utc,
@@ -450,6 +468,11 @@ class PRReview(BaseModel):
     submitted_at: datetime | None = Field(
         default=None, validation_alias=AliasChoices("submittedAt", "submitted_at")
     )
+
+    @field_validator("commit_sha", mode="before")
+    @classmethod
+    def parse_review_commit(cls, value: object) -> object:
+        return "" if value is None else value
 
     @field_validator("state", mode="before")
     @classmethod

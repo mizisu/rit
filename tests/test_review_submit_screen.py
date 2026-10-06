@@ -6,6 +6,7 @@ import pytest
 from textual.app import App
 from textual.widgets import Button, OptionList, Static, TextArea
 
+from rit.app import RitApp
 from rit.state.models import PR, PendingReviewComment, PRReview, ReviewState
 from rit.state.store import GitHubError, PRStore
 from rit.ui.screens.review_submit import ReviewEvent, ReviewSubmitScreen
@@ -18,6 +19,8 @@ async def test_review_submit_screen_places_actions_below_body_in_requested_order
     None
 ):
     class TestApp(App):
+        CSS_PATH = RitApp.CSS_PATH
+
         def on_mount(self) -> None:
             self.push_screen(ReviewSubmitScreen())
 
@@ -33,6 +36,9 @@ async def test_review_submit_screen_places_actions_below_body_in_requested_order
             screen.query_one("#review-submit-cancel", Button),
         ]
 
+        assert screen.styles.background.a == 0
+        assert screen.query_one("#review-submit-dialog").styles.background.a == 1
+        assert app.screen_stack[0] in app._background_screens
         assert children[1].id == "review-submit-body"
         assert children[2].id == "review-submit-emoji-options"
         assert children[3].id == "review-submit-actions"
@@ -358,7 +364,10 @@ async def test_submit_dialog_remains_usable_after_autosave_failure(
             save.reset_mock()
             reopened = ReviewSubmitScreen(store=store)
             await app.push_screen(reopened, app.capture)
-            assert reopened.query_one("#review-submit-body", TextArea).text == "keep this summary"
+            assert (
+                reopened.query_one("#review-submit-body", TextArea).text
+                == "keep this summary"
+            )
             await pilot.pause(0.95)
             save.assert_not_awaited()
         else:

@@ -105,6 +105,9 @@ def build_comment_map(view: DiffView) -> None:
 
     if not view.store or not view.current_file:
         return
+    scope = getattr(view.store.state, "scope", None)
+    if scope is not None and scope.kind != "all":
+        return
 
     file_paths = _visible_comment_file_paths(view)
     if not file_paths:
@@ -145,8 +148,7 @@ def refresh_thread_metadata(view: DiffView) -> None:
     file_paths = _file_paths_for_current_diff(view)
     updated_by_root = {
         thread.root_comment_id: thread
-        for thread in view.store.state.review_threads
-        if thread.path in file_paths
+        for thread in _visible_review_threads_for_current_diff(view, file_paths)
     }
     if not updated_by_root:
         return
@@ -699,13 +701,6 @@ def mount_pending_drafts_for_line(
         return
 
     mount_before = before
-    if (
-        getattr(view, "_inline_comment_editor_line_index", None) == line_index
-        and getattr(view, "_inline_comment_editor_draft_index", None) is None
-    ):
-        mount_before = (
-            getattr(view, "_inline_comment_editor_layout_widget", None) or before
-        )
 
     mounted: list[Widget] = []
     layout_widgets: list[Widget] = []
@@ -1193,6 +1188,19 @@ def _active_file_thread_position(
     return None
 
 
+def active_file_thread(view: DiffView, hunk_index: int) -> ReviewThread | None:
+    """Return the selected file-level thread, including collapsed threads."""
+    position = _active_file_thread_position(view, hunk_index)
+    if position is None:
+        return None
+    path = _file_comment_path(view, hunk_index)
+    if path is None:
+        return None
+    threads = view._file_comment_threads_by_path.get(path, [])
+    thread_index, _, _ = position
+    return threads[thread_index] if thread_index < len(threads) else None
+
+
 def active_file_review_comment(
     view: DiffView,
     hunk_index: int,
@@ -1592,7 +1600,8 @@ def _pending_draft_title(draft: PendingReviewComment) -> str:
         if draft.is_file_level
         else f"{draft.path}:{_pending_draft_line_label(draft)}"
     )
-    return f"{file_icon} {location} [#eed49f](pending)[/]"
+    label = "pending reply" if draft.is_reply else "pending"
+    return f"{file_icon} {location} [#eed49f]({label})[/]"
 
 
 def _build_pending_draft_item(

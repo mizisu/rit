@@ -98,6 +98,16 @@ mutation($input: AddPullRequestReviewThreadInput!) {
 }
 """
 
+_ADD_REVIEW_REPLY_MUTATION = f"""
+mutation($input: AddPullRequestReviewThreadReplyInput!) {{
+  addPullRequestReviewThreadReply(input: $input) {{
+    comment {{
+      {_REVIEW_COMMENT_FIELDS}
+    }}
+  }}
+}}
+"""
+
 _DELETE_REVIEW_MUTATION = f"""
 mutation($reviewId: ID!) {{
   deletePullRequestReview(input: {{pullRequestReviewId: $reviewId}}) {{
@@ -208,8 +218,17 @@ async def create_pending_review(
         pr_number,
         runner=runner,
     )
-    line_comments = [comment for comment in comments if not comment.is_file_level]
-    file_comments = [comment for comment in comments if comment.is_file_level]
+    line_comments = [
+        comment
+        for comment in comments
+        if not comment.is_file_level and not comment.is_reply
+    ]
+    file_comments = [
+        comment
+        for comment in comments
+        if comment.is_file_level and not comment.is_reply
+    ]
+    replies = [comment for comment in comments if comment.is_reply]
     result = await _add_pull_request_review(
         pull_request_node_id=identity.pull_request_node_id,
         event=None,
@@ -222,6 +241,13 @@ async def create_pending_review(
         await _add_file_review_thread(
             review_node_id=result.review.node_id,
             comment=comment,
+            runner=runner,
+        )
+    for comment in replies:
+        await add_pending_review_reply(
+            review_node_id=result.review.node_id,
+            thread_node_id=comment.reply_thread_id,
+            body=comment.body,
             runner=runner,
         )
     if body and not result.review.body:
@@ -247,6 +273,25 @@ async def submit_review(
         pr_number,
         runner=runner,
     )
+    if comments and any(comment.is_reply for comment in comments):
+        review = await create_pending_review(
+            owner,
+            repo,
+            pr_number,
+            comments=comments,
+            body=body,
+            commit_id=commit_id,
+            runner=runner,
+        )
+        return await submit_pending_review(
+            owner,
+            repo,
+            pr_number,
+            review_id=review.id,
+            event=event,
+            body=body,
+            runner=runner,
+        )
     return (
         await _add_pull_request_review(
             pull_request_node_id=identity.pull_request_node_id,
@@ -406,6 +451,38 @@ async def _add_pull_request_review(
     )
 
 
+async def add_pending_review_reply(
+    *,
+    review_node_id: str,
+    thread_node_id: str,
+    body: str,
+    runner: GitHubInputRunner,
+) -> PRComment:
+    """Attach a reply to a pending review without publishing it."""
+    if not review_node_id or not thread_node_id:
+        raise GraphQLMutationError("Pending review or reply thread node ID not found")
+    data = await _run_graphql(
+        _ADD_REVIEW_REPLY_MUTATION,
+        {
+            "input": {
+                "pullRequestReviewId": review_node_id,
+                "pullRequestReviewThreadId": thread_node_id,
+                "body": body,
+            }
+        },
+        runner=runner,
+    )
+    payload = _mapping(
+        _mapping(data.get("data")).get("addPullRequestReviewThreadReply")
+    )
+    comment = _mapping(payload.get("comment"))
+    if not comment:
+        raise GraphQLMutationError(
+            "addPullRequestReviewThreadReply did not return a comment"
+        )
+    return PRComment.model_validate(comment)
+
+
 async def _add_file_review_thread(
     *,
     review_node_id: str,
@@ -495,6 +572,8 @@ def _review_node_id(
 
 
 def _thread_input(comment: PendingReviewComment) -> dict[str, object]:
+    if comment.is_reply:
+        raise ValueError("Replies must be added to their existing review thread")
     if comment.is_file_level:
         raise ValueError("Draft review threads cannot recreate file-level comments")
     if not comment.is_diff_line:
@@ -563,6 +642,7 @@ def _comment_with_thread_position(
 ) -> PRComment:
     file_level = comment.is_file_level or thread.is_file_level
     update: dict[str, Any] = {
+        "review_thread_id": thread.id,
         "path": comment.path or thread.path,
         "side": "" if file_level else thread.diff_side or comment.side,
         "subject_type": "FILE" if file_level else comment.subject_type,

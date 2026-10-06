@@ -227,13 +227,20 @@ def count_pending_file_comments(
 def syncable_comments(
     comments: Iterable[PendingReviewComment],
 ) -> list[PendingReviewComment]:
-    return [comment for comment in comments if comment.is_diff_line]
+    return [comment for comment in comments if comment.is_diff_line or comment.is_reply]
 
 
 def first_unsupported_comment(
     comments: Iterable[PendingReviewComment],
 ) -> PendingReviewComment | None:
-    return next((comment for comment in comments if not comment.is_diff_line), None)
+    return next(
+        (
+            comment
+            for comment in comments
+            if not comment.is_diff_line and not comment.is_reply
+        ),
+        None,
+    )
 
 
 def plan_review_submission(
@@ -334,7 +341,14 @@ def plan_pending_review_sync(
 ) -> PendingReviewSyncPlan:
     """Return pending-review replacement data for the GitHub adapter."""
     syncable = syncable_comments(comments)
-    if any(comment.is_file_level for comment in syncable) and not head_sha:
+    if any(comment.is_reply and not comment.reply_thread_id for comment in syncable):
+        raise ValueError(
+            "Reply thread ID is unavailable; pending review was not replaced"
+        )
+    if (
+        any(comment.is_file_level and not comment.is_reply for comment in syncable)
+        and not head_sha
+    ):
         raise ValueError("PR head SHA is unavailable")
     return PendingReviewSyncPlan(
         delete_review_id=pending_review_id,
@@ -566,6 +580,10 @@ def _submission_comments(
     pending_comments: list[PendingReviewComment] = []
     has_review_comments = False
     for comment in comments:
+        if comment.is_reply:
+            pending_comments.append(comment)
+            has_review_comments = True
+            continue
         if comment.is_file_level:
             has_review_comments = True
             continue
@@ -626,6 +644,21 @@ def _pending_comment_from_review_thread_comment(
     comment: PRComment,
 ) -> PendingReviewComment | None:
     path = comment.path or thread.path
+    if comment.in_reply_to_id is not None:
+        return _pending_comment_from_review_comment(
+            comment.model_copy(
+                update={
+                    "path": path,
+                    "review_thread_id": thread.id,
+                    "side": thread.diff_side or comment.side,
+                    "line": thread.line if thread.line is not None else comment.line,
+                    "original_line": thread.original_line or comment.original_line,
+                    "subject_type": "file"
+                    if thread.is_file_level
+                    else comment.subject_type,
+                }
+            )
+        )
     if (thread.is_file_level or comment.is_file_level) and path:
         return PendingReviewComment(
             body=comment.body,
@@ -748,6 +781,18 @@ def _pending_comment_from_review_comment(
 ) -> PendingReviewComment | None:
     if not comment.path:
         return None
+    if comment.in_reply_to_id is not None:
+        return PendingReviewComment(
+            body=comment.body,
+            path=comment.path,
+            line=0 if comment.is_file_level else comment.anchor_line or 0,
+            side=_pending_comment_side(comment.side) or "RIGHT",
+            subject_type="file" if comment.is_file_level else "line",
+            review_comment_id=comment.id,
+            review_comment_node_id=comment.node_id,
+            reply_to_id=comment.in_reply_to_id,
+            reply_thread_id=comment.review_thread_id,
+        )
     if comment.is_file_level:
         return PendingReviewComment(
             body=comment.body,
@@ -902,13 +947,14 @@ def _drop_single_line_range_shadows(
 
 def _range_shadow_key(
     comment: PendingReviewComment,
-) -> tuple[str, str, int, PendingCommentSide, str]:
+) -> tuple[str, str, int, PendingCommentSide, str, int | None]:
     return (
         comment.path,
         comment.subject_type,
         comment.line,
         comment.side,
         comment.body,
+        comment.reply_to_id,
     )
 
 
@@ -922,6 +968,7 @@ def _comment_content_key(
     int | None,
     PendingCommentSide | None,
     str,
+    int | None,
 ]:
     return (
         comment.path,
@@ -931,6 +978,7 @@ def _comment_content_key(
         comment.start_line,
         comment.start_side,
         comment.body,
+        comment.reply_to_id,
     )
 
 

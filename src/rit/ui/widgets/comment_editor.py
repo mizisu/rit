@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar, Literal
 
-from textual import events, on
+from textual import on
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -16,7 +16,7 @@ from textual.widgets import Button, OptionList, Static, TextArea
 from rit.ui.widgets.action_buttons import ActionButtons
 from rit.ui.widgets.emoji_picker import EMOJI_PICKER_BINDINGS, EmojiPicker
 
-EditorKind = Literal["issue", "inline", "file"]
+EditorKind = Literal["issue", "inline", "file", "reply"]
 SubmitMode = Literal["queue", "post"]
 
 
@@ -98,15 +98,6 @@ class InlineCommentEditor(Vertical):
     class Cancelled(Message):
         kind: EditorKind
 
-    @dataclass
-    class LayoutHeightChanged(Message):
-        editor: InlineCommentEditor
-        height: int
-
-        @property
-        def control(self) -> InlineCommentEditor:
-            return self.editor
-
     def __init__(
         self,
         *,
@@ -126,7 +117,6 @@ class InlineCommentEditor(Vertical):
         self._selection_context = context
         self._update_existing = update_existing
         self._pending_focus = False
-        self._reported_layout_height = 0
 
     def compose(self) -> ComposeResult:
         yield Static(self._title, classes="comment-editor-title")
@@ -151,7 +141,7 @@ class InlineCommentEditor(Vertical):
                     id="comment-editor-submit",
                     variant="primary",
                 )
-            elif self._kind in {"inline", "file"}:
+            elif self._kind in {"inline", "file", "reply"}:
                 yield Button(
                     "Add to review  [dim]Ctrl+S[/]",
                     id="comment-editor-queue",
@@ -170,15 +160,6 @@ class InlineCommentEditor(Vertical):
         if self._pending_focus:
             self._pending_focus = False
             self._focus_body()
-
-    def on_resize(self, event: events.Resize) -> None:
-        if not self.is_open:
-            return
-        layout_height = event.size.height + self.styles.margin.height
-        if layout_height == self._reported_layout_height:
-            return
-        self._reported_layout_height = layout_height
-        self.post_message(self.LayoutHeightChanged(self, layout_height))
 
     def _focus_body(self) -> None:
         body = self.query_one("#comment-editor-body", TextArea)

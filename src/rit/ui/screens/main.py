@@ -153,7 +153,14 @@ _FILES_BINDINGS = [
         key_display="ctrl+h/l",
         group=_NAVIGATION_GROUP,
     ),
-    Binding("c", "comment", "Comment / Edit", group=_COMMENT_GROUP),
+    Binding("c", "comment", "Comment / Reply", group=_COMMENT_GROUP),
+    Binding(
+        "C",
+        "edit_comment",
+        "Edit Comment",
+        key_display="shift+c",
+        group=_COMMENT_GROUP,
+    ),
     Binding("d", "delete_comment", "Delete Comment", group=_COMMENT_GROUP),
     Binding("ctrl+s", "review", "Review", group=_REVIEW_GROUP),
     Binding("ctrl+l", "focus_right", "", group=_NAVIGATION_GROUP, show=False),
@@ -1071,6 +1078,28 @@ class MainScreen(Screen[None]):
             return
 
         diff_view = self.file_changes.diff_view
+        if event.kind == "reply":
+            reply_target = diff_view.reply_comment_target()
+            if reply_target is None or any(
+                worker.name in {"_post_review_reply", "_save_review_reply_draft"}
+                and not worker.is_finished
+                for worker in self.workers
+            ):
+                return
+            self.run_worker(
+                self._submit_review_reply(
+                    event.body,
+                    reply_target,
+                    mode=event.mode,
+                    draft_index=diff_view.reply_comment_draft_index(),
+                ),
+                exclusive=False,
+                exit_on_error=False,
+                name="_post_review_reply"
+                if event.mode == "post"
+                else "_save_review_reply_draft",
+            )
+            return
         edit_target = (
             diff_view.file_comment_edit_target()
             if event.kind == "file"
@@ -1158,6 +1187,13 @@ class MainScreen(Screen[None]):
         event.stop()
         if event.kind == "issue":
             self.pr_info.close_issue_comment()
+            return
+        if event.kind == "reply":
+            self.run_worker(
+                self.file_changes.diff_view.close_reply_comment_editor(),
+                exclusive=False,
+                name="_close_reply_comment_editor",
+            )
             return
         if event.kind == "file":
             self.run_worker(
@@ -1355,6 +1391,39 @@ class MainScreen(Screen[None]):
         changed = await self.store.set_assignees(logins)
         self.pr_info.refresh_summary()
         return changed
+
+    async def _submit_review_reply(
+        self,
+        body: str,
+        comment: PRComment,
+        *,
+        mode: Literal["queue", "post"],
+        draft_index: int | None = None,
+    ) -> bool:
+        diff_view = self.file_changes.diff_view
+        current_file = diff_view.current_file
+        current_line = diff_view.cursor_line
+        current_pane = diff_view.active_pane
+
+        if mode == "queue":
+            await self.store.queue_pending_reply(comment, body, draft_index=draft_index)
+        else:
+            await self.store.reply_to_review_comment(
+                comment, body, draft_index=draft_index
+            )
+        await diff_view.close_reply_comment_editor()
+        if mode == "post":
+            await self.store.refresh_review_data()
+        self.pr_info.refresh_comments()
+        self.file_changes.file_tree.refresh_files()
+        if current_file is not None:
+            await self._refresh_diff_preserving_cursor(
+                current_file,
+                current_line,
+                current_pane,
+                focus_diff=True,
+            )
+        return True
 
     async def _update_review_comment(
         self,
@@ -1637,7 +1706,10 @@ class MainScreen(Screen[None]):
                 )
             return
 
-        if event.worker.name == "_save_inline_comment_draft":
+        if event.worker.name in {
+            "_save_inline_comment_draft",
+            "_save_review_reply_draft",
+        }:
             if event.state == WorkerState.SUCCESS:
                 self.post_message(Flash("Draft saved", style="success", duration=2.0))
             elif event.state == WorkerState.ERROR:
@@ -1647,7 +1719,7 @@ class MainScreen(Screen[None]):
                 )
             return
 
-        if event.worker.name == "_post_inline_comment":
+        if event.worker.name in {"_post_inline_comment", "_post_review_reply"}:
             if event.state == WorkerState.SUCCESS:
                 self.post_message(
                     Flash("Comment posted", style="success", duration=2.0)
