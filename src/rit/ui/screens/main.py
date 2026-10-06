@@ -398,6 +398,21 @@ class MainScreen(Screen[None]):
             self._pr_overview_refresh_pending = False
             self.pr_info.refresh_overview()
 
+    @on(PRStore.ThreadResolved)
+    def _refresh_merge_status(self) -> None:
+        self.run_worker(
+            self.store.load_pr_merge_status(refresh=True), name="refresh-pr-merge"
+        )
+
+    @on(Button.Pressed, "#refresh-merge")
+    def _refresh_merge(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.run_worker(self._reload_merge_status(), name="refresh-pr-merge")
+
+    async def _reload_merge_status(self) -> None:
+        await self.store.load_pr_summary()
+        await self.store.load_pr_merge_status(refresh=True)
+
     @on(Button.Pressed, "#refresh-checks")
     def _refresh_checks(self, event: Button.Pressed) -> None:
         event.stop()

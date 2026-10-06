@@ -64,6 +64,7 @@ PRInfo #sidebar-metadata {
     height: auto;
 }
 
+PRInfo #pr-merge-section .sidebar-section-title,
 PRInfo #pr-checks-section .sidebar-section-title,
 PRInfo #pr-files-summary-count {
     width: 1fr;
@@ -171,28 +172,6 @@ PRInfo .pr-title {
     height: auto;
 }
 
-PRInfo #pr-status {
-    width: auto;
-    height: 1;
-    margin-left: 2;
-}
-
-PRInfo .pr-status-open {
-    color: #a6da95;
-}
-
-PRInfo .pr-status-merged {
-    color: #c6a0f6;
-}
-
-PRInfo .pr-status-closed {
-    color: #ed8796;
-}
-
-PRInfo .pr-status-draft {
-    color: #6e738d;
-}
-
 /* Stats bar */
 PRInfo .stats-bar {
     margin-bottom: 1;
@@ -212,6 +191,7 @@ PRInfo .sidebar-section-heading {
 PRInfo #edit-reviewers,
 PRInfo #edit-assignees,
 PRInfo #refresh-checks,
+PRInfo #refresh-merge,
 PRInfo #refresh-file-summary {
     width: 3;
     min-width: 3;
@@ -226,6 +206,7 @@ PRInfo #refresh-file-summary {
 PRInfo #edit-reviewers:hover,
 PRInfo #edit-assignees:hover,
 PRInfo #refresh-checks:hover,
+PRInfo #refresh-merge:hover,
 PRInfo #refresh-file-summary:hover,
 PRInfo .file-group-toggle:hover {
     background: $primary 12%;
@@ -235,6 +216,7 @@ PRInfo .file-group-toggle:hover {
 PRInfo #edit-reviewers:focus,
 PRInfo #edit-assignees:focus,
 PRInfo #refresh-checks:focus,
+PRInfo #refresh-merge:focus,
 PRInfo #refresh-file-summary:focus,
 PRInfo .file-group-toggle:focus {
     background: $primary 30%;

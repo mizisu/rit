@@ -18,16 +18,19 @@ from textual.widgets import Button, OptionList, Static
 from rit.state.models import PRComment
 from rit.state.reviewer_status import ReviewerDisplayState, derive_reviewer_states
 from rit.state.store import PRStore
-from rit.ui.components.pr_overview import PRChecks, PRFilesSummary, SummaryOptionList
+from rit.ui.components.pr_overview import (
+    PRChecks,
+    PRFilesSummary,
+    PRMerge,
+    SummaryOptionList,
+)
 from rit.ui.components.pr_timeline import PRTimeline
-from rit.ui.pr_status import PR_STATUS_LABELS as _PR_STATUS_LABELS
 
 __all__ = ("PRInfo",)
 
 
 _CSS_PATH = Path(__file__).parent / "pr_info.tcss"
 _DEFAULT_CSS = _CSS_PATH.read_text() if _CSS_PATH.exists() else ""
-_DEFAULT_PR_STATUS_LABEL = _PR_STATUS_LABELS["Open"]
 _COMPACT_LAYOUT_BREAKPOINT = 94
 _EDIT_ICON = "\U000f03eb"
 
@@ -57,12 +60,11 @@ class PRInfo(Container):
         self._sidebar_focus: Widget | None = None
         self._sidebar_widget: VerticalScroll | None = None
         self._title_widget: Static | None = None
-        self._status_widget: Static | None = None
         self._stats_widget: Static | None = None
         self._labels_widget: Static | None = None
         self._assignees_widget: Static | None = None
         self._reviewers_widget: Static | None = None
-        self._header_render_signature: tuple[str, int, str, int, int] | None = None
+        self._header_render_signature: tuple[str, int, int, int] | None = None
         self._labels_render_signature: tuple[int, int, int, int, int] | None = None
         self._labels_render_text: str | None = None
         self._assignees_render_signature: tuple[int, int, int, int, int] | None = None
@@ -80,7 +82,6 @@ class PRInfo(Container):
             ):
                 with Horizontal(id="pr-title-row"):
                     yield Static("Loading...", classes="pr-title", id="pr-title")
-                    yield Static("", id="pr-status")
                 yield Static("", classes="stats-bar", id="pr-stats")
                 yield PRTimeline(self.store, id="pr-timeline")
 
@@ -121,6 +122,7 @@ class PRInfo(Container):
                         yield Static(
                             "Loading...", classes="placeholder", id="pr-labels"
                         )
+                yield PRMerge(self.store)
                 yield PRChecks(self.store)
                 yield PRFilesSummary(self.store)
 
@@ -176,20 +178,26 @@ class PRInfo(Container):
             self._sidebar_widget = self.query_one("#sidebar", VerticalScroll)
         return self._sidebar_widget.has_focus_within
 
-    def focus_main(self) -> None:
-        """Return to the timeline without changing its selection or scroll."""
+    def move_focus(self, direction: Literal["left", "right"]) -> bool:
+        """Request horizontal focus; False means there is no internal target."""
+        if not self.is_mounted:
+            return False
+        if direction == "left":
+            main = self.query_one("#main-scroll", VerticalScroll)
+            if main.has_focus_within:
+                return False
+            if self.sidebar_has_focus:
+                self._sidebar_focus = self.screen.focused
+            main.focus(scroll_visible=False)
+            return True
         if self.sidebar_has_focus:
-            self._sidebar_focus = self.screen.focused
-        self.query_one("#main-scroll", VerticalScroll).focus(scroll_visible=False)
-
-    def focus_sidebar(self) -> None:
-        """Restore the last sidebar control without moving the document."""
+            return False
         controls = self._sidebar_controls()
-        if controls:
-            target = (
-                self._sidebar_focus if self._sidebar_focus in controls else controls[0]
-            )
-            target.focus(scroll_visible=False)
+        if not controls:
+            return False
+        target = self._sidebar_focus if self._sidebar_focus in controls else controls[0]
+        target.focus(scroll_visible=False)
+        return True
 
     def _sidebar_controls(self) -> list[Widget]:
         sidebar = self.query_one("#sidebar")
@@ -211,12 +219,15 @@ class PRInfo(Container):
         self.move_sidebar_focus(event.direction)
 
     def refresh_overview(self) -> None:
+        self.query_one(PRMerge).refresh_data()
         self.query_one(PRChecks).refresh_data()
         self.query_one(PRFilesSummary).refresh_data()
 
     def refresh_summary(self) -> None:
         self._update_header()
         self._update_sidebar()
+        if self.is_mounted:
+            self.query_one(PRMerge).refresh_data()
 
     def refresh_pr_data(self) -> None:
         self.refresh_summary()
@@ -266,7 +277,6 @@ class PRInfo(Container):
         signature = (
             pr.title,
             pr.number,
-            pr.state_display,
             pr.additions,
             pr.deletions,
         )
@@ -276,11 +286,6 @@ class PRInfo(Container):
         title_widget = self._static_widget("_title_widget", "#pr-title")
         title_widget.styles.max_width = cell_len(f"{pr.title} #{pr.number}")
         title_widget.update(f"[bold]{pr.title}[/bold] [#6e738d]#{pr.number}[/]")
-
-        status_widget = self._static_widget("_status_widget", "#pr-status")
-        status_widget.update(
-            _PR_STATUS_LABELS.get(pr.state_display, _DEFAULT_PR_STATUS_LABEL)
-        )
 
         stats_widget = self._static_widget("_stats_widget", "#pr-stats")
         total_changes = pr.additions + pr.deletions

@@ -1,4 +1,4 @@
-"""Compact, lazily expanded checks and changed-file summaries."""
+"""Compact merge status, checks, and changed-file summaries."""
 
 from dataclasses import dataclass
 from typing import ClassVar
@@ -125,6 +125,65 @@ _CHECK_APPEARANCES: dict[CheckOutcome, CheckAppearance] = {
     "neutral": CheckAppearance("—", "#939ab7", "Checks completed"),
     "unknown": CheckAppearance("?", "#eed49f", "Unknown check results"),
 }
+
+
+class PRMerge(Vertical):
+    """GitHub's merge verdict with short reasons always visible."""
+
+    def __init__(self, store: PRStore) -> None:
+        super().__init__(id="pr-merge-section", classes="sidebar-section")
+        self.store = store
+
+    def compose(self) -> ComposeResult:
+        with Horizontal(classes="sidebar-section-heading"):
+            yield Static("Merge", classes="sidebar-section-title")
+            yield Button(
+                "↻",
+                id="refresh-merge",
+                tooltip="Refresh merge status",
+                compact=True,
+                flat=True,
+            )
+        yield Static("Checking...", id="pr-merge-status", markup=False)
+
+    def refresh_data(self) -> None:
+        pr = self.store.state.pr
+        resource = self.store.state.merge_status
+        snapshot = resource.loaded_value
+        if snapshot is not None and (
+            pr is None
+            or (snapshot.base_sha, snapshot.head_sha) != (pr.base_sha, pr.head_sha)
+        ):
+            snapshot = None
+        self.display = not (
+            (pr is not None and pr.state in {"MERGED", "CLOSED"})
+            or (snapshot is not None and snapshot.state in {"MERGED", "CLOSED"})
+        )
+        self.query_one(Button).disabled = resource.loading == LoadingState.LOADING
+        status = self.query_one("#pr-merge-status", Static)
+        status.tooltip = _line(resource.error) if resource.error else None
+        if not self.display:
+            return
+        if snapshot is None:
+            label, reasons = (
+                ("Unknown", ("Reason unavailable",))
+                if resource.loading == LoadingState.ERROR
+                else ("Checking", ())
+            )
+        else:
+            label, reasons = snapshot.summary
+        icon, color = {
+            "Ready": ("✓", "#a6da95"),
+            "Blocked": ("✗", "#ed8796"),
+            "Queued": ("●", "#8aadf4"),
+            "Checking": ("◌", "#939ab7"),
+            "Warning": ("!", "#eed49f"),
+            "Unknown": ("?", "#eed49f"),
+        }[label]
+        content = Content.assemble((f"{icon} {label}", color))
+        for reason in reasons:
+            content += Content("\n  ") + _line(reason)
+        status.update(content)
 
 
 class PRChecks(Vertical):

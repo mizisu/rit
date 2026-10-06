@@ -4,6 +4,8 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import ClassVar, Literal
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from rit.state.models import PRFile
 
 type CheckOutcome = Literal[
@@ -45,6 +47,52 @@ class PRChecksSnapshot:
         if "cancelled" in outcomes:
             return "cancelled"
         return "success" if "success" in outcomes else "neutral"
+
+
+class PRMergeSnapshot(BaseModel):
+    """GitHub's merge verdict, not a locally reconstructed branch policy."""
+
+    model_config = ConfigDict(frozen=True, populate_by_name=True, strict=True)
+
+    base_sha: str = Field(alias="baseRefOid", min_length=1)
+    head_sha: str = Field(alias="headRefOid", min_length=1)
+    base_ref: str = Field(alias="baseRefName", min_length=1)
+    state: str
+    is_draft: bool = Field(alias="isDraft")
+    mergeable: str
+    merge_state: str = Field(alias="mergeStateStatus")
+    review_decision: str | None = Field(alias="reviewDecision")
+    queued: bool = Field(alias="isInMergeQueue")
+
+    @property
+    def summary(self) -> tuple[str, tuple[str, ...]]:
+        """Expose confirmed reasons without treating optional checks as blockers."""
+        if self.queued:
+            return "Queued", ()
+        reasons: list[str] = []
+        if self.is_draft or self.merge_state == "DRAFT":
+            reasons.append("Draft")
+        if self.mergeable == "CONFLICTING" or self.merge_state == "DIRTY":
+            reasons.append(f"Conflicts with {self.base_ref}")
+        if self.merge_state == "BEHIND":
+            reasons.append("Behind base")
+        if reasons or self.merge_state == "BLOCKED":
+            review_reason = {
+                "REVIEW_REQUIRED": "Approval required",
+                "CHANGES_REQUESTED": "Changes requested",
+            }.get(self.review_decision or "")
+            if review_reason:
+                reasons.append(review_reason)
+            return "Blocked", tuple(reasons) or ("Reason unavailable",)
+        if self.mergeable == "UNKNOWN" or self.merge_state == "UNKNOWN":
+            return "Checking", ()
+        if self.state == "OPEN" and self.mergeable == "MERGEABLE":
+            return {
+                "CLEAN": ("Ready", ()),
+                "UNSTABLE": ("Warning", ("Checks not passing",)),
+                "HAS_HOOKS": ("Warning", ("Pre-receive hooks",)),
+            }.get(self.merge_state, ("Unknown", ("Reason unavailable",)))
+        return "Unknown", ("Reason unavailable",)
 
 
 @dataclass(frozen=True)

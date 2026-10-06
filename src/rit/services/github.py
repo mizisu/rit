@@ -107,7 +107,8 @@ from rit.state.models import (
     PRTeam,
     PRUser,
 )
-from rit.state.pr_overview import PRChecksSnapshot, PRFileMetadata
+from rit.state.pr_overview import PRChecksSnapshot, PRFileMetadata, PRMergeSnapshot
+from rit.state.review_scope import ReviewHistory, ReviewScope
 
 __all__ = (
     "GitHubError",
@@ -446,6 +447,22 @@ class GitHubService:
             side=side,
             start_line=start_line,
             start_side=start_side,
+            runner=self._run_gh,
+        )
+
+    async def create_review_comment_reply(
+        self,
+        pr_number: int,
+        root_comment_id: int,
+        body: str,
+    ) -> PRComment:
+        """Post a reply in an existing review thread."""
+        repo = await self.get_repo()
+        return await create_review_comment_reply_via_rest(
+            repo.full_name,
+            pr_number,
+            root_comment_id,
+            body=body,
             runner=self._run_gh,
         )
 
