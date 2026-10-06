@@ -19,6 +19,7 @@ from rit.services.graphql_mutations import (
 )
 from rit.services.local_git import LocalGitSource
 from rit.services.pr_checks import fetch_pr_checks
+from rit.services.pr_comparison import fetch_comparison_files, fetch_review_history
 from rit.services.pr_discussion import (
     PRDiscussion,
     fetch_pr_discussion,
@@ -218,6 +219,14 @@ class GitHubService:
                 runner=self._run_gh,
             )
 
+    async def get_pr_merge_status(self, pr_number: int) -> PRMergeSnapshot:
+        """Fetch GitHub's current merge verdict and review decision."""
+        repo = await self.get_repo()
+        with translate_pull_request_graphql_errors():
+            return await fetch_pr_merge_status(
+                repo.owner, repo.name, pr_number, runner=self._run_gh
+            )
+
     async def get_pr_file_metadata(
         self,
         pr_number: int,
@@ -231,7 +240,11 @@ class GitHubService:
         with translate_pull_request_graphql_errors():
             async with self._file_metadata_lock:
                 cached = self._file_metadata
-                snapshot = cached[1] if cached is not None and cached[0] == pr_number and not refresh else None
+                snapshot = (
+                    cached[1]
+                    if cached is not None and cached[0] == pr_number and not refresh
+                    else None
+                )
                 if snapshot is not None and validate:
                     current = await fetch_pr_file_metadata(
                         repo.owner,
@@ -242,16 +255,25 @@ class GitHubService:
                         runner=self._run_gh,
                     )
                     if (snapshot.base_sha, snapshot.head_sha) != (
-                        current.base_sha, current.head_sha,
+                        current.base_sha,
+                        current.head_sha,
                     ):
                         snapshot = None
                 if snapshot is None:
                     snapshot = await fetch_pr_file_metadata(
-                        repo.owner, repo.name, pr_number, runner=self._run_gh,
+                        repo.owner,
+                        repo.name,
+                        pr_number,
+                        runner=self._run_gh,
                     )
                     self._file_metadata = (pr_number, snapshot)
-                if expected_refs is not None and (snapshot.base_sha, snapshot.head_sha) != expected_refs:
-                    raise GitHubError("PR changed while loading files; refresh and try again")
+                if (
+                    expected_refs is not None
+                    and (snapshot.base_sha, snapshot.head_sha) != expected_refs
+                ):
+                    raise GitHubError(
+                        "PR changed while loading files; refresh and try again"
+                    )
                 return snapshot
 
     async def get_pr_files(
@@ -263,7 +285,11 @@ class GitHubService:
         """Fetch metadata and canonical patches without downloading full files."""
         repo = await self.get_repo()
         revision = self._pr_revision
-        refs = (revision[1], revision[2]) if revision is not None and revision[0] == pr_number and all(revision[1:]) else None
+        refs = (
+            (revision[1], revision[2])
+            if revision is not None and revision[0] == pr_number and all(revision[1:])
+            else None
+        )
         try:
             return await fetch_pr_files(
                 repo.owner,
@@ -271,10 +297,32 @@ class GitHubService:
                 pr_number,
                 total_count=total_count,
                 runner=self._run_gh,
-                metadata=self.get_pr_file_metadata(pr_number, validate=True, expected_refs=refs),
+                metadata=self.get_pr_file_metadata(
+                    pr_number, validate=True, expected_refs=refs
+                ),
             )
         except ValueError as error:
             raise GitHubError(f"GraphQL error: {error}") from error
+
+    async def get_review_history(self, pr_number: int) -> ReviewHistory:
+        """Fetch all PR commits and the viewer's last submitted review."""
+        repo = await self.get_repo()
+        try:
+            return await fetch_review_history(
+                repo.owner, repo.name, pr_number, runner=self._run_gh
+            )
+        except ValueError as error:
+            raise GitHubError(str(error)) from error
+
+    async def get_comparison_files(self, scope: ReviewScope) -> list[PRFile]:
+        """Fetch an immutable, ancestor-checked commit comparison."""
+        repo = await self.get_repo()
+        try:
+            return await fetch_comparison_files(
+                repo.owner, repo.name, scope, runner=self._run_gh
+            )
+        except ValueError as error:
+            raise GitHubError(str(error)) from error
 
     async def get_reviewer_candidates(self) -> tuple[list[PRUser], list[PRTeam]]:
         """Fetch user and team candidates for PR review requests."""

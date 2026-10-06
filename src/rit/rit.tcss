@@ -41,6 +41,13 @@ Screen {
     background: $background;
 }
 
+ReviewScopePicker,
+FilePickerScreen,
+CommentSubmitScreen,
+ReviewSubmitScreen {
+    background: transparent;
+}
+
 TabbedContent {
     height: 1fr;
 }

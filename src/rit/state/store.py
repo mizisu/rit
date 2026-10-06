@@ -75,12 +75,14 @@ from rit.state.pending_review_visibility import (
     review_thread_is_pending_draft,
     visible_timeline_comments,
     visible_timeline_reviews,
+    without_pending_replies,
 )
 from rit.state.pending_review_workspace import PendingReviewWorkspace
 from rit.state.pr_management import plan_assignee_selection, plan_reviewer_selection
 from rit.state.pr_merge import merge_pr_discussion, merge_pr_summary
-from rit.state.pr_overview import PRChecksSnapshot, PRFilesSnapshot
+from rit.state.pr_overview import PRChecksSnapshot, PRFilesSnapshot, PRMergeSnapshot
 from rit.state.review_annotations import ReviewAnnotationIndex
+from rit.state.review_scope import ReviewHistory, ReviewScope
 
 __all__ = (
     "GitHubError",
@@ -94,6 +96,9 @@ __all__ = (
 class PRStoreState:
     pr_loading: LoadingState = LoadingState.IDLE
     files_loading: LoadingState = LoadingState.IDLE
+    merge_status: OverviewResource[tuple[str, str], PRMergeSnapshot] = field(
+        default_factory=OverviewResource[tuple[str, str], PRMergeSnapshot]
+    )
     checks: OverviewResource[str, PRChecksSnapshot] = field(
         default_factory=OverviewResource[str, PRChecksSnapshot]
     )
@@ -124,6 +129,14 @@ class PRStoreState:
     files_total_count: int = 0
 
     error: str | None = None
+    scope: ReviewScope = field(default_factory=ReviewScope)
+    requested_scope: ReviewScope | None = None
+    scope_loading: bool = False
+    scope_error: str | None = None
+    file_revision: int = 0
+    review_history: OverviewResource[tuple[str, str], ReviewHistory] = field(
+        default_factory=OverviewResource[tuple[str, str], ReviewHistory]
+    )
 
 
 class PRStore:
@@ -140,7 +153,10 @@ class PRStore:
         total_count: int = 0
 
     class OverviewUpdated(Message):
-        """Checks or changed-file summary state changed, without diff work."""
+        """Sidebar snapshot state changed, without diff work."""
+
+    class ScopeUpdated(Message):
+        """Comparison selection or its metadata finished loading."""
 
     @dataclass
     class FileSelected(Message):
@@ -200,6 +216,7 @@ class PRStore:
         self.viewed_files = ViewedFiles(self._state, self._persist_file_viewed)
         self._message_sink: Callable[[Message], None] | None = None
         self._recent_discussion = RecentDiscussion()
+        self._scope_request = 0
 
     @property
     def state(self) -> PRStoreState:
@@ -235,7 +252,8 @@ class PRStore:
             pr = self._merge_pr_summary(summary)
             self._state.pr = pr
             self._state.pr_loading = LoadingState.LOADED
-            self._state.files_total_count = pr.changed_files
+            if self._state.scope.kind == "all":
+                self._state.files_total_count = pr.changed_files
             self._post_message(self.PRLoaded(pr=pr))
         except RuntimeError as e:
             self._state.pr_loading = LoadingState.ERROR
@@ -246,7 +264,30 @@ class PRStore:
 
     async def load_pr_overview(self) -> None:
         """Load sidebar data independently of the description and diff workspace."""
-        await asyncio.gather(self.load_pr_checks(), self.load_pr_file_summary())
+        await asyncio.gather(
+            self.load_pr_merge_status(),
+            self.load_pr_checks(),
+            self.load_pr_file_summary(),
+        )
+
+    async def load_pr_merge_status(self, *, refresh: bool = False) -> None:
+        """Load a revision-bound merge verdict without changing the diff workspace."""
+        pr = self._state.pr
+        if pr is None or pr.state != "OPEN" or not all(self._overview_refs()):
+            return
+
+        async def fetch(refs: tuple[str, str]) -> PRMergeSnapshot:
+            snapshot = await self._service.get_pr_merge_status(self.pr_number)
+            if (snapshot.base_sha, snapshot.head_sha) != refs:
+                raise GitHubError("PR changed; refresh the PR summary and try again")
+            return snapshot
+
+        await self._state.merge_status.load(
+            current_key=self._overview_refs,
+            fetch=fetch,
+            on_change=self._post_overview_update,
+            refresh=refresh,
+        )
 
     async def load_pr_checks(self, *, refresh: bool = False) -> None:
         """Refresh live checks independently of the diff workspace."""
@@ -340,7 +381,8 @@ class PRStore:
         async def load_discussion() -> PR:
             pr = await self._service.get_pr_all(self.pr_number)
             self._state.pr = pr
-            self._state.files_total_count = pr.changed_files
+            if self._state.scope.kind == "all":
+                self._state.files_total_count = pr.changed_files
             self._apply_discussion_state(pr)
             self._state.pr_loading = LoadingState.LOADED
             return pr
@@ -360,8 +402,103 @@ class PRStore:
             self._state.error = str(e)
             self._post_message(self.ErrorOccurred(error=str(e), source="load_pr_data"))
 
+    async def load_review_history(self, *, refresh: bool = False) -> None:
+        """Load comparison metadata lazily, independently of the diff."""
+
+        async def fetch(refs: tuple[str, str]) -> ReviewHistory:
+            history = await self._service.get_review_history(self.pr_number)
+            if refs != (history.base_sha, history.head_sha):
+                raise GitHubError(
+                    "PR changed; refresh the pull request before selecting commits"
+                )
+            return history
+
+        await self._state.review_history.load(
+            current_key=self._overview_refs,
+            fetch=fetch,
+            on_change=lambda: self._post_message(self.ScopeUpdated()),
+            refresh=refresh,
+        )
+
+    async def select_review_scope(self, scope: ReviewScope) -> bool:
+        """Publish only the latest complete comparison; retain the old one on failure."""
+        if self._state.files_loading == LoadingState.LOADING:
+            self._state.scope_error = "Wait for the initial file load to finish"
+            self._post_message(self.ScopeUpdated())
+            return False
+        self._scope_request += 1
+        request = self._scope_request
+        refs = self._overview_refs()
+        state = self._state
+        state.requested_scope = scope
+        state.scope_loading = True
+        state.scope_error = None
+        self._post_message(self.ScopeUpdated())
+        try:
+            files = (
+                await self._service.get_pr_files(self.pr_number)
+                if scope.kind == "all"
+                else await self._service.get_comparison_files(scope)
+            )
+            if request != self._scope_request:
+                return False
+            if refs != self._overview_refs():
+                raise GitHubError(
+                    "PR changed while loading comparison; refresh and try again"
+                )
+            if scope.kind == "all":
+                sync_file_comments(files, state.comments_by_file)
+            state.scope = scope
+            state.files = files
+            state.files_by_filename = {file.filename: file for file in files}
+            state.file_diffs = {}
+            state.files_loaded_count = state.files_total_count = len(files)
+            state.files_loading = LoadingState.LOADED
+            if state.selected_file not in state.files_by_filename:
+                state.selected_file = files[0].filename if files else None
+            state.file_revision += 1
+            self._post_files_loaded()
+            return True
+        except RuntimeError as error:
+            if request == self._scope_request:
+                state.scope_error = str(error)
+            return False
+        finally:
+            if request == self._scope_request:
+                state.scope_loading = False
+                self._post_message(self.ScopeUpdated())
+
+    @property
+    def review_writable(self) -> bool:
+        return self._state.scope.kind == "all" and not self._state.scope_loading
+
+    def require_full_review(self) -> None:
+        """Prevent historical coordinates from being submitted as current PR lines."""
+        if not self.review_writable:
+            raise GitHubError(
+                "Switch to All changes to comment, review, or mark files viewed"
+            )
+
     async def load_files(self) -> None:
         """Load changed files quickly, falling back to raw diff streaming."""
+        if self._state.scope.kind != "all":
+            scope = self._state.scope
+            if scope.kind == "since":
+                await self.load_review_history(refresh=True)
+                history = self._state.review_history.loaded_value
+                if history is None:
+                    self._mark_files_load_error(
+                        self._state.review_history.error
+                        or "Could not load review history"
+                    )
+                    return
+                try:
+                    scope = history.since_review()
+                except ValueError as error:
+                    self._mark_files_load_error(str(error))
+                    return
+            await self.select_review_scope(scope)
+            return
         error = await load_file_workspace(
             self._state,
             pr_number=self.pr_number,
@@ -430,7 +567,8 @@ class PRStore:
         self._state.comments = projection.comments
         self._state.comments_by_file = projection.comments_by_file
 
-        sync_file_comments(self._state.files, projection.comments_by_file)
+        if self._state.scope.kind == "all":
+            sync_file_comments(self._state.files, projection.comments_by_file)
         self._state.thread_info_cache = projection.thread_info_cache
         self._state.thread_cache = projection.thread_cache
         self._state.pending_review.prune_obsolete_review_ids(
@@ -474,8 +612,11 @@ class PRStore:
         if file is None:
             return None
 
+        cache = self._state.file_diffs
         diff = await asyncio.to_thread(diff_from_file_patch, file)
-        return cache_file_diff(filename, self._state.file_diffs, diff)
+        if cache is not self._state.file_diffs:
+            return None
+        return cache_file_diff(filename, cache, diff)
 
     def _get_file(self, filename: str) -> PRFile | None:
         return find_file(
@@ -490,8 +631,17 @@ class PRStore:
         """Load source text lazily at the PR head or an explicit immutable ref."""
         pr = self._state.pr
         uses_current_head = ref is None
+        scope = self._state.scope
         if ref is None:
-            ref = pr.head_sha if pr is not None else ""
+            if scope.kind == "all":
+                ref = pr.head_sha if pr is not None else ""
+            else:
+                file = self._get_file(filename)
+                ref = (
+                    scope.base_sha
+                    if file is not None and file.status == "removed"
+                    else scope.head_sha
+                )
         content = await load_cached_file_content(
             self._state.file_contents,
             filename=filename,
@@ -499,9 +649,12 @@ class PRStore:
             fetch=getattr(self._service, "get_file_content", None),
         )
         current = self._state.pr
-        if (
-            uses_current_head
-            and (current.head_sha if current is not None else "") != ref
+        if uses_current_head and (
+            scope != self._state.scope
+            or (
+                scope.kind == "all"
+                and (current.head_sha if current is not None else "") != ref
+            )
         ):
             return None
         return content
@@ -593,6 +746,7 @@ class PRStore:
         start_side: Literal["LEFT", "RIGHT"] | None = None,
     ) -> PRComment:
         """Submit a single inline comment on the current diff line."""
+        self.require_full_review()
         pr = self._state.pr
         plan = plan_inline_comment_submission(
             body,
@@ -630,6 +784,7 @@ class PRStore:
 
     async def submit_file_comment(self, body: str, *, path: str) -> PRComment:
         """Submit a review comment targeting an entire changed file."""
+        self.require_full_review()
         normalized = normalize_issue_comment_body(body)
         if not path:
             raise ValueError("Comment file path is unavailable")
@@ -655,6 +810,7 @@ class PRStore:
         path: str,
         draft_index: int | None = None,
     ) -> PendingReviewComment:
+        self.require_full_review()
         return self._state.pending_review.save_file_comment(
             body, path=path, draft_index=draft_index
         )
@@ -670,6 +826,7 @@ class PRStore:
         start_side: Literal["LEFT", "RIGHT"] | None = None,
         draft_index: int | None = None,
     ) -> PendingReviewComment:
+        self.require_full_review()
         return self._state.pending_review.save_inline_comment(
             body,
             path=path,
@@ -729,7 +886,11 @@ class PRStore:
 
         hidden_ids = self.pending_review_hidden_ids()
         return [
-            thread
+            without_pending_replies(
+                thread,
+                drafts=self._state.pending_review.comments,
+                hidden_review_ids=hidden_ids,
+            )
             for thread in self._state.review_threads
             if thread.path in paths
             and not review_thread_is_pending_draft(
@@ -854,6 +1015,7 @@ class PRStore:
         draft_index: int | None = None,
         after_local_save: Callable[[], Awaitable[None]] | None = None,
     ) -> PendingReviewComment:
+        self.require_full_review()
         return await self._state.pending_review.queue_file_comment(
             body,
             path=path,
@@ -877,6 +1039,7 @@ class PRStore:
         draft_index: int | None = None,
         after_local_save: Callable[[], Awaitable[None]] | None = None,
     ) -> PendingReviewComment:
+        self.require_full_review()
         return await self._state.pending_review.queue_inline_comment(
             body,
             path=path,
@@ -1071,6 +1234,7 @@ class PRStore:
         body: str = "",
     ) -> None:
         """Submit a top-level review and refresh local review state."""
+        self.require_full_review()
         await self._state.pending_review.submit(
             event,
             body,
@@ -1105,6 +1269,82 @@ class PRStore:
         )
         if self._state.pr is not None:
             self._apply_discussion_state(self._state.pr)
+
+    async def queue_pending_reply(
+        self,
+        comment: PRComment,
+        body: str,
+        *,
+        draft_index: int | None = None,
+    ) -> PendingReviewComment:
+        """Save a reply for publication with the pending review."""
+        self.require_full_review()
+        root_id = comment.in_reply_to_id or comment.id
+        thread = self.get_review_thread(root_id)
+        if thread is None or not thread.id or thread.root_comment is None:
+            raise ValueError("Reply thread is unavailable; refresh the PR")
+        root = thread.root_comment
+        if self.pending_review_comment_index_for(root) is not None:
+            raise ValueError(
+                "Submit the pending review before replying to its comments"
+            )
+        draft = PendingReviewComment(
+            body=body,
+            path=thread.path or root.path,
+            line=0
+            if thread.is_file_level
+            else thread.anchor_line or root.anchor_line or 0,
+            side="LEFT" if thread.anchor_side == "old" else "RIGHT",
+            subject_type="file" if thread.is_file_level else "line",
+            reply_to_id=root_id,
+            reply_thread_id=thread.id,
+        )
+        return await self._state.pending_review.queue_reply_comment(
+            draft,
+            draft_index=draft_index,
+            adapter=self._service,
+            pr_number=self.pr_number,
+            head_sha=self._pending_review_head_sha,
+            on_sync=self._remember_pending_review_sync_review,
+        )
+
+    async def reply_to_review_comment(
+        self,
+        comment: PRComment,
+        body: str,
+        *,
+        draft_index: int | None = None,
+    ) -> PRComment:
+        """Reply to the root of a submitted review thread."""
+        self.require_full_review()
+        if self._state.pr is None:
+            raise ValueError("PR not loaded")
+        normalized = normalize_issue_comment_body(body)
+        root_comment_id = comment.in_reply_to_id or comment.id
+        if root_comment_id <= 0:
+            raise ValueError("Review comment ID is unavailable")
+        if self.pending_review_comment_index_for(comment) is not None:
+            raise ValueError("Submit the pending review before replying")
+
+        draft = None
+        if draft_index is not None:
+            drafts = self._state.pending_review.comments
+            if not 0 <= draft_index < len(drafts):
+                raise ValueError("Selected reply draft no longer exists")
+            draft = drafts[draft_index]
+            if draft.reply_to_id != root_comment_id:
+                raise ValueError("Selected reply draft no longer exists")
+        reply = await self._service.create_review_comment_reply(
+            self.pr_number,
+            root_comment_id,
+            normalized,
+        )
+        self._remember_submitted_comment(reply)
+        current_index = self.review_annotations().index_for_comment(draft)
+        if current_index is not None:
+            await self.remove_pending_review_comment_at(current_index)
+        self._post_discussion_detail_messages()
+        return reply
 
     async def update_review_comment(
         self,
@@ -1155,7 +1395,8 @@ class PRStore:
     async def refresh_review_data(self) -> None:
         """Refresh comments, reviews, and review threads without reloading file diffs."""
         await self._load_pr_data()
-        sync_file_comments(self._state.files, self._state.comments_by_file)
+        if self._state.scope.kind == "all":
+            sync_file_comments(self._state.files, self._state.comments_by_file)
 
     def get_file_comments(self, filename: str) -> list[PRComment]:
         return self._state.comments_by_file.get(filename, [])
@@ -1198,13 +1439,15 @@ class PRStore:
             states = await self._service.get_pr_file_view_states(self.pr_number)
         except RuntimeError:
             return
-        self.viewed_files.apply_loaded(states)
+        if self._state.scope.kind == "all":
+            self.viewed_files.apply_loaded(states)
 
     async def set_file_viewed(self, filename: str, *, viewed: bool) -> None:
         """Sync viewed state to GitHub."""
         await self.viewed_files.set(filename, viewed=viewed)
 
     async def _persist_file_viewed(self, filename: str, viewed: bool) -> bool:
+        self.require_full_review()
         pr = self._state.pr
         if pr is None:
             return False
@@ -1256,7 +1499,7 @@ class ViewedFiles:
 
     async def set(self, filename: str, *, viewed: bool) -> None:
         """Publish a viewed state after GitHub confirms the write."""
-        if await self._persist(filename, viewed):
+        if await self._persist(filename, viewed) and self._state.scope.kind == "all":
             apply_file_view_state(
                 self._state.files,
                 self._state.files_by_filename,
@@ -1270,6 +1513,8 @@ class ViewedFiles:
         on_change: Callable[[str, FileViewedState], None] | None = None,
     ) -> bool:
         """Toggle locally and report whether a synchronization worker is needed."""
+        if self._state.scope.kind != "all" or self._state.scope_loading:
+            return False
         file = self._file(filename)
         if file is None:
             return False
@@ -1340,6 +1585,8 @@ class ViewedFiles:
                 self._pending.pop(filename, None)
 
     def _file(self, filename: str) -> PRFile | None:
+        if self._state.scope.kind != "all":
+            return None
         return next(
             (file for file in self._state.files if file.filename == filename), None
         )

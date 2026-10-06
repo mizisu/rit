@@ -4,18 +4,20 @@ import asyncio
 from itertools import pairwise
 from typing import TYPE_CHECKING, ClassVar, Literal
 
-from textual import getters, on
+from rich.text import Text
+from textual import events, getters, on
 from textual.app import ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import reactive
-from textual.widgets import Static
+from textual.widgets import Button, Static, Tree
 from textual.worker import Worker, WorkerState
 
 from rit.core.types import FileDiff
 from rit.state.models import LoadingState
+from rit.state.review_scope import ReviewScope
 from rit.state.store import PRStore
 from rit.ui.components.combined_diff import (
     COMBINED_DIFF_FILENAME,
@@ -24,6 +26,7 @@ from rit.ui.components.combined_diff import (
 )
 from rit.ui.components.files_render_session import FilesRenderSession
 from rit.ui.messages import Flash
+from rit.ui.screens.review_scope import ReviewScopePicker
 from rit.ui.widgets import DiffView, FileTree
 from rit.ui.widgets.resize_handle import ResizeHandle
 
@@ -62,7 +65,7 @@ class GhostHandle(Static):
     """
 
 
-class FileChanges(Horizontal):
+class FileChanges(Vertical):
     """File Changes tab with file tree and diff view."""
 
     DEFAULT_CSS = """
@@ -72,13 +75,31 @@ class FileChanges(Horizontal):
         layers: base overlay;
     }
     
-    GhostHandle {
-        layer: overlay;
+    #files-workspace { height: 1fr; layers: base overlay; }
+    #review-scope-bar { height: 3; padding: 1 0; background: $surface; }
+    #review-scope-controls { height: 1; }
+    #review-scope-label { width: 10; padding-left: 1; color: $text-muted; }
+    #review-scope-controls Button {
+        height: 1; min-width: 3; width: auto; border: none; padding: 0 1;
+        background: transparent; margin: 0;
     }
-    
-    FileTree, ResizeHandle, DiffView {
-        layer: base;
+    #review-scope-controls Button:focus { background: $primary 25%; text-style: bold; }
+    #review-scope-controls Button:hover { background: $primary 15%; }
+    #review-scope-controls #review-scope-open {
+        max-width: 45%; padding: 0 2; margin-right: 1;
+        background: $primary 12%; text-style: bold;
     }
+    #review-scope-index { width: auto; }
+    #review-scope-stats { width: auto; color: $text-muted; padding-right: 1; }
+    #review-scope-bar.-compact #review-scope-stats { display: none; }
+    #review-scope-detail {
+        width: 1fr; min-width: 0; height: 1; color: $text-muted;
+        padding: 0 1; text-wrap: nowrap; text-overflow: ellipsis;
+    }
+    #review-scope-detail.-error { color: $warning; }
+    #review-scope-empty { display: none; width: 1fr; height: 100%; content-align: center middle; }
+    GhostHandle { layer: overlay; }
+    FileTree, ResizeHandle, DiffView { layer: base; }
     """
 
     BINDINGS: ClassVar[list[Binding]] = [
@@ -123,18 +144,37 @@ class FileChanges(Horizontal):
         self._file_render_worker_active = False
         self._render_session = FilesRenderSession()
         self._combined_render_worker_active = False
+        self._displayed_file_revision = 0
+        self._scope_render_pending = False
+        self._restore_scope_focus = False
 
     def compose(self) -> ComposeResult:
-        yield FileTree(store=self.store, id="file-tree-sidebar")
-        yield ResizeHandle(id="resize-handle")
-        yield DiffView(store=self.store, id="diff-view-main")
-        yield GhostHandle(id="ghost-handle")
+        with Vertical(id="review-scope-bar"), Horizontal(id="review-scope-controls"):
+            yield Static("Changes", id="review-scope-label")
+            yield Button("All changes ▾", id="review-scope-open")
+            yield Button("‹", id="review-scope-prev", tooltip="Previous commit (,)")
+            yield Static("", id="review-scope-index")
+            yield Button("›", id="review-scope-next", tooltip="Next commit (.)")
+            yield Button("Reset", id="review-scope-all", tooltip="Back to All changes")
+            yield Button("Retry", id="review-scope-retry")
+            yield Static("", id="review-scope-detail", markup=False)
+            yield Static("", id="review-scope-stats", markup=False)
+        with Horizontal(id="files-workspace"):
+            yield FileTree(store=self.store, id="file-tree-sidebar")
+            yield ResizeHandle(id="resize-handle")
+            yield DiffView(store=self.store, id="diff-view-main")
+            yield Static("", id="review-scope-empty", markup=False)
+            yield GhostHandle(id="ghost-handle")
 
     def on_mount(self) -> None:
+        self.refresh_scope()
         self._apply_diff_settings_from_app()
         signal = getattr(self.app, "settings_changed_signal", None)
         if signal is not None:
             signal.subscribe(self, self._on_settings_changed)
+
+    def on_resize(self, event: events.Resize) -> None:
+        self.query_one("#review-scope-bar").set_class(event.size.width < 90, "-compact")
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if self.diff_view.has_focus_within and not self.diff_view.has_focus:
@@ -184,11 +224,16 @@ class FileChanges(Horizontal):
             and event.state == WorkerState.SUCCESS
             and self.workspace_ready
         ):
+            self._scope_render_pending = False
+            self.diff_view.display = True
+            self.query_one("#review-scope-empty").display = False
             self.post_message(self.WorkspaceReady())
+            self.call_after_refresh(self._restore_comparison_focus)
 
     def reset_workspace(self) -> None:
         """Discard render requests and cached documents for a superseded PR revision."""
-        self.workers.cancel_node(self)
+        self.workers.cancel_group(self, "default")
+        self.diff_view.reset_comparison()
         self._file_render_request_revision += 1
         self._queued_file_render = None
         self._file_render_worker_active = False
@@ -197,6 +242,11 @@ class FileChanges(Horizontal):
 
     @property
     def workspace_ready(self) -> bool:
+        if (
+            self.store.state.files_loading == LoadingState.LOADED
+            and not self.store.state.files
+        ):
+            return not self.store.state.scope_loading
         document = self._render_session.combined_document
         return (
             document is not None
@@ -205,9 +255,27 @@ class FileChanges(Horizontal):
         )
 
     def refresh_files(self) -> None:
+        state = self.store.state
+        if self._displayed_file_revision != state.file_revision:
+            self._displayed_file_revision = state.file_revision
+            self.reset_workspace()
+            self._scope_render_pending = bool(state.files)
+            self.diff_view.display = False
+            empty = self.query_one("#review-scope-empty", Static)
+            empty.display = True
+            empty.update(
+                "Preparing comparison…"
+                if state.files
+                else "No changes since your last review"
+                if state.scope.kind == "since"
+                else "No changes in this comparison"
+            )
+            if not state.files:
+                self.post_message(self.WorkspaceReady())
+                self.call_after_refresh(self._restore_comparison_focus)
+        self.refresh_scope()
         self.file_tree.refresh_files()
 
-        state = self.store.state
         if (
             state.files
             and not self._files_are_still_loading()
@@ -227,6 +295,157 @@ class FileChanges(Horizontal):
                 focus_diff=False,
                 sync_tree_selection=True,
             )
+
+    def refresh_scope(self) -> None:
+        """Keep the toolbar attached to the comparison actually on screen."""
+        state = self.store.state
+        scope = state.scope
+        self.diff_view.disabled = state.scope_loading
+        scope_button = self.query_one("#review-scope-open", Button)
+        label = f"{scope.label} ▾"
+        if str(scope_button.label) != label:
+            scope_button.label = label
+            scope_button.refresh(layout=True)
+        scope_button.tooltip = f"Change review scope (s)\n{scope.detail}"
+        scope_button.disabled = state.files_loading == LoadingState.LOADING
+        context = (
+            ""
+            if scope.kind == "all"
+            else f"Read-only · {scope.base_sha[:7]} → {scope.head_sha[:7]} · {scope.title}"
+        )
+        detail = (
+            "Loading comparison…"
+            if state.scope_loading
+            else state.scope_error or context
+        )
+        detail_widget = self.query_one("#review-scope-detail", Static)
+        detail_widget.update(detail)
+        detail_widget.tooltip = detail or None
+        detail_widget.set_class(bool(state.scope_error), "-error")
+        additions = sum(file.additions for file in state.files)
+        deletions = sum(file.deletions for file in state.files)
+        self.query_one("#review-scope-stats", Static).update(
+            Text.assemble(
+                f"{len(state.files)} files  ",
+                (f"+{additions}", "green"),
+                " ",
+                (f"−{deletions}", "red"),
+            )
+        )
+        self.query_one("#review-scope-all").display = scope.kind != "all"
+        self.query_one("#review-scope-retry").display = bool(state.scope_error)
+        history = state.review_history.loaded_value
+        for selector, direction in (
+            ("#review-scope-prev", -1),
+            ("#review-scope-next", 1),
+        ):
+            button = self.query_one(selector, Button)
+            button.display = scope.kind == "commit"
+            try:
+                adjacent = history.adjacent(scope, direction) if history else None
+            except ValueError:
+                adjacent = None
+            button.disabled = adjacent is None
+        position = ""
+        if history and scope.kind == "commit":
+            for index, commit in enumerate(history.commits):
+                if commit.sha == scope.head_sha:
+                    position = f"{index + 1}/{len(history.commits)}"
+                    break
+        self.query_one("#review-scope-index", Static).update(position)
+
+    def open_review_scope(self) -> None:
+        if not self._can_change_scope():
+            return
+        self._restore_scope_focus = self.diff_view.has_focus
+        self.app.push_screen(
+            ReviewScopePicker(self.store, self.query_one("#review-scope-open").region),
+            self.select_review_scope,
+        )
+
+    def _can_change_scope(self) -> bool:
+        if (
+            self.diff_view.inline_comment_target() is not None
+            or self.diff_view.file_comment_target() is not None
+        ):
+            self.notify(
+                "Save or cancel the comment editor before changing scope",
+                severity="warning",
+            )
+            return False
+        if self.store.state.files_loading == LoadingState.LOADING:
+            self.notify("Wait for the initial file load to finish", severity="warning")
+            return False
+        return True
+
+    def select_review_scope(self, scope: ReviewScope | None) -> None:
+        if scope is None or not self._can_change_scope():
+            self._restore_scope_focus = False
+            return
+        self._restore_scope_focus |= self.diff_view.has_focus
+        self.run_worker(self._load_scope(scope), group="review-scope", exclusive=True)
+
+    async def _load_scope(self, scope: ReviewScope) -> None:
+        changed = await self.store.select_review_scope(scope)
+        if changed:
+            self.refresh_files()
+        self.refresh_scope()
+        if not changed:
+            self.call_after_refresh(self._restore_comparison_focus)
+        if self.store.state.scope_error:
+            self.notify(self.store.state.scope_error, severity="warning", markup=False)
+
+    def _restore_comparison_focus(self) -> None:
+        if not self._restore_scope_focus:
+            return
+        self._restore_scope_focus = False
+        target = (
+            self.diff_view
+            if self.store.state.files
+            else self.query_one("#review-scope-open")
+        )
+        if (
+            self.app.screen is self.screen
+            and self.screen.focused is None
+            and target in self.screen.focus_chain
+        ):
+            target.focus()
+
+    def step_commit(self, direction: int) -> None:
+        history = self.store.state.review_history.loaded_value
+        if history is None:
+            return
+        try:
+            scope = history.adjacent(self.store.state.scope, direction)
+        except ValueError as error:
+            self.notify(str(error), severity="warning", markup=False)
+            return
+        self.select_review_scope(scope)
+
+    @on(Button.Pressed, "#review-scope-open")
+    def _open_scope(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.open_review_scope()
+
+    @on(Button.Pressed, "#review-scope-all")
+    def _all_changes(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.select_review_scope(ReviewScope())
+
+    @on(Button.Pressed, "#review-scope-retry")
+    def _retry_comparison(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.select_review_scope(self.store.state.requested_scope)
+
+    @on(Button.Pressed, "#review-scope-prev")
+    def _previous_commit(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.step_commit(-1)
+
+    @on(Button.Pressed, "#review-scope-next")
+    def _next_commit(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.step_commit(1)
 
     def select_next_file(self) -> None:
         self._select_relative_file(1)
@@ -862,9 +1081,37 @@ class FileChanges(Horizontal):
             self._update_sidebar_width(new_width)
             self._drag_delta = 0
 
-    def show_file_tree(self) -> None:
+    def move_focus(self, direction: Literal["left", "right"]) -> bool:
+        """Request horizontal focus; False means there is no internal target."""
+        if not self.is_mounted:
+            return False
+        if self.file_tree.has_focus_within:
+            return direction == "right" and self.diff_view.move_focus(direction)
+        if self.diff_view.has_focus_within:
+            if self.diff_view.move_focus(direction):
+                return True
+            if direction == "right" or not self.file_tree.display:
+                return False
+        elif direction == "right" or not self.file_tree.display:
+            return self.diff_view.move_focus(direction)
+        self.focus_file_tree()
+        return True
+
+    def restore_focus(self) -> None:
+        """Prefer the diff without disturbing focus already in the file content."""
+        if self.is_mounted and not (
+            self.file_tree.has_focus_within or self.diff_view.has_focus_within
+        ):
+            self.diff_view.focus()
+
+    def focus_file_tree(self) -> None:
+        """Reveal the tree and focus the file at the diff cursor."""
+        if not self.is_mounted:
+            return
         self.file_tree.display = True
         self.resize_handle.display = True
+        self.sync_file_tree_to_diff_cursor()
+        self.file_tree.query_one("#file-tree", Tree).focus()
 
     def toggle_file_tree(self) -> None:
         if self.file_tree.display:
@@ -872,8 +1119,7 @@ class FileChanges(Horizontal):
             self.resize_handle.display = False
             self.diff_view.focus()
         else:
-            self.show_file_tree()
-            self.file_tree.focus()
+            self.focus_file_tree()
 
     def action_prev_file(self) -> None:
         self.select_prev_file()

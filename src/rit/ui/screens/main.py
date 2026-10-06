@@ -22,6 +22,7 @@ from rit.state.models import (
     PRTeam,
     PRUser,
 )
+from rit.state.review_scope import ReviewScope
 from rit.state.store import GitHubError, PRStore, UnsupportedInlineCommentTarget
 from rit.ui.components.file_changes import FileChanges
 from rit.ui.components.pr_info import PRInfo
@@ -171,6 +172,9 @@ _FILES_BINDINGS = [
     Binding("N", "prev_hunk", "", group=_FILE_GROUP, show=False),
     Binding("r", "toggle_resolve_file", "Resolve", group=_COMMENT_GROUP),
     Binding("m", "toggle_file_viewed", "Mark Viewed", group=_FILE_GROUP),
+    Binding("s", "review_scope", "Scope", group=_FILE_GROUP),
+    Binding("comma", "previous_commit", "Previous Commit", show=False),
+    Binding("full_stop", "next_commit", "Next Commit", show=False),
 ]
 
 
@@ -336,7 +340,10 @@ class MainScreen(Screen[None]):
         self.header.update_from_pr(event.pr)
         self.pr_info.refresh_pr_data()
         refs = (event.pr.base_sha, event.pr.head_sha)
-        if not all(refs) or refs == self._pr_overview_refs:
+        if not all(refs):
+            return
+        if refs == self._pr_overview_refs:
+            self._refresh_merge_status()
             return
         if all(self._pr_overview_refs):
             self._invalidate_files_workspace()
@@ -365,6 +372,20 @@ class MainScreen(Screen[None]):
         if self.file_changes.workspace_ready:
             self._files_revision_changed = False
             self.refresh_bindings()
+
+    @on(PRStore.ScopeUpdated)
+    def on_scope_updated(self) -> None:
+        self.file_changes.refresh_scope()
+        self.refresh_bindings()
+
+    def action_review_scope(self) -> None:
+        self.file_changes.open_review_scope()
+
+    def action_previous_commit(self) -> None:
+        self.file_changes.step_commit(-1)
+
+    def action_next_commit(self) -> None:
+        self.file_changes.step_commit(1)
 
     @on(PRStore.OverviewUpdated)
     def on_overview_updated(self) -> None:
@@ -415,6 +436,12 @@ class MainScreen(Screen[None]):
         if (metadata.base_sha, metadata.head_sha) != refs:
             self.notify(
                 "PR changed; refresh the changed-file summary", severity="warning"
+            )
+            return
+        if self.store.state.scope.kind != "all":
+            self.switch_tab(1)
+            self.run_worker(
+                self._restore_all_changes(event.filename), name="restore-all-changes"
             )
             return
         self._pending_overview_file = (event.filename, refs)
@@ -633,6 +660,12 @@ class MainScreen(Screen[None]):
 
         filename, line, side = location
         self.switch_tab(1)
+        if self.store.state.scope.kind != "all":
+            self.run_worker(
+                self._restore_all_changes(filename, line, side),
+                name="restore-all-changes",
+            )
+            return
         if not self.file_changes.jump_to_file_location(
             filename,
             line,
@@ -647,6 +680,28 @@ class MainScreen(Screen[None]):
                 )
             )
 
+    async def _restore_all_changes(
+        self,
+        filename: str,
+        line: int | None = None,
+        side: Literal["LEFT", "RIGHT"] = "RIGHT",
+    ) -> None:
+        if not self.file_changes._can_change_scope():
+            return
+        if not await self.store.select_review_scope(ReviewScope()):
+            self.notify(
+                self.store.state.scope_error or "Could not load All changes",
+                severity="warning",
+            )
+            return
+        self.file_changes.refresh_files()
+        if line is None:
+            self.file_changes.open_file(filename, focus_diff=True)
+        else:
+            self.file_changes.jump_to_file_location(
+                filename, line, side, focus_diff=True
+            )
+
     def action_comment(self) -> None:
         if self.store.state.pr is None:
             self.post_message(Flash("PR not loaded yet", style="warning", duration=2.0))
@@ -658,8 +713,18 @@ class MainScreen(Screen[None]):
 
         if self.current_tab != 1:
             return
+        if not self.store.review_writable:
+            self.notify("Switch to All changes to comment", severity="warning")
+            return
 
         diff_view = self.file_changes.diff_view
+        if diff_view.selected_reply_comment() is not None:
+            self.run_worker(
+                diff_view.open_reply_comment_editor(),
+                exclusive=False,
+                name="_open_reply_comment_editor",
+            )
+            return
         if diff_view.selected_file_header_path() is not None:
             self.run_worker(
                 diff_view.open_file_comment_editor(),
@@ -674,8 +739,54 @@ class MainScreen(Screen[None]):
             name="_open_inline_comment_editor",
         )
 
+    def action_edit_comment(self) -> None:
+        if self.current_tab != 1 or self.store.state.pr is None:
+            return
+        if not self.store.review_writable:
+            self.notify("Switch to All changes to edit comments", severity="warning")
+            return
+        diff_view = self.file_changes.diff_view
+        if (
+            diff_view.active_pending_draft_index() is None
+            and diff_view.active_review_comment() is None
+        ):
+            self.post_message(
+                Flash(
+                    "Select an individual comment to edit",
+                    style="warning",
+                    duration=2.0,
+                )
+            )
+            return
+        draft_index = diff_view.active_pending_draft_index()
+        if (
+            draft_index is not None
+            and self.store.state.pending_review.comments[draft_index].is_reply
+        ):
+            self.run_worker(
+                diff_view.open_reply_comment_editor(draft_index=draft_index),
+                exclusive=False,
+                name="_open_edit_comment_editor",
+            )
+            return
+        editor = (
+            diff_view.open_file_comment_editor
+            if diff_view.selected_file_header_path() is not None
+            else diff_view.open_inline_comment_editor
+        )
+        self.run_worker(
+            editor(edit=True),
+            exclusive=False,
+            name="_open_edit_comment_editor",
+        )
+
     def action_review(self) -> None:
         if self.current_tab not in {0, 1} or self.store.state.pr is None:
+            return
+        if not self.store.review_writable:
+            self.notify(
+                "Switch to All changes to submit a PR review", severity="warning"
+            )
             return
         self.app.push_screen(
             ReviewSubmitScreen(
@@ -1608,8 +1719,20 @@ class MainScreen(Screen[None]):
             return False
         if (
             self.current_tab == 1
-            and self._files_revision_changed
-            and action in {"comment", "delete_comment", "review", "toggle_file_viewed"}
+            and (
+                self._files_revision_changed
+                or self.file_changes._scope_render_pending
+                or not self.store.review_writable
+            )
+            and action
+            in {
+                "comment",
+                "edit_comment",
+                "delete_comment",
+                "review",
+                "toggle_file_viewed",
+                "toggle_resolve_file",
+            }
         ):
             return False
         if (
