@@ -153,7 +153,7 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
             if self._pending_comments_count:
                 with Vertical(id="review-submit-pending"):
                     yield Static(
-                        f"Pending inline comments ({self._pending_comments_count})",
+                        f"Pending comments ({self._pending_comments_count})",
                         classes="review-submit-pending-title",
                     )
                     with VerticalScroll(id="review-submit-pending-list"):
@@ -306,6 +306,8 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
         self._move_focus(-1)
 
     def _pending_comment_meta(self, comment: PendingReviewComment) -> str:
+        if comment.is_reply:
+            return f"{comment.path} • reply to #{comment.reply_to_id}"
         if comment.is_file_level:
             return f"{comment.path} • entire file"
         return f"{comment.path}:{comment.line} • {comment.anchor_side} side"

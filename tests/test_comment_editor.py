@@ -5,6 +5,7 @@ from textual.widgets import Button, Footer, OptionList, TextArea
 from rit.app import RitApp
 from rit.core.diff import parse_patch
 from rit.state.store import PRStore
+from rit.ui.screens.comment_submit import CommentSubmitScreen
 from rit.ui.screens.main import MainScreen
 from rit.ui.widgets.comment_editor import EditorKind, InlineCommentEditor
 
@@ -157,11 +158,15 @@ async def test_comment_editor_owns_tab_while_open(
         assert await diff_view.open_inline_comment_editor() is True
         await pilot.pause()
 
+        assert isinstance(app.screen, CommentSubmitScreen)
+        assert app.screen.styles.background.a == 0
+        assert app.screen.query_one("#comment-submit-dialog").styles.background.a == 1
+        assert screen in app._background_screens
         focus_targets = (
-            diff_view.query_one("#comment-editor-queue", Button),
-            diff_view.query_one("#comment-editor-post", Button),
-            diff_view.query_one("#comment-editor-cancel", Button),
-            diff_view.query_one("#comment-editor-body", TextArea),
+            app.screen.query_one("#comment-editor-queue", Button),
+            app.screen.query_one("#comment-editor-post", Button),
+            app.screen.query_one("#comment-editor-cancel", Button),
+            app.screen.query_one("#comment-editor-body", TextArea),
         )
         for target in focus_targets:
             await pilot.press("tab")

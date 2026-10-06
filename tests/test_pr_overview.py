@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -381,6 +382,7 @@ async def test_sidebar_loads_once_without_files_messages_or_workspace_changes(
     calls: list[str] = []
     messages = []
     store.set_message_sink(messages.append)
+    monkeypatch.setattr(store, "load_pr_merge_status", AsyncMock())
 
     async def checks(head: str) -> PRChecksSnapshot:
         calls.append("checks")
@@ -410,6 +412,8 @@ async def test_sidebar_snapshots_must_match_the_requested_revision(
     store = PRStore(pr_number=1)
     store.state.pr = PR(number=1, base_sha="base", head_sha="head")
 
+    monkeypatch.setattr(store, "load_pr_merge_status", AsyncMock())
+
     async def checks(_head: str) -> PRChecksSnapshot:
         return PRChecksSnapshot("other", None)
 
@@ -432,6 +436,7 @@ async def test_superseded_sidebar_responses_and_failures_are_isolated(
 ) -> None:
     store = PRStore(pr_number=1)
     store.state.pr = PR(number=1, base_sha="base", head_sha="old")
+    monkeypatch.setattr(store, "load_pr_merge_status", AsyncMock())
     started = asyncio.Event()
     release = asyncio.Event()
 

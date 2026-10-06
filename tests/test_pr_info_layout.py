@@ -34,7 +34,7 @@ ROOT = Path(__file__).parents[1]
 @pytest.mark.asyncio
 async def test_pr_info_groups_main_and_sidebar_in_centered_layout() -> None:
     store = PRStore()
-    pr = PR(number=1, title="Review navigation")
+    pr = PR(number=1, title="Review navigation", state="MERGED")
     store.state.pr = pr
 
     class TestApp(App[None]):
@@ -54,13 +54,9 @@ async def test_pr_info_groups_main_and_sidebar_in_centered_layout() -> None:
 
         title_row = app.query_one("#pr-title-row")
         title = app.query_one("#pr-title", Static)
-        status = app.query_one("#pr-status", Static)
         assert title.parent is title_row
-        assert status.parent is title_row
-        assert status.region.y == title.region.y
         assert title.region.width == cell_len("Review navigation #1")
-        assert status.region.x == title.region.right + 2
-        assert "Open" in str(status.content)
+        assert not app.query("#pr-status")
         assert not app.query("#branch-info")
         assert not app.query("#copy-branch")
 
@@ -69,7 +65,8 @@ async def test_pr_info_groups_main_and_sidebar_in_centered_layout() -> None:
         await pilot.pause()
         assert title.region.width == cell_len(f"{pr.title} #1")
         rendered = app.screen._compositor.render_strips()[title.region.y].text
-        assert f"{pr.title} #1  ◎ Open" in rendered
+        assert f"{pr.title} #1" in rendered
+        assert "Merged" not in rendered
 
         pr.title = "Review navigation " * 12
         app.query_one(PRInfo).refresh_summary()
@@ -77,8 +74,7 @@ async def test_pr_info_groups_main_and_sidebar_in_centered_layout() -> None:
         await pilot.pause()
         assert title.region.height > 1
         assert title_row.region.height == title.region.height
-        assert status.region.y == title.region.y
-        assert status.region.right <= title_row.content_region.right
+        assert title.region.right <= title_row.content_region.right
 
 
 @pytest.mark.asyncio
@@ -332,34 +328,6 @@ def test_pr_info_reuses_mounted_timeline_for_hot_navigation(
     assert calls == {"next_item", "prev_item", "next_comment", "prev_comment"}
 
 
-def test_pr_info_header_uses_shared_status_label_mapping(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    store = PRStore()
-    store.state.pr = PR(number=1, title="Add diff cache")
-    pr_info = PRInfo(store)
-    widgets = {
-        "#pr-title": _CaptureStatic(),
-        "#pr-status": _CaptureStatic(),
-        "#pr-stats": _CaptureStatic(),
-    }
-
-    def static_widget(_attr_name: str, selector: str) -> _CaptureStatic:
-        return widgets[selector]
-
-    monkeypatch.setattr(pr_info, "_static_widget", static_widget)
-    monkeypatch.setattr(
-        pr_info_module,
-        "_PR_STATUS_LABELS",
-        {"Open": "open-from-shared-map"},
-        raising=False,
-    )
-
-    pr_info._update_header()
-
-    assert widgets["#pr-status"].content == "open-from-shared-map"
-
-
 def test_pr_info_reuses_header_rendering_for_unchanged_inputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -375,7 +343,6 @@ def test_pr_info_reuses_header_rendering_for_unchanged_inputs(
     pr_info = PRInfo(store)
     widgets = {
         "#pr-title": _CaptureStatic(),
-        "#pr-status": _CaptureStatic(),
         "#pr-stats": _CaptureStatic(),
     }
 
@@ -389,7 +356,6 @@ def test_pr_info_reuses_header_rendering_for_unchanged_inputs(
 
     assert {selector: widget.update_count for selector, widget in widgets.items()} == {
         "#pr-title": 1,
-        "#pr-status": 1,
         "#pr-stats": 1,
     }
 

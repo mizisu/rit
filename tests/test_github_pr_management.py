@@ -507,6 +507,46 @@ async def test_create_review_comment_posts_one_standalone_rest_comment() -> None
 
 
 @pytest.mark.asyncio
+async def test_create_review_comment_reply_posts_to_root_comment() -> None:
+    service = CaptureGitHubService(
+        outputs=[
+            json.dumps(
+                {
+                    "id": 301,
+                    "node_id": "PRRC_reply",
+                    "body": "reply",
+                    "user": {"id": 123, "node_id": "U_author", "login": "alice"},
+                    "start_side": None,
+                    "start_line": None,
+                    "in_reply_to_id": 300,
+                    "pull_request_review_id": 92,
+                }
+            )
+        ]
+    )
+
+    reply = await service.create_review_comment_reply(123, 300, "reply")
+
+    assert reply.id == 301
+    assert reply.node_id == "PRRC_reply"
+    assert reply.user is not None
+    assert reply.user.node_id == "U_author"
+    assert reply.start_side == ""
+    assert reply.in_reply_to_id == 300
+    assert reply.pull_request_review_id == 92
+    assert len(service.calls) == 1
+    assert service.calls[0][0] == [
+        "api",
+        "--method",
+        "POST",
+        "/repos/owner/repo/pulls/123/comments/300/replies",
+        "--input",
+        "-",
+    ]
+    assert json.loads(service.calls[0][1] or "{}") == {"body": "reply"}
+
+
+@pytest.mark.asyncio
 async def test_list_review_comments_reads_graphql_threads() -> None:
     service = CaptureGitHubService(
         outputs=[

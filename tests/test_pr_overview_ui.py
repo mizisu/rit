@@ -78,7 +78,7 @@ async def test_large_file_summary_reveals_only_requested_rows_and_reuses_options
         assert len(list(app.query("*"))) < 100
         assert options.virtual_size.height == options.option_count
         original = [options.get_option_at_index(index) for index in range(5)]
-        info.focus_main()
+        info.move_focus("left")
         await pilot.pause()
         idle_border = info.query_one("#sidebar").styles.border.left[1]
         options.focus()
@@ -123,10 +123,15 @@ async def test_large_file_summary_reveals_only_requested_rows_and_reuses_options
         )
         revealed = options.get_option_at_index(20)
         options.highlighted = 20
-        info.focus_main()
-        info.focus_sidebar()
-        await pilot.pause()
-        assert options.has_focus and options.highlighted == 20
+        assert info.move_focus("left")
+        await wait_until(
+            lambda: info.query_one("#main-scroll", VerticalScroll).has_focus_within
+        )
+        assert not info.move_focus("left")
+        assert info.move_focus("right")
+        await wait_until(lambda: app.focused is options)
+        assert not info.move_focus("right")
+        assert app.focused is options and options.highlighted == 20
         assert options.get_option_at_index(20) is revealed
 
         group.query_one(Button).press()
@@ -147,7 +152,7 @@ async def test_large_file_summary_reveals_only_requested_rows_and_reuses_options
         )
         info.refresh_overview()
         for focused in (False, True):
-            checks.focus() if focused else info.focus_main()
+            checks.focus() if focused else info.move_focus("left")
             await pilot.pause()
             segments = [
                 segment

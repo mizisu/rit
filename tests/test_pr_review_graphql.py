@@ -173,6 +173,143 @@ async def test_create_pending_review_adds_file_level_thread_to_pending_review() 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("file_level", [False, True])
+async def test_create_pending_review_attaches_reply_to_existing_thread(
+    file_level: bool,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        assert args == ["api", "graphql", "--input", "-"]
+        assert input_text is not None
+        payload = json.loads(input_text)
+        calls.append(payload)
+        if len(calls) == 1:
+            return json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "id": "PR_node",
+                                "reviews": {"nodes": []},
+                            }
+                        }
+                    }
+                }
+            )
+        if len(calls) == 2:
+            return json.dumps(
+                {
+                    "data": {
+                        "addPullRequestReview": {
+                            "pullRequestReview": {
+                                "nodeId": "review_node",
+                                "databaseId": 80,
+                                "state": "PENDING",
+                                "comments": {"nodes": []},
+                            }
+                        }
+                    }
+                }
+            )
+        assert "addPullRequestReviewThreadReply" in payload["query"]
+        return json.dumps(
+            {
+                "data": {
+                    "addPullRequestReviewThreadReply": {
+                        "comment": {
+                            "databaseId": 601,
+                            "body": "reply",
+                            "replyTo": {"databaseId": 501},
+                            "pullRequestReview": {"databaseId": 80},
+                        }
+                    }
+                }
+            }
+        )
+
+    review = await create_pending_review(
+        "owner",
+        "repo",
+        123,
+        comments=[
+            PendingReviewComment(body="new thread", path="other.py", line=1),
+            PendingReviewComment(
+                body="reply",
+                path="test.py",
+                line=0 if file_level else 7,
+                subject_type="file" if file_level else "line",
+                reply_to_id=501,
+                reply_thread_id="thread-501",
+            ),
+        ],
+        runner=runner,
+    )
+    assert review.state == ReviewState.PENDING
+    assert len(calls) == 3
+    assert calls[1]["variables"]["input"]["threads"] == [
+        {"body": "new thread", "path": "other.py", "line": 1, "side": "RIGHT"},
+    ]
+    assert "event" not in calls[1]["variables"]["input"]
+    assert calls[2]["variables"]["input"] == {
+        "pullRequestReviewId": "review_node",
+        "pullRequestReviewThreadId": "thread-501",
+        "body": "reply",
+    }
+
+
+@pytest.mark.asyncio
+async def test_list_review_comments_preserves_reply_thread_identity() -> None:
+    async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        return json.dumps(
+            {
+                "data": {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "nodes": [
+                                    {
+                                        "id": "thread-501",
+                                        "path": "test.py",
+                                        "line": 7,
+                                        "diffSide": "RIGHT",
+                                        "comments": {
+                                            "nodes": [
+                                                {
+                                                    "databaseId": 501,
+                                                    "pullRequestReview": {
+                                                        "databaseId": 70
+                                                    },
+                                                },
+                                                {
+                                                    "databaseId": 601,
+                                                    "body": "draft",
+                                                    "replyTo": {"databaseId": 501},
+                                                    "pullRequestReview": {
+                                                        "databaseId": 80
+                                                    },
+                                                },
+                                            ]
+                                        },
+                                    }
+                                ]
+                            }
+                        }
+                    }
+                }
+            }
+        )
+
+    comments = await list_review_comments(
+        "owner", "repo", 123, review_id=80, runner=runner
+    )
+    assert len(comments) == 1
+    assert comments[0].in_reply_to_id == 501
+    assert comments[0].review_thread_id == "thread-501"
+    assert comments[0].line == 7
+
+
+@pytest.mark.asyncio
 async def test_list_review_comments_prefers_comment_range_over_thread_range() -> None:
     async def runner(args: list[str], *, input_text: str | None = None) -> str:
         assert args == ["api", "graphql", "--input", "-"]

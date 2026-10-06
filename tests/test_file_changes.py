@@ -2,7 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 from rich.console import RenderableType
@@ -22,6 +22,74 @@ from rit.ui.components.file_changes import FileChanges
 from rit.ui.widgets.diff_render import _create_file_header_widget
 from rit.ui.widgets.diff_view import DiffView
 from tests.conftest import wait_until
+
+
+async def test_focus_navigation_follows_visible_file_content() -> None:
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(PRStore())
+
+    layouts: list[tuple[Literal["split", "unified"], DiffLine, tuple[str, ...]]] = [
+        ("split", DiffLine(1, 1, "same", "same"), ("old", "new")),
+        ("split", DiffLine(None, 1, new_content="added", is_added=True), ("new",)),
+        ("split", DiffLine(1, None, old_content="removed", is_deleted=True), ("old",)),
+        ("unified", DiffLine(1, 1, "same", "same"), ("diff",)),
+    ]
+    app = TestApp()
+    async with app.run_test(size=(160, 40)) as pilot:
+        files = app.query_one(FileChanges)
+        view = files.diff_view
+
+        def focused_target() -> str | None:
+            if files.file_tree.has_focus_within:
+                return "tree"
+            if app.focused is view:
+                return view.active_pane if view.split else "diff"
+            return None
+
+        for mode, line, panes in layouts:
+            view.mode = mode
+            await view.show_diff(
+                "sample.py",
+                FileDiff(
+                    filename="sample.py",
+                    hunks=[DiffHunk(1, 1, 1, 1, lines=[line])],
+                ),
+            )
+            for tree_visible in (True, False):
+                files.focus_file_tree()
+                await wait_until(lambda: focused_target() == "tree")
+                if not tree_visible:
+                    assert files.move_focus("right")
+                    await wait_until(
+                        lambda expected=panes[0]: focused_target() == expected
+                    )
+                    files.toggle_file_tree()
+                    assert not files.file_tree.display
+                targets = (("tree",) if tree_visible else ()) + panes
+                assert focused_target() == targets[0]
+                assert not files.move_focus("left")
+                for target in targets[1:]:
+                    assert files.move_focus("right")
+                    await wait_until(
+                        lambda expected=target: focused_target() == expected
+                    )
+                assert not files.move_focus("right")
+                for target in reversed(targets[:-1]):
+                    assert files.move_focus("left")
+                    await wait_until(
+                        lambda expected=target: focused_target() == expected
+                    )
+                assert not files.move_focus("left")
+                files.restore_focus()
+                await pilot.pause()
+                assert focused_target() == targets[0]
+
+        files.toggle_file_tree()
+        await wait_until(lambda: focused_target() == "tree")
+        app.screen.set_focus(None)
+        files.restore_focus()
+        await wait_until(lambda: app.focused is view)
 
 
 class FakeRawDiffService:
@@ -1874,11 +1942,16 @@ async def test_viewed_advance_top_aligns_virtual_files_through_folding(
         assert view.scroll_y == view._hunk_header_top_offsets[2]
         assert view.selected_file_header_path() == "three.py"
         changes.open_file("three.py", focus_diff=True)
-        await wait_until(lambda: not view._fold_worker_active and not view._virt.render_pending)
+        await wait_until(
+            lambda: not view._fold_worker_active and not view._virt.render_pending
+        )
         view.action_scroll_end()
         await wait_until(lambda: not view._virt.render_pending)
         await pilot.pause()
-        assert view._current_cursor_viewport_offset() == view.scrollable_content_region.height - 1
+        assert (
+            view._current_cursor_viewport_offset()
+            == view.scrollable_content_region.height - 1
+        )
         await view.show_diff("other.py", parse_patch(patch, "other.py"))
         assert not view._file_scroll_padding.display
 
@@ -2068,8 +2141,11 @@ async def test_open_file_focuses_current_diff_without_rerender() -> None:
             "one.py",
             store.state.file_diffs["one.py"],
         )
-        file_changes.file_tree.focus()
-        await pilot.pause()
+        store.state.selected_file = None
+        file_changes.focus_file_tree()
+        assert store.state.selected_file == "one.py"
+        assert file_changes.file_tree.selected_file == "one.py"
+        await wait_until(lambda: file_changes.file_tree.has_focus_within)
 
         calls: list[str] = []
 

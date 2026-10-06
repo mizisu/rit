@@ -21,6 +21,15 @@ FILE_PATCHES_REQUEST = ast.parse(
 ).body
 
 
+COMPARISON_REQUESTS = {
+    ast.dump(ast.parse(expression, mode="eval").body)
+    for expression in (
+        '["api", f"{endpoint}?per_page=1"]',
+        '["api", endpoint, "-H", "Accept: application/vnd.github.diff"]',
+    )
+}
+
+
 def test_rest_is_limited_to_standalone_comments_and_canonical_patches() -> None:
     violations: list[str] = []
     for path in SERVICES_DIR.glob("*.py"):
@@ -41,6 +50,11 @@ def test_rest_is_limited_to_standalone_comments_and_canonical_patches() -> None:
                 ast.dump(FILE_PATCHES_REQUEST),
             }:
                 continue
+            if (
+                path.name == "pr_comparison.py"
+                and ast.dump(node) in COMPARISON_REQUESTS
+            ):
+                continue
             violations.append(f"{path.name}:{node.lineno}")
 
     assert violations == []
@@ -52,5 +66,6 @@ def test_only_comment_and_canonical_diff_modules_contain_rest_paths() -> None:
     }
 
     assert modules_with_rest_paths == STANDALONE_REVIEW_COMMENT_MODULES | {
-        "pr_file_request.py"
+        "pr_file_request.py",
+        "pr_comparison.py",
     }
