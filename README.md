@@ -20,6 +20,19 @@ uv tool install --python 3.14 git+https://github.com/mizisu/rit.git
 gh auth login
 ```
 
+### Install the tmux navigation plugin
+
+- You can navigate tmux pane inside rit with ctrl+h/l
+- After load the configuration press prefix + shift+i
+
+   ```tmux
+   set -g @plugin 'mizisu/rit#tmux'
+   ```
+
+   ```sh
+   tmux source-file ~/.tmux.conf
+   ```
+
 ## Usage
 
 ```bash
@@ -27,4 +40,3 @@ rit 123
 rit owner/repo#123
 rit https://github.com/owner/repo/pull/123
 ```
-
