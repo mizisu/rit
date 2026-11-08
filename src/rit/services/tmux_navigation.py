@@ -8,7 +8,7 @@ from typing import Literal, Self
 
 
 class TmuxNavigation:
-    """Advertise this process to the optional tmux navigation plugin."""
+    """Coordinate pane navigation with tmux or Rex."""
 
     def __init__(self) -> None:
         self._pane = (
@@ -18,9 +18,11 @@ class TmuxNavigation:
         )
         self._identity: str | None = None
         self._restore: str | None = None
+        self._rex_session: str | None = None
 
     def __enter__(self) -> Self:
         if self._pane is None:
+            self.resume()
             return self
         if self._tmux("show-options", "-sqv", "@rit-navigation-enabled") != "1":
             return self
@@ -40,6 +42,13 @@ class TmuxNavigation:
 
     def resume(self) -> None:
         """Claim this pane while the application owns the terminal."""
+        self._rex_session = (
+            os.environ.get("REX_SESSION")
+            if not os.environ.get("TMUX")
+            and os.environ.get("REX_BLOCK")
+            and os.isatty(0)
+            else None
+        )
         if self._pane is None or self._identity is None or self._restore is not None:
             return
         option = self._tmux("show-options", "-pq", "-t", self._pane, "@rit_nav")
@@ -56,6 +65,7 @@ class TmuxNavigation:
 
     def pause(self) -> None:
         """Restore the pane state without overwriting a newer owner."""
+        self._rex_session = None
         if self._pane is None or self._restore is None:
             return
         restored = self._tmux(
@@ -70,10 +80,22 @@ class TmuxNavigation:
             self._restore = None
 
     def select_pane(self, direction: Literal["left", "right"]) -> None:
-        """Move outward while the application owns its tmux pane."""
+        """Move outward while the application owns its terminal pane."""
         if self._pane is not None and self._restore is not None:
             self._tmux(
                 "select-pane", "-t", self._pane, "-L" if direction == "left" else "-R"
+            )
+        elif self._rex_session:
+            _ = self._run(
+                "rex",
+                "--autostart=false",
+                "--timeout",
+                "1s",
+                "focus",
+                "--wrap",
+                "-s",
+                self._rex_session,
+                direction,
             )
 
     def _tmux(self, *args: str) -> str | None:

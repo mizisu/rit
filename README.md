@@ -40,3 +40,8 @@ rit 123
 rit owner/repo#123
 rit https://github.com/owner/repo/pull/123
 ```
+
+In Rex, rit disables the Kitty keyboard protocol by default to preserve Korean
+IME composition. Use `Ctrl+S` to save comments; `Ctrl+Enter` may be indistinguishable
+from Enter in this mode. An explicit `TEXTUAL_DISABLE_KITTY_KEY` setting overrides
+this default (`0` re-enables the protocol).

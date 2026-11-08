@@ -13,8 +13,13 @@ from typing import Literal
 from unittest.mock import Mock
 
 import pytest
-
 from rit.services.tmux_navigation import TmuxNavigation
+
+
+@pytest.fixture(autouse=True)
+def clear_rex_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("REX_SESSION", raising=False)
+    monkeypatch.delenv("REX_BLOCK", raising=False)
 
 
 class TmuxServer:
@@ -182,12 +187,18 @@ def test_navigation_selects_neighbors_of_its_own_pane(
     server.command("set-option", "-s", "@rit-navigation-enabled", "1")
     with TmuxNavigation() as navigation:
         navigation.select_pane("left")
-        assert server.command("display-message", "-p", "-t", window, "#{pane_id}") == left
+        assert (
+            server.command("display-message", "-p", "-t", window, "#{pane_id}") == left
+        )
         navigation.select_pane("right")
-        assert server.command("display-message", "-p", "-t", window, "#{pane_id}") == right
+        assert (
+            server.command("display-message", "-p", "-t", window, "#{pane_id}") == right
+        )
         navigation.pause()
         navigation.select_pane("left")
-        assert server.command("display-message", "-p", "-t", window, "#{pane_id}") == right
+        assert (
+            server.command("display-message", "-p", "-t", window, "#{pane_id}") == right
+        )
 
 
 @pytest.mark.parametrize(("direction", "flag"), [("left", "-L"), ("right", "-R")])
@@ -213,6 +224,74 @@ def test_navigation_selects_panes_only_while_active(
     command.reset_mock()
     navigation.select_pane(direction)
     command.assert_not_called()
+
+
+@pytest.mark.parametrize("direction", ["left", "right"])
+def test_rex_navigation_selects_panes_only_while_active(
+    monkeypatch: pytest.MonkeyPatch, direction: Literal["left", "right"]
+) -> None:
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setenv("REX_SESSION", "session:test")
+    monkeypatch.setenv("REX_BLOCK", "block:test")
+    monkeypatch.setattr(os, "isatty", lambda _: True)
+    command = Mock(return_value="")
+    monkeypatch.setattr(TmuxNavigation, "_run", staticmethod(command))
+    navigation = TmuxNavigation()
+    navigation.select_pane(direction)
+    command.assert_not_called()
+
+    with navigation:
+        navigation.select_pane(direction)
+        command.assert_called_once_with(
+            "rex",
+            "--autostart=false",
+            "--timeout",
+            "1s",
+            "focus",
+            "--wrap",
+            "-s",
+            "session:test",
+            direction,
+        )
+        command.reset_mock()
+        navigation.pause()
+        navigation.select_pane(direction)
+        command.assert_not_called()
+        navigation.resume()
+        navigation.select_pane(direction)
+        command.assert_called_once()
+
+    command.reset_mock()
+    navigation.select_pane(direction)
+    command.assert_not_called()
+
+
+@pytest.mark.parametrize("reason", ["no-session", "no-block", "no-tty", "tmux"])
+def test_rex_navigation_requires_a_direct_terminal(
+    monkeypatch: pytest.MonkeyPatch, reason: str
+) -> None:
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setenv("REX_SESSION", "session:test")
+    monkeypatch.setenv("REX_BLOCK", "block:test")
+    monkeypatch.setattr(os, "isatty", lambda _: reason != "no-tty")
+    if reason == "no-session":
+        monkeypatch.delenv("REX_SESSION")
+    elif reason == "no-block":
+        monkeypatch.delenv("REX_BLOCK")
+    elif reason == "tmux":
+        monkeypatch.setenv("TMUX", "test socket")
+        monkeypatch.setenv("TMUX_PANE", "%7")
+    command = Mock(return_value="")
+    monkeypatch.setattr(TmuxNavigation, "_run", staticmethod(command))
+    with TmuxNavigation() as navigation:
+        navigation.select_pane("left")
+        navigation.select_pane("right")
+    if reason == "tmux":
+        command.assert_called_once_with(
+            "tmux", "show-options", "-sqv", "@rit-navigation-enabled"
+        )
+    else:
+        command.assert_not_called()
 
 
 @pytest.mark.parametrize("phase", ["snapshot", "claim", "restore"])

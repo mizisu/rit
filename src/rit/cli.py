@@ -1,8 +1,11 @@
+import os
 import re
+from typing import TYPE_CHECKING
 
 import click
 
-from rit.app import RitApp
+if TYPE_CHECKING:
+    from rit.app import RitApp
 
 __all__ = (
     "main",
@@ -45,6 +48,24 @@ def parse_pr_reference(pr_ref: str) -> tuple[str | None, str | None, int]:
     )
 
 
+def create_app(*, owner: str | None, repo: str | None, pr_number: int) -> RitApp:
+    """Configure terminal input before Textual reads its environment."""
+    if os.environ.get("TERM_PROGRAM") == "rex":
+        # Rex's extended key reports interrupt Hangul IME composition.
+        os.environ.setdefault("TEXTUAL_DISABLE_KITTY_KEY", "1")
+
+        from typing import cast
+
+        from textual._ansi_sequences import ANSI_SEQUENCES_KEYS
+        from textual.keys import Keys
+
+        cast(dict[str, object], ANSI_SEQUENCES_KEYS)["\x1b[104;5u"] = (Keys.ControlH,)
+
+    from rit.app import RitApp
+
+    return RitApp(owner=owner, repo=repo, pr_number=pr_number)
+
+
 @click.command()
 @click.argument("pr_ref")
 @click.version_option()
@@ -58,7 +79,7 @@ def main(pr_ref: str) -> None:
     """
     owner, repo, pr_number = parse_pr_reference(pr_ref)
 
-    app = RitApp(owner=owner, repo=repo, pr_number=pr_number)
+    app = create_app(owner=owner, repo=repo, pr_number=pr_number)
     with app.tmux_navigation:
         app.run()
 
