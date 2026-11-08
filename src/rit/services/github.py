@@ -1,4 +1,5 @@
 import asyncio
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -17,6 +18,7 @@ from rit.services.graphql_mutations import (
 from rit.services.graphql_mutations import (
     unresolve_thread as unresolve_thread_via_graphql,
 )
+from rit.services.graphql_request import run_graphql
 from rit.services.local_git import LocalGitSource
 from rit.services.pr_checks import fetch_pr_checks
 from rit.services.pr_comparison import fetch_comparison_files, fetch_review_history
@@ -48,6 +50,7 @@ from rit.services.pr_graphql_response import (
     PullRequestNotFound,
     fetch_pull_request_all,
     fetch_pull_request_summary,
+    parse_pull_request_graphql_data,
 )
 from rit.services.pr_issue_comment_request import (
     create_issue_comment as create_issue_comment_via_graphql,
@@ -178,7 +181,7 @@ class GitHubService:
             self._pr_revision = (pr_number, pr.base_sha, pr.head_sha)
             return pr
 
-    async def get_pr_summary(self, pr_number: int) -> PR:
+    async def get_pr_summary(self, pr_number: int, *, pin_revision: bool = True) -> PR:
         """Fetch the summary needed for the header and sidebar."""
         repo = await self.get_repo()
         with translate_pull_request_graphql_errors():
@@ -188,8 +191,39 @@ class GitHubService:
                 pr_number=pr_number,
                 runner=self._run_gh,
             )
-            self._pr_revision = (pr_number, pr.base_sha, pr.head_sha)
+            if pin_revision:
+                self.accept_pr_revision(pr_number, (pr.base_sha, pr.head_sha))
             return pr
+
+    def accept_pr_revision(self, pr_number: int, refs: tuple[str, str]) -> None:
+        """Pin file requests to a published workspace revision."""
+        self._pr_revision = (pr_number, *refs)
+
+    async def get_pr_refs(self, pr_number: int) -> tuple[str, str]:
+        """Read current PR endpoints without changing the loaded revision."""
+        repo = await self.get_repo()
+        with translate_pull_request_graphql_errors():
+            response = await run_graphql(
+                """
+                query($owner: String!, $repo: String!, $number: Int!) {
+                  repository(owner: $owner, name: $repo) {
+                    pullRequest(number: $number) { baseRefOid headRefOid }
+                  }
+                }
+                """,
+                {"owner": repo.owner, "repo": repo.name, "number": pr_number},
+                runner=self._run_gh,
+            )
+            node = parse_pull_request_graphql_data(response, pr_number=pr_number)
+            base, head = node.get("baseRefOid"), node.get("headRefOid")
+            if not (
+                isinstance(base, str)
+                and re.fullmatch(r"[0-9a-f]{40}", base)
+                and isinstance(head, str)
+                and re.fullmatch(r"[0-9a-f]{40}", head)
+            ):
+                raise ValueError("GitHub returned invalid PR revisions")
+            return base, head
 
     async def get_pr_discussion(self, pr_number: int) -> PRDiscussion:
         """Fetch PR discussion and timeline activity."""
@@ -286,11 +320,12 @@ class GitHubService:
         pr_number: int,
         *,
         total_count: int | None = None,
+        expected_refs: tuple[str, str] | None = None,
     ) -> list[PRFile]:
         """Fetch metadata and canonical patches without downloading full files."""
         repo = await self.get_repo()
         revision = self._pr_revision
-        refs = (
+        refs = expected_refs or (
             (revision[1], revision[2])
             if revision is not None and revision[0] == pr_number and all(revision[1:])
             else None

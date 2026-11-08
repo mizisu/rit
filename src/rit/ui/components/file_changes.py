@@ -41,6 +41,7 @@ __all__ = (
 
 
 COMBINED_DIFF_LOAD_CONCURRENCY = 8
+PR_UPDATE_POLL_INTERVAL_SECONDS = 60
 
 
 def _diff_mode_setting(value: object) -> Literal["auto", "split", "unified"] | None:
@@ -91,7 +92,13 @@ class FileChanges(Vertical):
     }
     #review-scope-index { width: auto; }
     #review-scope-stats { width: auto; color: $text-muted; padding-right: 1; }
-    #review-scope-bar.-compact #review-scope-stats { display: none; }
+    #review-scope-bar.-compact #review-scope-stats,
+    #review-scope-bar.-compact #review-scope-label { display: none; }
+    #review-scope-bar.-compact #review-scope-open { max-width: 25%; padding: 0 1; }
+    #files-refresh-status {
+        width: auto; max-width: 30; height: 1; padding: 0 1;
+        color: $warning; text-wrap: nowrap; text-overflow: ellipsis;
+    }
     #review-scope-detail {
         width: 1fr; min-width: 0; height: 1; color: $text-muted;
         padding: 0 1; text-wrap: nowrap; text-overflow: ellipsis;
@@ -147,6 +154,10 @@ class FileChanges(Vertical):
         self._displayed_file_revision = 0
         self._scope_render_pending = False
         self._restore_scope_focus = False
+        self._probe_worker: Worker[None] | None = None
+        self._refresh_worker: Worker[None] | None = None
+        self._updates_active = False
+        self._refresh_notice: str | None = None
 
     def compose(self) -> ComposeResult:
         with Vertical(id="review-scope-bar"), Horizontal(id="review-scope-controls"):
@@ -159,6 +170,8 @@ class FileChanges(Vertical):
             yield Button("Retry", id="review-scope-retry")
             yield Static("", id="review-scope-detail", markup=False)
             yield Static("", id="review-scope-stats", markup=False)
+            yield Static("", id="files-refresh-status", markup=False)
+            yield Button("Refresh", id="files-refresh")
         with Horizontal(id="files-workspace"):
             yield FileTree(store=self.store, id="file-tree-sidebar")
             yield ResizeHandle(id="resize-handle")
@@ -167,7 +180,11 @@ class FileChanges(Vertical):
             yield GhostHandle(id="ghost-handle")
 
     def on_mount(self) -> None:
+        self._updates_timer = self.set_interval(
+            PR_UPDATE_POLL_INTERVAL_SECONDS, self.poll_updates, pause=True
+        )
         self.refresh_scope()
+        self.refresh_revision_status()
         self._apply_diff_settings_from_app()
         signal = getattr(self.app, "settings_changed_signal", None)
         if signal is not None:
@@ -182,9 +199,91 @@ class FileChanges(Vertical):
         return super().check_action(action, parameters)
 
     def on_unmount(self) -> None:
+        self.set_updates_active(False)
         signal = getattr(self.app, "settings_changed_signal", None)
         if signal is not None:
             signal.unsubscribe(self)
+
+    def set_updates_active(self, active: bool) -> None:
+        """Limit observation requests to the visible Files workspace."""
+        self._updates_active = active
+        if active:
+            self._updates_timer.resume()
+            self.poll_updates()
+        else:
+            self._updates_timer.pause()
+            self.store.discard_revision_probe()
+            if self._probe_worker is not None:
+                self._probe_worker.cancel()
+
+    def poll_updates(self) -> None:
+        if (
+            not self._updates_active
+            or self.app.screen is not self.screen
+            or (self._probe_worker is not None and not self._probe_worker.is_finished)
+        ):
+            return
+        self._probe_worker = self.run_worker(
+            self.store.check_for_updates(), group="revision-probe", exit_on_error=False
+        )
+
+    def refresh_revision_status(self) -> None:
+        """Show persistent update availability and errors in the existing toolbar."""
+        state = self.store.state
+        pr = state.pr
+        refs = (pr.base_sha, pr.head_sha) if pr is not None else None
+        observed = state.observed_refs
+        error = state.refresh_error or state.probe_error
+        if state.refresh_loading == LoadingState.LOADING:
+            status = "Refreshing..."
+        elif self._refresh_notice:
+            status = self._refresh_notice
+        elif state.refresh_error:
+            status = (
+                "Finish pending review first"
+                if any(
+                    not draft.is_file_level for draft in state.pending_review.comments
+                )
+                else "Refresh failed"
+            )
+        elif observed is not None and refs is not None and observed != refs:
+            status = "New commits available" if observed[1] != refs[1] else "PR updated"
+        else:
+            status = "Update check failed" if state.probe_error else ""
+        widget = self.query_one("#files-refresh-status", Static)
+        widget.update(status)
+        widget.display = bool(status)
+        widget.tooltip = self._refresh_notice or error or status or None
+        self.query_one("#files-refresh", Button).disabled = (
+            pr is None
+            or state.refresh_loading == LoadingState.LOADING
+            or state.scope_loading
+            or state.files_loading == LoadingState.LOADING
+        )
+
+    @on(Button.Pressed, "#files-refresh")
+    def _refresh_pressed(self, event: Button.Pressed) -> None:
+        event.stop()
+        self.refresh_workspace()
+
+    def refresh_workspace(self) -> None:
+        if self.diff_view._comment_editor_is_open():
+            self._refresh_notice = "Save or cancel your comment first"
+            self.refresh_revision_status()
+            return
+        if self._refresh_worker is not None and not self._refresh_worker.is_finished:
+            return
+        self._refresh_notice = None
+        self._restore_scope_focus = self.diff_view.has_focus
+        self._refresh_worker = self.run_worker(
+            self._refresh_workspace(), group="files-refresh", exit_on_error=False
+        )
+
+    async def _refresh_workspace(self) -> None:
+        changed = await self.store.refresh_files()
+        self.refresh_revision_status()
+        if not changed:
+            self._restore_scope_focus = False
 
     def watch_sidebar_width(self, width: int) -> None:
         try:
@@ -307,7 +406,11 @@ class FileChanges(Vertical):
             scope_button.label = label
             scope_button.refresh(layout=True)
         scope_button.tooltip = f"Change review scope (s)\n{scope.detail}"
-        scope_button.disabled = state.files_loading == LoadingState.LOADING
+        scope_button.disabled = (
+            state.files_loading == LoadingState.LOADING
+            or state.refresh_loading == LoadingState.LOADING
+        )
+        self.refresh_revision_status()
         context = (
             ""
             if scope.kind == "all"
@@ -364,10 +467,9 @@ class FileChanges(Vertical):
         )
 
     def _can_change_scope(self) -> bool:
-        if (
-            self.diff_view.inline_comment_target() is not None
-            or self.diff_view.file_comment_target() is not None
-        ):
+        if self.store.state.refresh_loading == LoadingState.LOADING:
+            return False
+        if self.diff_view._comment_editor_is_open():
             self.notify(
                 "Save or cancel the comment editor before changing scope",
                 severity="warning",

@@ -133,6 +133,10 @@ class PRStoreState:
     requested_scope: ReviewScope | None = None
     scope_loading: bool = False
     scope_error: str | None = None
+    observed_refs: tuple[str, str] | None = None
+    probe_error: str | None = None
+    refresh_loading: LoadingState = LoadingState.IDLE
+    refresh_error: str | None = None
     file_revision: int = 0
     review_history: OverviewResource[tuple[str, str], ReviewHistory] = field(
         default_factory=OverviewResource[tuple[str, str], ReviewHistory]
@@ -145,12 +149,16 @@ class PRStore:
     @dataclass
     class PRLoaded(Message):
         pr: PR
+        files_staged: bool = False
 
     @dataclass
     class FilesLoaded(Message):
         files: list[PRFile]
         loaded_count: int = 0
         total_count: int = 0
+
+    class RevisionUpdated(Message):
+        """Remote observation or manual refresh status changed."""
 
     class OverviewUpdated(Message):
         """Sidebar snapshot state changed, without diff work."""
@@ -217,6 +225,7 @@ class PRStore:
         self._message_sink: Callable[[Message], None] | None = None
         self._recent_discussion = RecentDiscussion()
         self._scope_request = 0
+        self._probe_request = 0
 
     @property
     def state(self) -> PRStoreState:
@@ -420,8 +429,133 @@ class PRStore:
             refresh=refresh,
         )
 
+    def discard_revision_probe(self) -> None:
+        """Invalidate observations from a hidden or superseded workspace."""
+        self._probe_request += 1
+
+    async def check_for_updates(self) -> None:
+        """Observe remote endpoints without changing the active review workspace."""
+        refs = self._overview_refs()
+        if not all(refs) or self._state.refresh_loading == LoadingState.LOADING:
+            return
+        self._probe_request += 1
+        request = self._probe_request
+        try:
+            observed = await self._service.get_pr_refs(self.pr_number)
+        except RuntimeError as error:
+            if request != self._probe_request or refs != self._overview_refs():
+                return
+            self._state.probe_error = str(error)
+        else:
+            if request != self._probe_request or refs != self._overview_refs():
+                return
+            self._state.observed_refs = observed
+            self._state.probe_error = None
+        self._post_message(self.RevisionUpdated())
+
+    async def refresh_files(self) -> bool:
+        """Stage a complete revision before replacing the usable workspace."""
+        state = self._state
+        if (
+            state.refresh_loading == LoadingState.LOADING
+            or state.scope_loading
+            or state.files_loading == LoadingState.LOADING
+            or state.pr is None
+        ):
+            return False
+        refs = self._overview_refs()
+        self.discard_revision_probe()
+        state.refresh_loading = LoadingState.LOADING
+        state.refresh_error = None
+        self._post_message(self.RevisionUpdated())
+        try:
+            summary = await self._service.get_pr_summary(
+                self.pr_number, pin_revision=False
+            )
+            candidate = (summary.base_sha, summary.head_sha)
+            if not all(candidate):
+                raise GitHubError("GitHub returned invalid PR revisions")
+            if refs != self._overview_refs():
+                raise GitHubError("PR changed while refreshing; try again")
+            if candidate == refs and state.files_loading == LoadingState.LOADED:
+                state.observed_refs = candidate
+                state.probe_error = None
+                return False
+            if candidate != refs and any(
+                not draft.is_file_level for draft in state.pending_review.comments
+            ):
+                raise GitHubError("Submit or remove line drafts before refreshing")
+            scope = state.scope
+            history = None
+            if scope.kind == "since":
+                history = await self._service.get_review_history(self.pr_number)
+                if (history.base_sha, history.head_sha) != candidate:
+                    raise GitHubError("PR changed while refreshing; try again")
+                scope = history.since_review()
+            files = (
+                await self._service.get_pr_files(
+                    self.pr_number, expected_refs=candidate
+                )
+                if scope.kind == "all"
+                else await self._service.get_comparison_files(scope)
+            )
+            discussion = await self._service.get_pr_discussion(self.pr_number)
+            observed = await self._service.get_pr_refs(self.pr_number)
+            state.observed_refs = observed
+            if observed != candidate or refs != self._overview_refs():
+                raise GitHubError("PR changed while refreshing; try again")
+            if candidate != refs and any(
+                not draft.is_file_level for draft in state.pending_review.comments
+            ):
+                raise GitHubError("Submit or remove line drafts before refreshing")
+            pr = merge_pr_discussion(
+                existing=summary,
+                pr_number=self.pr_number,
+                body=discussion.body,
+                reviews=discussion.reviews,
+                issue_comments=discussion.issue_comments,
+                review_threads=discussion.review_threads,
+                timeline_events=discussion.timeline_events,
+            )
+            self._service.accept_pr_revision(self.pr_number, candidate)
+            state.pr = pr
+            state.scope = scope
+            state.scope_error = None
+            state.requested_scope = None
+            state.files = files
+            state.files_by_filename = {file.filename: file for file in files}
+            state.file_diffs = {}
+            state.file_contents = {}
+            state.files_loaded_count = state.files_total_count = len(files)
+            state.files_loading = LoadingState.LOADED
+            if state.selected_file not in state.files_by_filename:
+                state.selected_file = files[0].filename if files else None
+            state.file_revision += 1
+            state.review_history = OverviewResource()
+            if history is not None:
+                state.review_history.value = history
+                state.review_history.loading = LoadingState.LOADED
+            state.probe_error = None
+            state.error = None
+            self._apply_discussion_state(pr)
+            self._post_message(self.PRLoaded(pr=state.pr, files_staged=True))
+            self._post_discussion_messages(state.pr)
+            self._post_files_loaded()
+            return True
+        except (RuntimeError, ValueError) as error:
+            state.refresh_error = str(error)
+            return False
+        finally:
+            self.discard_revision_probe()
+            state.refresh_loading = (
+                LoadingState.ERROR if state.refresh_error else LoadingState.LOADED
+            )
+            self._post_message(self.RevisionUpdated())
+
     async def select_review_scope(self, scope: ReviewScope) -> bool:
         """Publish only the latest complete comparison; retain the old one on failure."""
+        if self._state.refresh_loading == LoadingState.LOADING:
+            return False
         if self._state.files_loading == LoadingState.LOADING:
             self._state.scope_error = "Wait for the initial file load to finish"
             self._post_message(self.ScopeUpdated())
@@ -470,7 +604,11 @@ class PRStore:
 
     @property
     def review_writable(self) -> bool:
-        return self._state.scope.kind == "all" and not self._state.scope_loading
+        return (
+            self._state.scope.kind == "all"
+            and not self._state.scope_loading
+            and self._state.refresh_loading != LoadingState.LOADING
+        )
 
     def require_full_review(self) -> None:
         """Prevent historical coordinates from being submitted as current PR lines."""

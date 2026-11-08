@@ -48,7 +48,7 @@ def test_toggle_file_viewed_advances_only_when_marking_in_diff(
             )
         )
 
-        def select_file_after(self, filename: str) -> None:
+        def select_next_unviewed_file(self, filename: str) -> None:
             advanced.append(filename)
 
         def current_diff_file_target(self) -> str:
@@ -164,11 +164,11 @@ async def test_toggle_targets_new_file_when_focus_moves_during_viewed_refresh(
         monkeypatch.setattr(diff_view, "show_diff", blocked_show_diff)
 
         screen.action_toggle_file_viewed()
-        assert screen.file_changes.current_diff_file_target() == "two.py"
-        assert diff_view.selected_file_header_path() == "two.py"
-        assert screen.file_changes.file_tree.selected_file == "two.py"
-        assert "two.py" in diff_view._folded_file_paths
-        assert diff_view.scroll_y == diff_view._hunk_header_top_offsets[1]
+        assert screen.file_changes.current_diff_file_target() == "three.py"
+        assert diff_view.selected_file_header_path() == "three.py"
+        assert screen.file_changes.file_tree.selected_file == "three.py"
+        assert "three.py" in diff_view._folded_file_paths
+        assert diff_view.scroll_y == diff_view._hunk_header_top_offsets[2]
         assert diff_view.has_focus
         await asyncio.wait_for(refresh_started.wait(), timeout=2.0)
         refresh_worker = next(
@@ -177,16 +177,15 @@ async def test_toggle_targets_new_file_when_focus_moves_during_viewed_refresh(
             if worker.name == "diff-viewed-fold-refresh"
         )
 
-        screen.file_changes.open_file("three.py", focus_diff=True, expand=False)
-        assert diff_view.selected_file_header_path() == "three.py"
-        assert "three.py" in diff_view._folded_file_paths
+        screen.file_changes.open_file(
+            "four.py", focus_diff=True, expand=False, top_align=True
+        )
+        assert screen.file_changes.current_diff_file_target() == "four.py"
+        assert diff_view.selected_file_header_path() is None
+        assert "four.py" not in diff_view._folded_file_paths
 
         continue_refresh.set()
         await refresh_worker.wait()
-        assert screen.file_changes.current_diff_file_target() == "three.py"
-
-        screen.action_toggle_file_viewed()
-        assert files[2].viewer_viewed_state == FileViewedState.VIEWED
         assert screen.file_changes.current_diff_file_target() == "four.py"
         assert "four.py" not in diff_view._folded_file_paths
         assert "four.py" in diff_view._expanded_viewed_files
@@ -197,10 +196,16 @@ async def test_toggle_targets_new_file_when_focus_moves_during_viewed_refresh(
         assert screen.file_changes.current_diff_file_target() == "four.py"
         screen.action_toggle_file_viewed()
         assert files[3].viewer_viewed_state == FileViewedState.VIEWED
-        assert screen.file_changes.current_diff_file_target() == "four.py"
+        assert screen.file_changes.current_diff_file_target() == "three.py"
+        assert "three.py" in diff_view._folded_file_paths
+        assert diff_view.scroll_y == diff_view._hunk_header_top_offsets[2]
+
+        screen.action_toggle_file_viewed()
+        assert files[2].viewer_viewed_state == FileViewedState.VIEWED
+        assert screen.file_changes.current_diff_file_target() == "three.py"
         await wait_until(lambda: not diff_view._fold_worker_active)
-        assert diff_view.selected_file_header_path() == "four.py"
-        assert diff_view.scroll_y == diff_view._hunk_header_top_offsets[3]
+        assert diff_view.selected_file_header_path() == "three.py"
+        assert diff_view.scroll_y == diff_view._hunk_header_top_offsets[2]
 
         fail_first.set()
         await wait_until(
@@ -209,8 +214,8 @@ async def test_toggle_targets_new_file_when_focus_moves_during_viewed_refresh(
                 and not diff_view._fold_worker_active
             )
         )
-        assert screen.file_changes.current_diff_file_target() == "four.py"
-        assert diff_view.scroll_y == diff_view._hunk_header_top_offsets[3]
+        assert screen.file_changes.current_diff_file_target() == "three.py"
+        assert diff_view.scroll_y == diff_view._hunk_header_top_offsets[2]
 
         file_tree = screen.file_changes.file_tree
         file_tree.select_file("two.py", emit_message=False)
@@ -218,7 +223,7 @@ async def test_toggle_targets_new_file_when_focus_moves_during_viewed_refresh(
         await pilot.pause()
         screen.action_toggle_file_viewed()
         assert files[1].viewer_viewed_state == FileViewedState.UNVIEWED
-        assert screen.file_changes.current_diff_file_target() == "four.py"
+        assert screen.file_changes.current_diff_file_target() == "three.py"
         assert file_tree.query_one("#file-tree", Tree).has_focus
 
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import subprocess
 from collections.abc import Sequence
 from contextlib import suppress
@@ -24,9 +26,35 @@ def gh_command(args: Sequence[str]) -> tuple[str, ...]:
     return ("gh", *args)
 
 
-def gh_failure_message(args: Sequence[str], stderr: str) -> str:
-    """Return the user-facing gh command failure message."""
-    return stderr.strip() or f"gh command failed: {' '.join(args)}"
+def gh_failure_message(args: Sequence[str], stderr: str, stdout: str = "") -> str:
+    """Include GitHub's actionable API validation details when available."""
+    fallback = stderr.strip() or f"gh command failed: {' '.join(args)}"
+    if not args or args[0] != "api":
+        return fallback
+    try:
+        payload = json.loads(stdout)
+    except ValueError, TypeError:
+        return fallback
+    if not isinstance(payload, dict):
+        return fallback
+    details: list[str] = []
+    errors = payload.get("errors", [])
+    if isinstance(errors, list):
+        for error in errors:
+            message = error.get("message") if isinstance(error, dict) else error
+            if isinstance(message, str) and message.strip():
+                details.append(message.strip())
+    if not details:
+        message = payload.get("message")
+        if isinstance(message, str) and message.strip():
+            details.append(message.strip())
+    if not details:
+        return fallback
+    message = "; ".join(dict.fromkeys(details))
+    status = re.search(r"\bHTTP \d{3}\b", stderr)
+    if status and status[0] not in message:
+        message += f" ({status[0]})"
+    return message
 
 
 def gh_missing_cli_message() -> str:
@@ -55,7 +83,7 @@ async def run_gh(args: Sequence[str], *, input_text: str | None = None) -> str:
         raise
 
     if proc.returncode != 0:
-        raise GhCliError(gh_failure_message(args, stderr.decode()))
+        raise GhCliError(gh_failure_message(args, stderr.decode(), stdout.decode()))
 
     return stdout.decode()
 
@@ -84,6 +112,8 @@ def run_gh_sync(args: Sequence[str]) -> str:
         )
         return result.stdout
     except subprocess.CalledProcessError as error:
-        raise GhCliError(gh_failure_message(args, error.stderr)) from error
+        raise GhCliError(
+            gh_failure_message(args, error.stderr, error.stdout or "")
+        ) from error
     except FileNotFoundError as error:
         raise GhCliError(gh_missing_cli_message()) from error

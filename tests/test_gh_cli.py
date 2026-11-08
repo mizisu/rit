@@ -26,6 +26,33 @@ def test_gh_failure_message_falls_back_to_joined_args() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    [
+        (
+            '{"message":"Validation Failed","errors":[{"message":"A pending review exists"}]}',
+            "A pending review exists",
+        ),
+        ('{"message":"Bad credentials"}', "Bad credentials"),
+        ('{"errors":["Denied",{"message":"Denied"}]}', "Denied"),
+        ('{"errors":[{"code":"invalid"}]}', "gh: failed"),
+        ("not JSON", "gh: failed"),
+        ("[]", "gh: failed"),
+    ],
+)
+def test_gh_failure_message_explains_api_failures(payload: str, expected: str) -> None:
+    assert gh_failure_message(["api", "repos/a/b"], "gh: failed", payload) == expected
+    assert gh_failure_message(["auth", "status"], "gh: failed", payload) == "gh: failed"
+
+
+def test_gh_failure_message_retains_http_status_for_api_fallbacks() -> None:
+    assert gh_failure_message(
+        ["api", "repos/a/b/pulls/1"],
+        "gh: Not Acceptable (HTTP 406)",
+        '{"message":"Diff too large"}',
+    ) == "Diff too large (HTTP 406)"
+
+
 def test_gh_missing_cli_message_names_install_url() -> None:
     assert gh_missing_cli_message() == (
         "gh CLI not found. Please install GitHub CLI: https://cli.github.com/"
