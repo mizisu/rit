@@ -236,6 +236,7 @@ async def test_counted_g_uses_actual_row_positions_after_folding(
                 monkeypatch.setattr(
                     view, "BLOCK_RENDER_LINE_THRESHOLD", block_threshold
                 )
+                view._discussion_state.thread_collapsed[1] = False
                 await view.show_diff(document.diff.filename, document.diff)
                 assert view.split is (mode == "split")
                 index = view.line_index_for_location("two.py", 46, "RIGHT")

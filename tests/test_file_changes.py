@@ -234,25 +234,57 @@ def test_sync_file_tree_to_diff_cursor_selects_known_cursor_file() -> None:
 
 
 @pytest.mark.parametrize(
-    ("filenames", "current", "expected"),
+    "unviewed_state", [FileViewedState.UNVIEWED, FileViewedState.DISMISSED]
+)
+@pytest.mark.parametrize(
+    ("filenames", "viewed", "current", "expected"),
     [
-        (["one.py", "two.py", "three.py"], "one.py", "two.py"),
-        (["one.py", "two.py", "three.py"], "two.py", "three.py"),
-        (["one.py", "two.py"], "two.py", None),
-        (["one.py"], "one.py", None),
-        (["one.py"], "missing.py", None),
-        ([], "one.py", None),
+        (["one.py", "two.py", "three.py"], {"one.py"}, "one.py", "two.py"),
+        (["one.py", "two.py", "three.py"], {"two.py"}, "two.py", "three.py"),
+        (["one.py", "two.py", "three.py"], {"one.py", "two.py"}, "one.py", "three.py"),
+        (
+            ["one.py", "two.py", "three.py", "four.py"],
+            {"two.py", "three.py"},
+            "two.py",
+            "four.py",
+        ),
+        (["one.py", "two.py", "three.py"], {"three.py"}, "three.py", "two.py"),
+        (
+            ["one.py", "two.py", "three.py", "four.py"],
+            {"three.py", "four.py"},
+            "three.py",
+            "two.py",
+        ),
+        (
+            ["one.py", "two.py", "three.py"],
+            {"two.py", "three.py"},
+            "three.py",
+            "one.py",
+        ),
+        (["one.py", "two.py", "three.py"], {"two.py", "three.py"}, "two.py", "one.py"),
+        (["one.py", "two.py"], {"one.py", "two.py"}, "two.py", None),
+        (["one.py"], {"one.py"}, "one.py", None),
+        (["one.py"], set(), "one.py", None),
+        (["one.py"], set(), "missing.py", None),
+        ([], set(), "one.py", None),
     ],
 )
-def test_select_file_after_preserves_folds_without_wrapping(
+def test_select_next_unviewed_file_prefers_below_then_nearest_above(
     monkeypatch: pytest.MonkeyPatch,
     filenames: list[str],
+    viewed: set[str],
     current: str,
     expected: str | None,
+    unviewed_state: FileViewedState,
 ) -> None:
     store = PRStore()
     store.state.files = [
-        PRFile(filename=name, viewer_viewed_state=FileViewedState.VIEWED)
+        PRFile(
+            filename=name,
+            viewer_viewed_state=(
+                FileViewedState.VIEWED if name in viewed else unviewed_state
+            ),
+        )
         for name in filenames
     ]
     changes = FileChanges(store)
@@ -264,7 +296,7 @@ def test_select_file_after_preserves_folds_without_wrapping(
         opened.append((filename, focus_diff, expand, top_align))
 
     monkeypatch.setattr(changes, "open_file", open_file)
-    changes.select_file_after(current)
+    changes.select_next_unviewed_file(current)
 
     assert opened == ([(expected, True, False, True)] if expected is not None else [])
 
@@ -745,10 +777,74 @@ async def test_file_changes_renders_loaded_file_diffs_as_combined_scroll() -> No
         assert file_changes.diff_view._diff.hunks[1].starts_file is True
         assert file_changes.diff_view._diff.hunks[1].file_path == "two.py"
 
-        file_changes.file_tree.select_file("two.py")
+        tree = file_changes.file_tree.query_one(Tree)
+        node = file_changes.file_tree._file_nodes["two.py"]
+        assert await pilot.click(tree, offset=(6, node.line))
         await pilot.pause()
 
-        assert file_changes.diff_view.cursor_line == 2
+        view = file_changes.diff_view
+        assert view.cursor_line == 2
+        header = view._get_file_header_widget(1)
+        assert header is not None
+        assert header.region.y == view.scrollable_content_region.y
+
+
+@pytest.mark.parametrize("virtualized", [False, True])
+async def test_file_tree_click_top_aligns_selected_file(
+    monkeypatch: pytest.MonkeyPatch, virtualized: bool
+) -> None:
+    lines = "\n".join(f" line {line}" for line in range(1, 81))
+    patch = f"@@ -1,80 +1,80 @@\n{lines}"
+    store = PRStore()
+    store.state.files = [
+        PRFile(filename="one.py", status="modified", patch=patch),
+        PRFile(filename="two.py", status="modified", patch=patch),
+        PRFile(
+            filename="three.py",
+            status="modified",
+            patch="@@ -1,1 +1,1 @@\n line",
+            viewer_viewed_state=FileViewedState.VIEWED,
+        ),
+    ]
+    store.state.file_diffs = {
+        file.filename: parse_patch(file.patch, file.filename)
+        for file in store.state.files
+    }
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test(size=(100, 20)) as pilot:
+        changes = app.query_one(FileChanges)
+        view = changes.diff_view
+        monkeypatch.setattr(
+            view, "VIRTUALIZE_LINE_THRESHOLD", 1 if virtualized else 1000
+        )
+        monkeypatch.setattr(view, "VIRTUAL_WINDOW_RADIUS", 10)
+        monkeypatch.setattr(view, "VIRTUAL_WINDOW_SHIFT_MARGIN", 2)
+        changes.refresh_files()
+        await wait_until(lambda: not changes._combined_render_worker_active)
+        await wait_until(lambda: not changes._file_render_worker_active)
+        await pilot.pause()
+
+        tree = changes.file_tree.query_one(Tree)
+        for index in (1, 2, 0, 1):
+            filename = store.state.files[index].filename
+            node = changes.file_tree._file_nodes[filename]
+            assert await pilot.click(tree, offset=(6, node.line))
+            await wait_until(lambda target=filename: store.state.selected_file == target)
+            await wait_until(
+                lambda: not view._fold_worker_active and not view._virt.render_pending
+            )
+            await pilot.pause()
+
+            header = view._get_file_header_widget(index)
+            assert header is not None
+            assert header.region.y == view.scrollable_content_region.y
+            assert not view._is_file_folded(filename)
+            assert view.has_focus
 
 
 @pytest.mark.asyncio
@@ -1896,7 +1992,6 @@ async def test_viewed_advance_top_aligns_virtual_files_through_folding(
         PRFile(filename=name, status="modified", patch=patch)
         for name in ("one.py", "two.py", "three.py")
     ]
-    store.state.files[-1].viewer_viewed_state = FileViewedState.VIEWED
     store.state.file_diffs = {
         file.filename: parse_patch(patch, file.filename) for file in store.state.files
     }
@@ -1909,6 +2004,7 @@ async def test_viewed_advance_top_aligns_virtual_files_through_folding(
     async with app.run_test(size=(100, 12)) as pilot:
         changes = app.query_one(FileChanges)
         view = changes.diff_view
+        view._manually_folded_files.add("three.py")
         monkeypatch.setattr(view, "VIRTUALIZE_LINE_THRESHOLD", 1)
         monkeypatch.setattr(view, "VIRTUAL_WINDOW_RADIUS", 10)
         monkeypatch.setattr(view, "VIRTUAL_WINDOW_SHIFT_MARGIN", 2)
@@ -1922,7 +2018,7 @@ async def test_viewed_advance_top_aligns_virtual_files_through_folding(
             file = store.state.files[index]
             file.viewer_viewed_state = FileViewedState.VIEWED
             changes.update_file_view_state(file.filename)
-            changes.select_file_after(file.filename)
+            changes.select_next_unviewed_file(file.filename)
             await wait_until(
                 lambda: not view._fold_worker_active and not view._virt.render_pending
             )

@@ -551,7 +551,7 @@ async def test_fold_preserves_inline_and_file_drafts_and_hidden_targets(
         view.jump_to_line_index(index, side="LEFT", focus=True)
         assert await view.open_inline_comment_editor()
         await pilot.pause()
-        inline = view._inline_comment_editor_widget
+        inline = view._composer.widget
         assert inline is not None and inline.is_open
         body = inline.query_one(TextArea)
         body.insert("unsaved")
@@ -577,7 +577,7 @@ async def test_fold_preserves_inline_and_file_drafts_and_hidden_targets(
             release.set()
         await refresh
         await pilot.pause()
-        inline = view._inline_comment_editor_widget
+        inline = view._composer.widget
         assert inline is not None and inline.is_open
         body = inline.query_one(TextArea)
         assert body.text == "unsaved draft"
@@ -593,12 +593,13 @@ async def test_fold_preserves_inline_and_file_drafts_and_hidden_targets(
         )
         app.store.state.files[1].viewer_viewed_state = FileViewedState.VIEWED
         await app.reconcile()
-        assert view._inline_comment_editor_widget is inline
-        assert body.has_focus
+        assert view._composer.widget is None
+        assert view._composer.session is not None
+        assert view._composer.session.buffer.text == "unsaved draft"
         assert view._inline_comment_editor_target == ("two.py", 20, "LEFT")
         view._expanded_viewed_files.add("two.py")
         await app.reconcile()
-        inline = view._inline_comment_editor_widget
+        inline = view._composer.widget
         assert inline is not None and inline.is_open
         assert inline.query_one(TextArea).text == "unsaved draft"
         await view.close_inline_comment_editor()
@@ -606,7 +607,7 @@ async def test_fold_preserves_inline_and_file_drafts_and_hidden_targets(
         view.jump_to_line_index(index, side="LEFT", focus=True)
         assert await view.open_inline_comment_editor()
         await pilot.pause()
-        inline = view._inline_comment_editor_widget
+        inline = view._composer.widget
         assert inline is not None
         assert inline.query_one(TextArea).text == ""
         assert view._inline_comment_editor_target == ("two.py", 10, "LEFT")
@@ -616,15 +617,16 @@ async def test_fold_preserves_inline_and_file_drafts_and_hidden_targets(
         assert header is not None
         view._set_file_header_selection(header)
         assert await view.open_file_comment_editor()
-        file_editor = view._file_comment_editor_widget
+        file_editor = view._composer.widget
         assert file_editor is not None
         file_body = file_editor.query_one(TextArea)
         file_body.insert("file draft")
         app.store.state.files[2].viewer_viewed_state = FileViewedState.VIEWED
         await app.reconcile()
-        assert view._file_comment_editor_widget is file_editor
-        assert file_body.text == "file draft"
-        assert file_body.has_focus
+        current = view._composer.widget
+        assert current is not None
+        assert current.query_one(TextArea).text == "file draft"
+        assert current.query_one(TextArea).has_focus
         assert view.file_comment_target() == "three.py"
 
 

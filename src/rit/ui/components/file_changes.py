@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from itertools import pairwise
+from itertools import chain
 from typing import TYPE_CHECKING, ClassVar, Literal
 
 from rich.text import Text
@@ -16,7 +16,7 @@ from textual.widgets import Button, Static, Tree
 from textual.worker import Worker, WorkerState
 
 from rit.core.types import FileDiff
-from rit.state.models import LoadingState
+from rit.state.models import FileViewedState, LoadingState
 from rit.state.review_scope import ReviewScope
 from rit.state.store import PRStore
 from rit.ui.components.combined_diff import (
@@ -555,12 +555,20 @@ class FileChanges(Vertical):
     def select_prev_file(self) -> None:
         self._select_relative_file(-1)
 
-    def select_file_after(self, filename: str) -> None:
-        """Advance without wrapping or changing the next file's fold state."""
-        for current, following in pairwise(self.store.state.files):
-            if current.filename == filename:
+    def select_next_unviewed_file(self, filename: str) -> None:
+        """Find an unviewed file below, then above, preserving its fold state."""
+        files = self.store.state.files
+        current_index = next(
+            (index for index, file in enumerate(files) if file.filename == filename),
+            None,
+        )
+        if current_index is None:
+            return
+
+        for file in chain(files[current_index + 1 :], reversed(files[:current_index])):
+            if file.viewer_viewed_state != FileViewedState.VIEWED:
                 self.open_file(
-                    following.filename, focus_diff=True, expand=False, top_align=True
+                    file.filename, focus_diff=True, expand=False, top_align=True
                 )
                 return
 
@@ -1046,9 +1054,9 @@ class FileChanges(Vertical):
 
     @on(FileTree.FileSelected)
     def on_file_tree_file_selected(self, event: FileTree.FileSelected) -> None:
-        """Handle file selection from tree (Enter — focus moves to diff)."""
+        """Open the selected file at its header and focus the diff."""
         event.stop()
-        self.open_file(event.filename, focus_diff=True)
+        self.open_file(event.filename, focus_diff=True, top_align=True)
 
     @on(FileTree.FilePreviewed)
     def on_file_tree_file_previewed(self, event: FileTree.FilePreviewed) -> None:

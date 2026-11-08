@@ -8,6 +8,7 @@ from rich.console import RenderableType
 from textual import events
 from textual.app import App, ComposeResult
 from textual.screen import ModalScreen, Screen
+from textual.widget import Widget
 from textual.worker import get_current_worker
 
 from rit.core.diff import parse_patch
@@ -87,6 +88,12 @@ async def test_continuous_native_input_paints_before_producer_stops(
         await view.show_diff("test.py", parse_patch(patch, "test.py"))
         await pilot.pause()
         bar = view.vertical_scrollbar
+        assert bar.region.width == 1
+        assert [
+            widget
+            for widget in app.screen.walk_children(Widget)
+            if widget.show_vertical_scrollbar
+        ] == [view]
         positions: tuple[int, ...] = ()
         if input_kind == "drag":
             assert await pilot.mouse_down(bar, offset=(bar.region.width - 1, 0))

@@ -605,7 +605,7 @@ async def test_wheel_scroll_covers_viewport_and_survives_widget_retirement(
         await pilot.pause()
         assert await view.open_inline_comment_editor()
         await pilot.pause()
-        editor = view._inline_comment_editor_widget
+        editor = view._composer.widget
         assert editor is not None
         body = editor.query_one(TextArea)
         body.text = "draft kept while scrolling"
@@ -620,9 +620,15 @@ async def test_wheel_scroll_covers_viewport_and_survives_widget_retirement(
             )
             await wait_until(lambda: not view._virt.render_pending, timeout=5.0)
             await pilot.pause()
-            current = view._inline_comment_editor_widget
-            assert current is not None and current is editor
-            assert body.has_focus
+            current = view._composer.widget
+            if not view._virt.window_start <= line <= view._virt.window_end:
+                assert current is None
+                assert view._composer.session is not None
+                assert (
+                    view._composer.session.buffer.text == "draft kept while scrolling"
+                )
+                continue
+            assert current is not None
             current_body = current.query_one(TextArea)
             assert current_body.text == "draft kept while scrolling"
             assert current_body.cursor_location == (0, 7)
