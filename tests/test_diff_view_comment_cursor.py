@@ -138,6 +138,7 @@ async def test_diff_cursor_selects_root_and_reply_individually() -> None:
         assert root_card is not None
         assert reply_card is not None
 
+        assert not thread_item.collapsed
         await pilot.press("j")
         root = diff_view.active_review_comment()
         assert root is not None
@@ -230,6 +231,7 @@ async def test_j_after_diff_line_selects_first_comment_then_advances() -> None:
         assert "--cursor-line" not in draft.classes
         assert "--cursor-line" not in pending_item.classes
         assert "--cursor-line" in thread1.classes
+        assert not thread1.collapsed
         assert "--cursor-line" in thread1_comment.classes
 
         await pilot.press("j")
@@ -242,6 +244,7 @@ async def test_j_after_diff_line_selects_first_comment_then_advances() -> None:
         assert "--cursor-line" not in thread1.classes
         assert "--cursor-line" not in thread1_comment.classes
         assert "--cursor-line" in thread2.classes
+        assert not thread2.collapsed
         assert "--cursor-line" in thread2_comment.classes
 
         await pilot.press("j")
@@ -290,6 +293,7 @@ async def test_k_steps_back_through_comments_then_to_previous_line() -> None:
         thread = app.query_one("#inline-thread-10", ReviewThreadItem)
         thread_comment = thread.comment_card_at(0)
         assert thread_comment is not None
+        assert "--cursor-line" in thread.classes
         assert "--cursor-line" in thread_comment.classes
 
         await pilot.press("k")
@@ -426,6 +430,7 @@ async def test_diff_line_cursor_block_swaps_with_comment_highlight() -> None:
         code_widgets = diff_view._get_code_widgets(1)
         assert line_prefix.has_class("-cursor")
         assert all("-cursor" not in w.classes for w in code_widgets)
+        assert "--cursor-line" in thread.classes
         assert "--cursor-line" in thread_comment.classes
 
         await pilot.press("k")
@@ -644,6 +649,7 @@ async def test_virtual_comment_cursor_scrolls_only_when_comment_is_clipped(
         view = app.query_one(DiffView)
         monkeypatch.setattr(view, "VIRTUALIZE_LINE_THRESHOLD", 1)
         monkeypatch.setattr(view, "VIRTUAL_WINDOW_RADIUS", 12)
+        view._discussion_state.thread_collapsed[41] = False
         await view.show_diff(document.diff.filename, document.diff)
         await pilot.pause()
         view.jump_to_line_index(200, side="RIGHT", focus=True)
@@ -673,7 +679,7 @@ async def test_virtual_comment_cursor_scrolls_only_when_comment_is_clipped(
 
         viewport = view.scrollable_content_region
         view.scroll_to(
-            y=view.scroll_y + reply.region.y - (viewport.bottom - 2),
+            y=view.scroll_y + reply.region.y - (viewport.bottom - 1),
             animate=False,
             immediate=True,
         )

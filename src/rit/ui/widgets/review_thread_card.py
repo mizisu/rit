@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
 from rich.text import Text
 from textual.containers import Vertical
+from textual.message import Message
 from textual.widget import Widget
 from textual.widgets import Collapsible, Static
+from textual.widgets._collapsible import CollapsibleTitle
 
 from rit.core.datetime_utils import datetime_sort_key, is_min_datetime
 from rit.state.models import PRComment
@@ -222,6 +225,10 @@ def _comments_in_timeline_order(comments: list[PRComment]) -> list[PRComment]:
 
 
 class ReviewThreadItem(Collapsible):
+    @dataclass
+    class Selected(Message):
+        thread: ReviewThreadItem
+
     DEFAULT_CSS = """
     ReviewThreadItem {
         height: auto;
@@ -309,6 +316,11 @@ class ReviewThreadItem(Collapsible):
 
     ReviewThreadItem.--inline.--resolved.--cursor-line CollapsibleTitle {
         background: #1e2030;
+    }
+
+    ReviewThreadItem.--inline InlineCommentEditor.-compact {
+        border: none;
+        border-top: solid #363a4f;
     }
     """
 
@@ -400,6 +412,27 @@ class ReviewThreadItem(Collapsible):
 
         if self._header_widget is not None:
             self._header_widget.update(self._build_path_header_text())
+
+    def mount_composer(self, editor: Widget) -> None:
+        """Keep the editor below this thread's comments in the same card."""
+        self.collapsed = False
+        if self._thread_container.is_mounted:
+            self._thread_container.mount(editor)
+        else:
+            self._thread_container.compose_add_child(editor)
+
+    def _watch_collapsed(self, collapsed: bool) -> None:
+        if not self.has_class("--inline"):
+            super()._watch_collapsed(collapsed)
+            return
+        self._update_collapsed(collapsed)
+        self.post_message(self.Collapsed(self) if collapsed else self.Expanded(self))
+
+    def _on_collapsible_title_toggle(self, event: CollapsibleTitle.Toggle) -> None:
+        event.prevent_default()
+        super()._on_collapsible_title_toggle(event)
+        if self.has_class("--inline"):
+            self.post_message(self.Selected(self))
 
     def _build_path_header_text(self) -> str:
         line_info = f":{self.line}" if self.line else ""

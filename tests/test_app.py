@@ -66,6 +66,38 @@ def test_copy_to_clipboard_updates_textual_and_system_clipboards(
     assert copied == ["src/rit/app.py"]
 
 
+@pytest.mark.parametrize(
+    ("name", "message", "expected"),
+    [
+        (
+            "_update_review_comment",
+            "Could not resolve to a node with the global id of 'deleted'.",
+            (
+                "Comment no longer available. Your text is kept. "
+                "Copy it, then discard and open a new comment."
+            ),
+        ),
+        (
+            "_post_inline_comment",
+            "user_id can only have one pending review per pull request",
+            "You have a pending review. Use Save draft, or submit it first.",
+        ),
+        ("_post_inline_comment", "Connection interrupted", "Connection interrupted"),
+    ],
+)
+def test_comment_errors_offer_recovery_without_hiding_api_details(
+    name: str, message: str, expected: str
+) -> None:
+    from textual.worker import Worker
+
+    from rit.services.github import GitHubError
+    from rit.ui.screens.main import MainScreen
+
+    worker = Worker(Static(), lambda: None, name=name)
+    worker._error = GitHubError(message)
+    assert MainScreen._worker_error_message(worker, "Save failed") == expected
+
+
 class TestPRReferenceParsing:
     """Tests for PR reference parsing."""
 
@@ -1036,7 +1068,7 @@ class TestRitApp:
             )
             assert app.screen.query_one("#comment-editor-body", TextArea).text == ""
             assert diff_view.file_comment_draft_index() is None
-            await pilot.press("escape")
+            await pilot.click("#comment-editor-cancel")
             await wait_until(lambda: diff_view.has_focus)
 
             await pilot.press("C")
@@ -1429,7 +1461,13 @@ class TestRitApp:
             assert app.screen.query("#comment-editor-queue")
             assert app.screen.query("#comment-editor-post")
             body.text = "discarded reply"
-            await pilot.press("escape")
+            await pilot.pause()
+            await wait_until(
+                lambda: diff_view.scrollable_content_region.contains_region(
+                    app.screen.query_one("#comment-editor-cancel").region
+                )
+            )
+            await pilot.click("#comment-editor-cancel")
             await wait_until(lambda: diff_view.has_focus)
             assert diff_view.reply_comment_target() is None
             assert service.replied == []
@@ -1444,7 +1482,7 @@ class TestRitApp:
             assert body.text == "before"
             assert str(
                 app.screen.query_one(".comment-editor-title", Static).content
-            ) == (f"Edit {kind} comment")
+            ) == ("Edit file comment" if file_level else "Edit comment")
             assert not app.screen.query("#comment-editor-post")
             body.text = "after"
 
@@ -1553,8 +1591,9 @@ class TestRitApp:
             draft = screen.store.state.pending_review.comments[0]
             assert draft.is_reply and draft.body == "pending reply"
             assert view.query(".pending-draft")
+            assert not view._pending_comment_drafts_by_line
 
-            view._comment_cursor_index = 1
+            view._comment_cursor_index = 2
             await pilot.press("C")
             await wait_until(
                 lambda: bool(app.screen.query("#diff-reply-comment-editor"))
@@ -1571,16 +1610,20 @@ class TestRitApp:
             ]
             assert service.posted == []
 
-            view._comment_cursor_index = 1
+            view._comment_cursor_index = 2
             await pilot.press("C")
             await wait_until(
                 lambda: bool(app.screen.query("#diff-reply-comment-editor"))
             )
-            await pilot.click("#comment-editor-post")
-            await screen.workers.wait_for_complete()
-            assert service.posted == ["edited pending reply"]
-            assert screen.store.state.pending_review.comments == []
-            assert view.reply_comment_target() is None
+            assert not app.screen.query("#comment-editor-post")
+            assert not view._composer.begin_submit("post")
+            session = view._composer.session
+            assert session is not None and "pending review" in session.buffer.error
+            assert service.posted == []
+            assert screen.store.state.pending_review.comments[0].body == (
+                "edited pending reply"
+            )
+            assert view.reply_comment_target() == root
 
     async def test_delete_inline_comment_draft_requires_selected_draft(
         self,

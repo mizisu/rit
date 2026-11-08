@@ -18,6 +18,7 @@ from rit.services.tmux_navigation import TmuxNavigation
 from rit.state.settings import Settings
 from rit.ui.messages import Flash, SettingChanged
 from rit.ui.terminal_graphics import configure_terminal_graphics
+from rit.ui.widgets.comment_editor import InlineCommentEditor
 
 if TYPE_CHECKING:
     from rit.ui.screens.main import MainScreen
@@ -138,8 +139,14 @@ class RitApp(App):
         self.push_screen(SettingsScreen(self.settings))
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        if action in {"quit", "open_pr", "settings"} and isinstance(
-            self.focused, (Input, TextArea)
+        focused = self.focused
+        if (
+            action in {"quit", "open_pr", "settings"}
+            and focused is not None
+            and (
+                isinstance(focused, (Input, TextArea, InlineCommentEditor))
+                or any(isinstance(ancestor, InlineCommentEditor) for ancestor in focused.ancestors)
+            )
         ):
             return False
         return super().check_action(action, parameters)

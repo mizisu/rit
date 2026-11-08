@@ -68,10 +68,12 @@ class ReviewAnnotationIndex:
         for ref in self.pending_drafts:
             if ref.comment is draft:
                 return ref.index
-        for ref in self.pending_drafts:
-            if ref.comment == draft:
-                return ref.index
-        return None
+        if draft.review_comment_id:
+            for ref in self.pending_drafts:
+                if ref.comment.review_comment_id == draft.review_comment_id:
+                    return ref.index
+        matches = [ref.index for ref in self.pending_drafts if ref.comment == draft]
+        return matches[0] if len(matches) == 1 else None
 
     def pending_for_sync(
         self,

@@ -129,7 +129,8 @@ async def test_diff_view_renders_pending_file_draft_below_file_header() -> None:
 
         assert pending_item.has_class("pending-draft-thread")
         assert "entire file" in str(pending_item.title)
-        assert "entire file" in str(submitted_item.title)
+        assert "test.py • entire file" in str(submitted_item.title)
+        assert not submitted_item.collapsed
         assert file_header.region.y < pending_item.region.y < submitted_item.region.y
         assert pending_item.region.x == line_item.region.x
         assert pending_item.region.width == line_item.region.width
@@ -204,11 +205,16 @@ async def test_diff_view_renders_pending_draft_below_line() -> None:
         assert pending_item.has_class("--inline")
         assert pending_item.comment_card_at(0) is draft_widget
         assert len(app.query("CommentCard.pending-draft")) == 1
-        assert draft_widget.region.y > line_widget.region.y
+        assert not draft_widget.collapsed
+        assert pending_item.region.height > 3
+        assert pending_item.styles.border_top[0] == "solid"
+        assert pending_item.region.y > line_widget.region.y
+        assert "test.py:1" in pending_item.title
+        assert "hello draft" not in pending_item.title
 
 
 @pytest.mark.asyncio
-async def test_virtualized_pending_draft_keeps_collapsed_state_after_remount() -> None:
+async def test_virtualized_pending_draft_keeps_collapse_state_and_editor() -> None:
     context_lines = "\n".join(f" line{line}" for line in range(1, 41))
     patch = f"@@ -1,40 +1,40 @@\n{context_lines}"
     store = PRStore()
@@ -269,6 +275,43 @@ async def test_virtualized_pending_draft_keeps_collapsed_state_after_remount() -
         remounted_draft = diff_view.query_one("CommentCard.pending-draft", CommentCard)
         assert remounted_draft.collapsed is True
 
+        diff_view._comment_cursor_index = 1
+        assert await diff_view.open_inline_comment_editor(edit=True)
+        body = diff_view.query_one(TextArea)
+        await wait_until(lambda: body.has_focus)
+        body.text = "unsaved draft"
+        await pilot.press("escape")
+        assert diff_view.has_focus
+        await wait_until(
+            lambda: (
+                not diff_view._virt.render_pending
+                and diff_view._annotation_line_heights.get(0)
+                == diff_view._pending_comment_layout_widgets_by_line[0][
+                    0
+                ].outer_size.height
+            )
+        )
+        diff_view.scroll_to(y=diff_view.max_scroll_y, animate=False)
+        await wait_until(
+            lambda: diff_view._virt.window_start > 0
+            and not diff_view._virt.render_pending
+        )
+        assert diff_view._composer.widget is None
+        assert diff_view._composer.resume()
+        await wait_until(
+            lambda: any(body.has_focus for body in diff_view.query(TextArea))
+        )
+        restored = diff_view.query_one(TextArea)
+        assert restored.text == "unsaved draft"
+        assert any(
+            parent.has_class("pending-draft-thread") for parent in restored.ancestors
+        )
+        await diff_view.close_inline_comment_editor()
+        assert (
+            store.state.pending_review.comments[0].body
+            == "line one\nline two\nline three"
+        )
+
 
 @pytest.mark.asyncio
 async def test_pending_draft_keeps_selection_and_collapsed_state_after_sync() -> None:
@@ -319,6 +362,9 @@ async def test_pending_draft_keeps_selection_and_collapsed_state_after_sync() ->
 
         remounted_draft = diff_view.query_one("CommentCard.pending-draft", CommentCard)
         assert remounted_draft.collapsed is True
+        assert (
+            diff_view._discussion_state.collapsed_drafts[id(replacement)] is replacement
+        )
 
 
 @pytest.mark.asyncio
@@ -368,7 +414,8 @@ async def test_virtualized_pending_draft_collapse_updates_scroll_geometry() -> N
         await wait_until(
             lambda: (
                 len(draft.query(".comment-body-plain")) == 1
-                and pending_item.region.height > 0
+                and not pending_item.collapsed
+                and pending_item.region.height > 1
             )
         )
         expanded_virtual_height = diff_view._virtual_content_height
@@ -379,7 +426,12 @@ async def test_virtualized_pending_draft_collapse_updates_scroll_geometry() -> N
         )
         expanded_draft_height = expanded_next_line_top - line_bottom_without_draft
 
-        await pilot.press("enter")
+        diff_view._comment_cursor_index = 0
+        pending_item._title.scroll_visible(animate=False)
+        await pilot.pause()
+        await pilot.click(pending_item._title)
+        assert diff_view.active_pending_draft_index() == 0
+        assert diff_view.has_focus
         await wait_until(
             lambda: (
                 draft.collapsed
@@ -405,7 +457,10 @@ async def test_virtualized_pending_draft_collapse_updates_scroll_geometry() -> N
         collapsed_virtual_height = diff_view._virtual_content_height
         collapsed_next_line_top = diff_view._line_top_offsets[next_line]
         await wait_until(
-            lambda: diff_view.virtual_size.height == diff_view._virtual_content_height
+            lambda: (
+                diff_view.virtual_size.height == diff_view._virtual_content_height
+                and not diff_view._virt.render_pending
+            )
         )
         collapsed_max_scroll_y = int(diff_view.max_scroll_y)
         assert pending_item.region.height == collapsed_draft_height == 3
@@ -465,9 +520,9 @@ async def test_unified_pending_draft_starts_after_line_number_gutter() -> None:
         await pilot.pause()
 
         code_widget = app.query_one("#line-1 .code-content", Static)
-        draft_widget = app.query_one("#pending-draft-1-right-0")
+        draft_item = app.query_one("#pending-draft-1-right-0-thread")
 
-        assert draft_widget.region.x >= code_widget.region.x
+        assert draft_item.region.x >= code_widget.region.x
 
 
 @pytest.mark.asyncio
@@ -612,11 +667,19 @@ async def test_split_pending_drafts_dock_to_matching_side() -> None:
 
         old_code = app.query_one("#line-1-old .code-content", Static)
         new_code = app.query_one("#line-1-new .code-content", Static)
-        left_draft = app.query_one("#pending-draft-1-left-0")
-        right_draft = app.query_one("#pending-draft-1-right-1")
+        left_draft = app.query_one("#pending-draft-1-left-0-thread", ReviewThreadItem)
+        right_draft = app.query_one("#pending-draft-1-right-1-thread", ReviewThreadItem)
 
         assert old_code.region.x <= left_draft.region.x < new_code.region.x
         assert right_draft.region.x >= new_code.region.x
+        assert not left_draft.collapsed and not right_draft.collapsed
+        await pilot.click(left_draft._title)
+        assert left_draft.collapsed and not right_draft.collapsed
+        await pilot.click(right_draft._title)
+        assert left_draft.collapsed and right_draft.collapsed
+        await pilot.click(left_draft._title)
+        assert not left_draft.collapsed and right_draft.collapsed
+        assert diff_view.active_pending_draft_index() == 0
 
 
 @pytest.mark.asyncio
@@ -689,7 +752,7 @@ async def test_open_inline_comment_editor_on_line_starts_new_draft() -> None:
         assert body.text == ""
         assert diff_view.inline_comment_draft_index() is None
         assert draft.is_attached
-        assert editor not in diff_view.walk_children()
+        assert editor in diff_view.walk_children()
 
 
 @pytest.mark.asyncio

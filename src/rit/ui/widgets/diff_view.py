@@ -21,7 +21,7 @@ from textual.message import Message
 from textual.reactive import reactive, var
 from textual.scrollbar import ScrollTo
 from textual.widget import AwaitMount, Widget
-from textual.widgets import Input, Static
+from textual.widgets import Collapsible, Input, Static
 
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.state.models import (
@@ -32,7 +32,6 @@ from rit.state.models import (
     ReviewThread,
 )
 from rit.ui.messages import Flash
-from rit.ui.screens.comment_submit import CommentSubmitScreen
 from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets import diff_cursor as _cursor
 from rit.ui.widgets import diff_cursor_side as _cursor_side
@@ -49,7 +48,8 @@ from rit.ui.widgets import diff_selection as _selection
 from rit.ui.widgets import diff_virtual as _virtual
 from rit.ui.widgets import diff_visual_mode as _visual_mode
 from rit.ui.widgets.comment_card import CommentCard
-from rit.ui.widgets.comment_editor import InlineCommentEditor
+from rit.ui.widgets.comment_editor import CommentEditorBuffer, InlineCommentEditor
+from rit.ui.widgets.diff_composer import ComposerSession, DiffCommentComposer
 from rit.ui.widgets.diff_plan_cache import DiffPlanCache, publish_line_metadata
 from rit.ui.widgets.diff_search import DiffSearchSession, SearchCursor, SearchResult
 from rit.ui.widgets.diff_search_policy import (
@@ -71,6 +71,11 @@ from rit.ui.widgets.diff_types import (
     UnifiedDiffBlock,
     VirtualState,
 )
+from rit.ui.widgets.inline_review_thread import (
+    InlineDiscussionState,
+    InlineReviewThread,
+)
+from rit.ui.widgets.review_thread_card import ReviewThreadItem
 
 if TYPE_CHECKING:
     from textual.screen import Screen
@@ -334,13 +339,18 @@ class DiffView(VerticalScroll):
             tuple[int, int | None, Literal["char", "line"]],
         ] = {}
 
+        self._discussion_state = InlineDiscussionState()
+        self._composer = DiffCommentComposer(self)
+        self._pending_replies_by_root: dict[int, list[PendingReviewComment]] = {}
+        self._annotation_line_heights: dict[int, int] = {}
+        self._annotation_hunk_heights: dict[int, int] = {}
+        self._annotation_width = 0
         self._comment_threads_by_line: dict[int, list[ReviewThread]] = {}
         self._comment_line_indices: list[int] = []
         self._comment_widgets_by_line: dict[int, list[Widget]] = {}
         self._comment_layout_widgets_by_line: dict[int, list[Widget]] = {}
         self._comment_side_by_line: dict[int, Literal["old", "new", "auto"]] = {}
         self._pending_comment_drafts_by_line: dict[int, list[PendingReviewComment]] = {}
-        self._collapsed_pending_drafts: dict[int, PendingReviewComment] = {}
         self._pending_comment_widgets_by_line: dict[int, list[Widget]] = {}
         self._pending_comment_layout_widgets_by_line: dict[int, list[Widget]] = {}
         self._pending_file_comment_drafts_by_path: dict[
@@ -354,22 +364,14 @@ class DiffView(VerticalScroll):
         self._inline_comment_editor_target: (
             tuple[str, int, Literal["LEFT", "RIGHT"]] | None
         ) = None
-        self._inline_comment_editor_widget: InlineCommentEditor | None = None
-        self._inline_comment_screen: CommentSubmitScreen | None = None
-        self._inline_comment_editor_initial_body: str = ""
-        self._inline_comment_editor_context: str = ""
         self._inline_comment_editor_draft_index: int | None = None
         self._inline_comment_editor_edit_target: PRComment | None = None
         self._inline_comment_editor_start_line: int | None = None
         self._inline_comment_editor_start_side: Literal["LEFT", "RIGHT"] | None = None
         self._file_comment_editor_hunk_index: int | None = None
         self._file_comment_editor_target: str | None = None
-        self._file_comment_editor_initial_body = ""
         self._file_comment_editor_draft_index: int | None = None
         self._file_comment_editor_edit_target: PRComment | None = None
-        self._file_comment_editor_widget: InlineCommentEditor | None = None
-        self._file_comment_screen: CommentSubmitScreen | None = None
-        self._reply_comment_screen: CommentSubmitScreen | None = None
         self._reply_comment_target: PRComment | None = None
         self._reply_comment_draft_index: int | None = None
         self._pending_comment_jump: str | None = None  # "first" or "last"
@@ -601,13 +603,45 @@ class DiffView(VerticalScroll):
     @on(events.DescendantFocus)
     @on(events.DescendantBlur)
     def _refresh_cursor_focus(self) -> None:
+        editor = self._composer.widget
+        if editor is not None and editor.has_focus_within:
+            self._composer.reveal_pending = True
         self._update_line_cursor(self.cursor_line)
         if self.visual_mode:
             self._update_selection_highlighting({self.cursor_line})
 
     def _on_layout_refresh(self, screen: Screen) -> None:
         self._refresh_sticky_header()
+        _comments.measure_annotations(self)
+        self._composer.reveal()
         _virtual._viewport_frame_painted(self, screen)
+
+    @on(InlineCommentEditor.Suspended)
+    async def _suspend_comment_editor(
+        self, event: InlineCommentEditor.Suspended
+    ) -> None:
+        event.stop()
+        await self._composer.suspend()
+
+    @on(Collapsible.Expanded)
+    @on(Collapsible.Collapsed)
+    def _discussion_toggled(self, event: Collapsible.Toggled) -> None:
+        if isinstance(event.collapsible, InlineReviewThread):
+            _comments.disclose_thread(self, event.collapsible)
+
+    @on(ReviewThreadItem.Selected)
+    def _discussion_selected(self, event: ReviewThreadItem.Selected) -> None:
+        event.stop()
+        _comments.select_thread_from_title(self, event.thread)
+
+    @on(InlineReviewThread.DisclosureChanged)
+    def _discussion_history_toggled(
+        self, event: InlineReviewThread.DisclosureChanged
+    ) -> None:
+        event.stop()
+        _comments.select_comment_widget(self, event.target)
+        self.screen.set_focus(self, scroll_visible=False)
+        _comments.invalidate_annotation_heights(self)
 
     def watch_active_pane(
         self,
@@ -1273,37 +1307,31 @@ class DiffView(VerticalScroll):
         self._reply_comment_draft_index = draft_index
         self._reply_comment_target = comment
         author = f"@{comment.user.login}" if comment.user is not None else "comment"
-        editor = InlineCommentEditor(
-            kind="reply",
-            title="Edit pending reply" if draft is not None else "Reply to comment",
-            placeholder="Write a reply to this thread...",
-            initial_text=draft.body if draft is not None else "",
-            context=f"Reply to {author} in {comment.path}",
-            id="diff-reply-comment-editor",
+        await self._composer.open(
+            ComposerSession(
+                kind="reply",
+                title="Edit pending reply"
+                if draft is not None
+                else f"Reply to {author}",
+                buffer=CommentEditorBuffer(
+                    text=draft.body if draft is not None else ""
+                ),
+                context=f"Reply to {author} in {comment.path}",
+                root_id=comment.in_reply_to_id or comment.id,
+                draft=draft,
+            )
         )
-        self._reply_comment_screen = CommentSubmitScreen(editor, owner=self)
-        await self.app.push_screen(self._reply_comment_screen)
         return True
 
     async def close_reply_comment_editor(self) -> None:
-        screen = self._reply_comment_screen
-        self._reply_comment_screen = None
+        if self._reply_comment_target is None:
+            return
         self._reply_comment_target = None
         self._reply_comment_draft_index = None
-        if screen is not None:
-            await screen.dismiss()
-            if self.is_mounted:
-                self.screen.set_focus(self, scroll_visible=False)
+        await self._composer.close()
 
     def _comment_editor_is_open(self) -> bool:
-        return any(
-            screen is not None
-            for screen in (
-                self._inline_comment_screen,
-                self._file_comment_screen,
-                self._reply_comment_screen,
-            )
-        )
+        return self._composer.session is not None
 
     def _pending_draft_index(
         self,
@@ -1811,24 +1839,23 @@ class DiffView(VerticalScroll):
         )
         self._file_comment_editor_edit_target = selected_comment
         selected = selected_draft or selected_comment
-        self._file_comment_editor_initial_body = (
-            selected.body if selected is not None else ""
-        )
         self._file_comment_editor_hunk_index = hunk_index
         self._file_comment_editor_target = target
-        self._file_comment_editor_widget = InlineCommentEditor(
-            kind="file",
-            title=("Edit file comment" if edit else "Add file comment"),
-            placeholder="Write a comment for the entire file...",
-            initial_text=self._file_comment_editor_initial_body,
-            context=f"Entire file: {target}",
-            update_existing=selected_comment is not None,
-            id="diff-file-comment-editor",
+        await self._composer.open(
+            ComposerSession(
+                kind="file",
+                title="Edit file comment" if edit else "New file comment",
+                draft=selected_draft,
+                buffer=CommentEditorBuffer(
+                    text=selected.body if selected is not None else ""
+                ),
+                context=f"Entire file: {target}",
+                update_existing=selected_comment is not None,
+                root_id=(selected_comment.in_reply_to_id or selected_comment.id)
+                if selected_comment
+                else None,
+            )
         )
-        self._file_comment_screen = CommentSubmitScreen(
-            self._file_comment_editor_widget, owner=self
-        )
-        await self.app.push_screen(self._file_comment_screen)
         return True
 
     async def close_file_comment_editor(self) -> None:
@@ -1838,18 +1865,11 @@ class DiffView(VerticalScroll):
         ):
             return
 
-        screen = self._file_comment_screen
-        self._file_comment_screen = None
-        self._file_comment_editor_widget = None
         self._file_comment_editor_hunk_index = None
         self._file_comment_editor_target = None
-        self._file_comment_editor_initial_body = ""
         self._file_comment_editor_draft_index = None
         self._file_comment_editor_edit_target = None
-        if screen is not None:
-            await screen.dismiss()
-        if self.is_mounted:
-            self.screen.set_focus(self, scroll_visible=False)
+        await self._composer.close()
 
     @staticmethod
     def _inline_comment_side_label(side: Literal["LEFT", "RIGHT"]) -> str:
@@ -1917,7 +1937,6 @@ class DiffView(VerticalScroll):
         self._inline_comment_editor_edit_target = None
         if selected_draft is not None:
             target = (selected_draft.path, selected_draft.line, selected_draft.side)
-            self._inline_comment_editor_initial_body = selected_draft.body
             self._inline_comment_editor_draft_index = self._pending_draft_index(
                 selected_draft
             )
@@ -1928,7 +1947,6 @@ class DiffView(VerticalScroll):
             if comment_target is None:
                 return False
             target = comment_target
-            self._inline_comment_editor_initial_body = selected_comment.body
             self._inline_comment_editor_draft_index = None
             self._inline_comment_editor_edit_target = selected_comment
             if target[2] == "LEFT":
@@ -1960,30 +1978,35 @@ class DiffView(VerticalScroll):
             else:
                 self._inline_comment_editor_start_line = None
                 self._inline_comment_editor_start_side = None
-            self._inline_comment_editor_initial_body = ""
             self._inline_comment_editor_draft_index = None
 
         self._inline_comment_editor_line_index = editor_line_index
         self._inline_comment_editor_target = target
-        self._inline_comment_editor_context = self._inline_comment_context_label(
-            target,
-            start_line=self._inline_comment_editor_start_line,
-            start_side=self._inline_comment_editor_start_side,
-        )
+        selected = selected_draft or selected_comment
         edit_target = self._inline_comment_editor_edit_target
-        self._inline_comment_editor_widget = InlineCommentEditor(
-            kind="inline",
-            title=("Edit inline comment" if edit else "Add inline comment"),
-            placeholder="Write a comment for the selected line...",
-            initial_text=self._inline_comment_editor_initial_body,
-            context=self._inline_comment_editor_context,
-            update_existing=edit_target is not None,
-            id="diff-inline-comment-editor",
+        start = self._inline_comment_editor_start_line
+        line_label = f"L{target[1]}" if start is None else f"L{start}–{target[1]}"
+        side_label = self._inline_comment_side_label(target[2])
+        title = "Edit comment" if edit else f"New comment · {line_label} ({side_label})"
+        await self._composer.open(
+            ComposerSession(
+                kind="inline",
+                title=title,
+                draft=selected_draft,
+                buffer=CommentEditorBuffer(
+                    text=selected.body if selected is not None else ""
+                ),
+                context=self._inline_comment_context_label(
+                    target,
+                    start_line=self._inline_comment_editor_start_line,
+                    start_side=self._inline_comment_editor_start_side,
+                ),
+                update_existing=edit_target is not None,
+                root_id=(edit_target.in_reply_to_id or edit_target.id)
+                if edit_target
+                else None,
+            )
         )
-        self._inline_comment_screen = CommentSubmitScreen(
-            self._inline_comment_editor_widget, owner=self
-        )
-        await self.app.push_screen(self._inline_comment_screen)
         return True
 
     async def close_inline_comment_editor(self) -> None:
@@ -1993,21 +2016,13 @@ class DiffView(VerticalScroll):
         ):
             return
 
-        screen = self._inline_comment_screen
-        self._inline_comment_screen = None
         self._inline_comment_editor_line_index = None
         self._inline_comment_editor_target = None
-        self._inline_comment_editor_widget = None
-        self._inline_comment_editor_initial_body = ""
-        self._inline_comment_editor_context = ""
         self._inline_comment_editor_draft_index = None
         self._inline_comment_editor_edit_target = None
         self._inline_comment_editor_start_line = None
         self._inline_comment_editor_start_side = None
-        if screen is not None:
-            await screen.dismiss()
-        if self.is_mounted:
-            self.screen.set_focus(self, scroll_visible=False)
+        await self._composer.close()
 
     def _get_cursor_text_for_target(
         self,
@@ -2519,8 +2534,6 @@ class DiffView(VerticalScroll):
             elif _show_full_file is not None:
                 self._showing_full_file = _show_full_file
             if is_new_file:
-                await self.close_inline_comment_editor()
-                await self.close_file_comment_editor()
                 self._selected_file_header_hunk = None
                 selected_header_path = None
 
@@ -3088,7 +3101,20 @@ class DiffView(VerticalScroll):
         )
 
     def action_exit_visual(self) -> None:
-        _selection._exit_visual(self)
+        session = self._composer.session
+        if (
+            not self.visual_mode
+            and not self._search.query
+            and session is not None
+            and not session.suspended
+        ):
+            self.run_worker(
+                self._composer.suspend(),
+                name="suspend-comment-editor",
+                group="diff-comment-composer",
+            )
+        else:
+            _selection._exit_visual(self)
 
     def _compute_selection_spec_for_line(self, line_idx: int):
         return _selection._compute_selection_spec_for_line(self, line_idx)

@@ -300,7 +300,8 @@ def _has_annotations_for_paths(view: DiffView, paths: frozenset[str]) -> bool:
     if (
         view._inline_comment_editor_target is not None
         or view._file_comment_editor_target is not None
-        or view._collapsed_pending_drafts
+        or view._reply_comment_target is not None
+        or view._discussion_state.collapsed_drafts
     ):
         return True
     store = view.store
@@ -527,6 +528,7 @@ async def _render_diff(view: DiffView, *, finalize: bool = True) -> None:
         new_content = view.query_one("#diff-content", VerticalScroll)
         view._content_widget = new_content
     with view.app.batch_update():
+        view._composer.capture()
         if view._virt.active or any(new_content.styles.margin):
             await _virtual._remove_virtual_widgets(*new_content.children)
         else:

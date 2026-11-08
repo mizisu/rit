@@ -2,6 +2,7 @@ DiffView {
     width: 1fr;
     overflow-x: auto;
     overflow-y: auto;
+    scrollbar-size-vertical: 1;
     layers: base sticky search;
 }
 

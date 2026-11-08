@@ -15,6 +15,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from collections.abc import Set as AbstractSet
 from typing import TYPE_CHECKING, Literal
 
+from rich.markup import escape
 from textual.containers import Horizontal, VerticalScroll
 from textual.widget import Widget
 from textual.widgets import Collapsible, Static
@@ -30,6 +31,7 @@ from rit.ui.icons import get_file_icon
 from rit.ui.messages import Flash
 from rit.ui.widgets import diff_layout as _layout
 from rit.ui.widgets.comment_card import CommentCard
+from rit.ui.widgets.inline_review_thread import InlineReviewThread
 from rit.ui.widgets.review_thread_card import ReviewThreadItem
 
 if TYPE_CHECKING:
@@ -69,7 +71,6 @@ __all__ = (
 )
 
 
-# Inline ReviewThreadItem borders occupy two rows even when collapsed.
 COLLAPSED_PENDING_DRAFT_HEIGHT = 3
 COLLAPSED_THREAD_HEIGHT = 3
 COMMENT_HEIGHT_ESTIMATE = 3  # header + ~2 body lines
@@ -87,6 +88,9 @@ def estimate_thread_height(thread: ReviewThread) -> int:
 
 
 def clear_state(view: DiffView) -> None:
+    view._pending_replies_by_root = {}
+    view._annotation_line_heights = {}
+    view._annotation_hunk_heights = {}
     view._comment_threads_by_line.clear()
     view._comment_line_indices.clear()
     view._comment_widgets_by_line.clear()
@@ -101,7 +105,7 @@ def clear_state(view: DiffView) -> None:
 
 def build_comment_map(view: DiffView) -> None:
     clear_state(view)
-    _prune_collapsed_pending_drafts(view)
+    _restore_pending_disclosure(view)
 
     if not view.store or not view.current_file:
         return
@@ -113,7 +117,14 @@ def build_comment_map(view: DiffView) -> None:
     if not file_paths:
         return
 
+    threads = _visible_review_threads_for_current_diff(view, file_paths)
+    roots = {thread.root_comment_id for thread in threads}
     for draft in _pending_comments_for_current_diff(view, file_paths):
+        if draft.is_reply and draft.reply_to_id in roots:
+            view._pending_replies_by_root.setdefault(draft.reply_to_id, []).append(
+                draft
+            )
+            continue
         if draft.is_file_level:
             view._pending_file_comment_drafts_by_path.setdefault(draft.path, []).append(
                 draft
@@ -125,7 +136,6 @@ def build_comment_map(view: DiffView) -> None:
                 draft
             )
 
-    threads = _visible_review_threads_for_current_diff(view, file_paths)
     if not threads:
         view._comment_line_indices = _comment_line_indices_for_keys(
             view._pending_comment_drafts_by_line.keys()
@@ -657,6 +667,8 @@ def mount_file_comments_for_hunk(
             view=view,
             widget_id=f"pending-file-draft-{hunk_index}-{index}",
         )
+        if view._composer.layout is item:
+            view._composer.hunk = hunk_index
         layout_widget = mount_side_aware_widget(
             view,
             container,
@@ -669,7 +681,9 @@ def mount_file_comments_for_hunk(
         layout_widgets.append(layout_widget)
 
     for thread in view._file_comment_threads_by_path.get(path, ()):
-        item = _build_inline_thread_widget(thread)
+        item = _build_inline_thread_widget(thread, view=view)
+        if view._composer.layout is item:
+            view._composer.hunk = hunk_index
         layout_widget = mount_side_aware_widget(
             view,
             container,
@@ -687,6 +701,7 @@ def mount_file_comments_for_hunk(
         view._file_comment_widgets_by_hunk[hunk_index] = comment_widgets
     if layout_widgets:
         view._file_comment_annotation_widgets_by_hunk[hunk_index] = layout_widgets
+    view._composer.mount_file(container, hunk_index, before)
 
 
 def mount_pending_drafts_for_line(
@@ -711,6 +726,8 @@ def mount_pending_drafts_for_line(
             index=index,
             view=view,
         )
+        if view._composer.layout is item:
+            view._composer.line = line_index
         layout_widget = mount_side_aware_widget(
             view,
             container,
@@ -733,14 +750,14 @@ def mount_comments_for_line(
     *,
     before: Widget | None = None,
 ) -> None:
-    threads = view._comment_threads_by_line.get(line_index)
-    if not threads:
-        return
+    threads = view._comment_threads_by_line.get(line_index, ())
 
     mounted: list[Widget] = []
     layout_widgets: list[Widget] = []
     for thread in threads:
-        widget = _build_inline_thread_widget(thread)
+        widget = _build_inline_thread_widget(thread, view=view)
+        if view._composer.layout is widget:
+            view._composer.line = line_index
         root = thread.root_comment
         side = _comment_target_side(root, thread=thread) if root is not None else "auto"
         layout_widget = mount_side_aware_widget(
@@ -754,8 +771,10 @@ def mount_comments_for_line(
         mounted.append(widget)
         layout_widgets.append(layout_widget)
 
-    view._comment_widgets_by_line[line_index] = mounted
-    view._comment_layout_widgets_by_line[line_index] = layout_widgets
+    if mounted:
+        view._comment_widgets_by_line[line_index] = mounted
+        view._comment_layout_widgets_by_line[line_index] = layout_widgets
+    view._composer.mount_line(container, line_index, before)
 
 
 def _build_side_aware_layout(
@@ -767,9 +786,16 @@ def _build_side_aware_layout(
 ) -> Widget:
     widget.styles.width = "1fr"
     widget.styles.max_width = INLINE_COMMENT_MAX_WIDTH
-    if view._split_for_line(line_index):
-        return _build_split_comment_layout(view, widget, side=side)
-    return _build_unified_comment_layout(view, widget, line_index=line_index)
+    layout = (
+        _build_split_comment_layout(view, widget, side=side)
+        if view._split_for_line(line_index)
+        else _build_unified_comment_layout(view, widget, line_index=line_index)
+    )
+    width = max(1, view.scrollable_content_region.width)
+    layout.styles.width = width
+    layout.styles.min_width = width
+    layout.styles.max_width = width
+    return layout
 
 
 def _build_unified_comment_layout(
@@ -905,7 +931,7 @@ def _comment_target_index(
     if pending_widgets is not None:
         for widget in pending_widgets:
             offset += 1
-            if widget is target:
+            if widget is target or target in widget.ancestors:
                 return offset
 
     if thread_widgets is None:
@@ -969,6 +995,27 @@ def select_comment_widget(view: DiffView, target: Widget) -> bool:
         update_file_comment_cursor_highlight(view, hunk_index)
         return True
     return False
+
+
+def select_thread_from_title(view: DiffView, thread: ReviewThreadItem) -> None:
+    """Make mouse disclosure and subsequent comment actions share one target."""
+    suppress_scroll = view._cursor_ui.suppress_scroll
+    view._cursor_ui.suppress_scroll = True
+    try:
+        selected = select_comment_widget(view, thread)
+    finally:
+        view._cursor_ui.suppress_scroll = suppress_scroll
+    if not selected:
+        return
+    if thread.has_class("pending-draft-thread") and view.store is not None:
+        index = view.active_pending_draft_index()
+        if index is not None:
+            draft = view.store.state.pending_review.comments[index]
+            _set_pending_draft_collapsed(view, draft, collapsed=thread.collapsed)
+            if (card := thread.comment_card_at(0)) is not None:
+                card.set_class(thread.collapsed, "-collapsed")
+    view.screen.set_focus(view, scroll_visible=False)
+    invalidate_annotation_heights(view)
 
 
 def total_comments_at_line(view: DiffView, line_index: int) -> int:
@@ -1088,10 +1135,18 @@ def active_pending_draft(
     if index <= 0:
         return None
     drafts = view._pending_comment_drafts_by_line.get(line_index)
-    if drafts is None:
-        return None
-    if 1 <= index <= len(drafts):
+    if drafts is not None and 1 <= index <= len(drafts):
         return drafts[index - 1]
+    if not getattr(view, "_comment_threads_by_line", None):
+        return None
+    position = _active_thread_position(view, line_index)
+    if position is not None:
+        thread_index, comment_index, _ = position
+        widgets = view._comment_widgets_by_line.get(line_index, ())
+        if comment_index is not None and thread_index < len(widgets):
+            widget = widgets[thread_index]
+            if isinstance(widget, InlineReviewThread):
+                return widget.pending_at(comment_index)
     return None
 
 
@@ -1143,10 +1198,18 @@ def active_file_pending_draft(
     path = _file_comment_path(view, hunk_index)
     if index <= 0 or path is None:
         return None
-    drafts = view._pending_file_comment_drafts_by_path.get(path)
-    if drafts is None or index > len(drafts):
-        return None
-    return drafts[index - 1]
+    drafts = view._pending_file_comment_drafts_by_path.get(path, ())
+    if index <= len(drafts):
+        return drafts[index - 1]
+    position = _active_file_thread_position(view, hunk_index)
+    if position is not None:
+        thread_index, comment_index, _ = position
+        widgets = view._file_comment_widgets_by_hunk.get(hunk_index, ())
+        if comment_index is not None and thread_index < len(widgets):
+            widget = widgets[thread_index]
+            if isinstance(widget, InlineReviewThread):
+                return widget.pending_at(comment_index)
+    return None
 
 
 def _active_file_thread_position(
@@ -1340,9 +1403,17 @@ def _try_toggle_file_current(view: DiffView, hunk_index: int) -> bool:
     if target is None:
         return False
 
+    thread_item = _thread_item_for_widget(target)
+    if isinstance(thread_item, InlineReviewThread) and thread_item.toggle_history(
+        target
+    ):
+        return True
     draft = active_file_pending_draft(view, hunk_index)
-    if isinstance(target, CommentCard) and draft is not None:
-        thread_item = _thread_item_for_widget(target)
+    if (
+        isinstance(target, CommentCard)
+        and draft is not None
+        and not isinstance(thread_item, InlineReviewThread)
+    ):
         if thread_item is None:
             target.toggle_collapsed()
             collapsed = target.collapsed
@@ -1351,9 +1422,6 @@ def _try_toggle_file_current(view: DiffView, hunk_index: int) -> bool:
             thread_item.collapsed = collapsed
             target.set_class(collapsed, "-collapsed")
         _set_pending_draft_collapsed(view, draft, collapsed=collapsed)
-        from rit.ui.widgets import diff_virtual as _virtual
-
-        _virtual._rebuild_virtual_layout(view)
         return True
 
     position = _active_file_thread_position(view, hunk_index)
@@ -1398,9 +1466,17 @@ def try_toggle_current(view: DiffView) -> bool:
     if target is None:
         return False
 
+    thread_item = _thread_item_for_widget(target)
+    if isinstance(thread_item, InlineReviewThread) and thread_item.toggle_history(
+        target
+    ):
+        return True
     draft = active_pending_draft(view, view.cursor_line)
-    if isinstance(target, CommentCard) and draft is not None:
-        thread_item = _thread_item_for_widget(target)
+    if (
+        isinstance(target, CommentCard)
+        and draft is not None
+        and not isinstance(thread_item, InlineReviewThread)
+    ):
         if thread_item is None:
             target.toggle_collapsed()
             collapsed = target.collapsed
@@ -1409,9 +1485,6 @@ def try_toggle_current(view: DiffView) -> bool:
             thread_item.collapsed = collapsed
             target.set_class(collapsed, "-collapsed")
         _set_pending_draft_collapsed(view, draft, collapsed=collapsed)
-        from rit.ui.widgets import diff_virtual as _virtual
-
-        _virtual._rebuild_virtual_layout(view)
         return True
 
     position = _active_thread_position(view, view.cursor_line)
@@ -1563,6 +1636,106 @@ def _update_thread_widget_resolved(
     _virtual._rebuild_virtual_layout(view)
 
 
+def invalidate_annotation_heights(view: DiffView) -> None:
+    from rit.ui.widgets import diff_virtual
+
+    view._annotation_line_heights.clear()
+    view._annotation_hunk_heights.clear()
+    diff_virtual._rebuild_virtual_layout(view)
+    view.refresh(layout=True)
+
+
+def disclose_thread(view: DiffView, thread: InlineReviewThread) -> None:
+    state = view._discussion_state
+    if (
+        not thread.is_attached
+        or state.thread_collapsed.get(thread.root_id, thread.is_resolved)
+        == thread.collapsed
+    ):
+        return
+    state.thread_collapsed[thread.root_id] = thread.collapsed
+    invalidate_annotation_heights(view)
+
+
+def thread_height(view: DiffView, thread: ReviewThread) -> int:
+    state = getattr(view, "_discussion_state", None)
+    if state is None:
+        return estimate_thread_height(thread)
+    if state.thread_collapsed.get(thread.root_comment_id, thread.is_resolved):
+        return COLLAPSED_THREAD_HEIGHT
+    comments = thread.comments
+    drafts = view._pending_replies_by_root.get(thread.root_comment_id, ())
+    history_count = InlineReviewThread.history_count(len(comments))
+    if history_count and thread.root_comment_id not in state.history_roots:
+        comments = [comments[0], *comments[history_count + 1 :]]
+    height = COLLAPSED_THREAD_HEIGHT + sum(
+        4 + max(1, _count_body_lines(comment.body)) for comment in comments
+    )
+    if history_count:
+        height += 1
+    height += sum(4 + max(1, _count_body_lines(draft.body)) for draft in drafts)
+    session = view._composer.session
+    if session is not None and session.root_id == thread.root_comment_id:
+        height += view._composer.estimate_height()
+    return height
+
+
+def measure_annotations(view: DiffView) -> None:
+    """Reconcile virtual geometry with wrapped discussions and input heights."""
+    from rit.ui.widgets import diff_virtual
+
+    if view._diff is None or not view._all_lines:
+        return
+    width = max(1, view.scrollable_content_region.width)
+    if view._annotation_width != width:
+        view._annotation_width = width
+        view._annotation_line_heights.clear()
+        view._annotation_hunk_heights.clear()
+        for row in view.query(".diff-comment-row"):
+            row.styles.width = width
+            row.styles.min_width = width
+            row.styles.max_width = width
+    changed = False
+    line_keys = (
+        view._comment_layout_widgets_by_line.keys()
+        | view._pending_comment_layout_widgets_by_line.keys()
+    )
+    composer = view._composer
+    if composer.line is not None:
+        line_keys.add(composer.line)
+    for line in line_keys:
+        widgets = [
+            *view._comment_layout_widgets_by_line.get(line, ()),
+            *view._pending_comment_layout_widgets_by_line.get(line, ()),
+        ]
+        if (
+            composer.line == line
+            and composer.layout is not None
+            and not isinstance(composer.layout, ReviewThreadItem)
+        ):
+            widgets.append(composer.layout)
+        if not widgets or any(not widget.is_mounted for widget in widgets):
+            continue
+        height = sum(widget.outer_size.height for widget in widgets)
+        if height and view._annotation_line_heights.get(line) != height:
+            view._annotation_line_heights[line] = height
+            changed = True
+    for hunk, widgets in view._file_comment_annotation_widgets_by_hunk.items():
+        if not widgets or any(not widget.is_mounted for widget in widgets):
+            continue
+        height = sum(widget.outer_size.height for widget in widgets)
+        if height and view._annotation_hunk_heights.get(hunk) != height:
+            view._annotation_hunk_heights[hunk] = height
+            changed = True
+    if changed:
+        diff_virtual._rebuild_virtual_layout(view)
+        if view._virt.active and view._content_widget is not None:
+            start, end = view._virt.rendered_start, view._virt.rendered_end
+            top = diff_virtual._virtual_top_buffer_height(view, start, end)
+            bottom = diff_virtual._virtual_bottom_buffer_height(view, end)
+            view._content_widget.styles.margin = (top, 0, bottom, 0)
+
+
 def estimate_pending_draft_height(draft: PendingReviewComment) -> int:
     body_lines = max(1, _count_body_lines(draft.body))
     return max(PENDING_DRAFT_HEIGHT_ESTIMATE, body_lines + 5)
@@ -1594,14 +1767,13 @@ def _count_body_lines(body: str) -> int:
 
 
 def _pending_draft_title(draft: PendingReviewComment) -> str:
-    file_icon = get_file_icon(draft.path)
     location = (
         f"{draft.path} • entire file"
         if draft.is_file_level
         else f"{draft.path}:{_pending_draft_line_label(draft)}"
     )
     label = "pending reply" if draft.is_reply else "pending"
-    return f"{file_icon} {location} [#eed49f]({label})[/]"
+    return f"{get_file_icon(draft.path)} {escape(location)} [#eed49f]({label})[/]"
 
 
 def _build_pending_draft_item(
@@ -1649,7 +1821,9 @@ def _build_pending_draft_item(
     widget.id = widget_id
     widget.add_class("pending-draft", "--pending-draft")
     widget.set_content("", draft.body)
-    widget.set_class(collapsed, "-collapsed")
+    if view is not None:
+        view._composer.mount_thread(item, draft=draft)
+    widget.set_class(item.collapsed, "-collapsed")
     return widget, item
 
 
@@ -1673,8 +1847,8 @@ def pending_draft_is_collapsed(
     view: DiffView,
     draft: PendingReviewComment,
 ) -> bool:
-    collapsed_drafts = getattr(view, "_collapsed_pending_drafts", None)
-    return collapsed_drafts is not None and collapsed_drafts.get(id(draft)) is draft
+    state = getattr(view, "_discussion_state", None)
+    return state is not None and state.collapsed_drafts.get(id(draft)) is draft
 
 
 def _set_pending_draft_collapsed(
@@ -1683,47 +1857,35 @@ def _set_pending_draft_collapsed(
     *,
     collapsed: bool,
 ) -> None:
-    collapsed_drafts = getattr(view, "_collapsed_pending_drafts", None)
-    if collapsed_drafts is None:
-        return
-
-    draft_id = id(draft)
+    drafts = view._discussion_state.collapsed_drafts
     if collapsed:
-        collapsed_drafts[draft_id] = draft
+        drafts[id(draft)] = draft
     else:
-        collapsed_drafts.pop(draft_id, None)
+        drafts.pop(id(draft), None)
+    invalidate_annotation_heights(view)
 
 
-def _prune_collapsed_pending_drafts(view: DiffView) -> None:
-    collapsed_drafts = getattr(view, "_collapsed_pending_drafts", None)
-    if collapsed_drafts is None:
+def _restore_pending_disclosure(view: DiffView) -> None:
+    state = getattr(view, "_discussion_state", None)
+    if state is None or not state.collapsed_drafts:
         return
-    if not view.store:
-        collapsed_drafts.clear()
-        return
-
-    pending_review = getattr(view.store.state, "pending_review", None)
-    pending_comments = list(getattr(pending_review, "comments", ()))
-    available = {id(draft): draft for draft in pending_comments}
-    retained: dict[int, PendingReviewComment] = {}
-    unmatched: list[PendingReviewComment] = []
-
-    for draft_id, draft in collapsed_drafts.items():
-        if available.get(draft_id) is draft:
-            retained[draft_id] = draft
-            available.pop(draft_id)
-        else:
-            unmatched.append(draft)
-
-    for previous in unmatched:
-        replacement = _matching_pending_draft(previous, available.values())
-        if replacement is None:
+    candidates = view.store.state.pending_review.comments if view.store else []
+    available = {id(draft): draft for draft in candidates}
+    retained = {
+        key: draft
+        for key, draft in state.collapsed_drafts.items()
+        if available.get(key) is draft
+    }
+    for key in retained:
+        available.pop(key)
+    for key, draft in state.collapsed_drafts.items():
+        if key in retained:
             continue
-        replacement_id = id(replacement)
-        retained[replacement_id] = replacement
-        available.pop(replacement_id)
-
-    view._collapsed_pending_drafts = retained
+        replacement = _matching_pending_draft(draft, available.values())
+        if replacement is not None:
+            retained[id(replacement)] = replacement
+            available.pop(id(replacement))
+    state.collapsed_drafts = retained
 
 
 def _matching_pending_draft(
@@ -1774,13 +1936,25 @@ def _inline_thread_title(thread: ReviewThread) -> str:
         if thread.anchor_line
         else thread.path
     )
+    location = escape(location)
     file_icon = get_file_icon(thread.path)
     if thread.is_resolved:
         return f"✓ Resolved: {file_icon} {location}"
     return f"{file_icon} {location}"
 
 
-def _build_inline_thread_widget(thread: ReviewThread) -> ReviewThreadItem:
+def _build_inline_thread_widget(
+    thread: ReviewThread, *, view: DiffView | None = None
+) -> ReviewThreadItem:
+    if view is not None:
+        item = InlineReviewThread(
+            thread,
+            view._pending_replies_by_root.get(thread.root_comment_id, []),
+            view._discussion_state,
+            title=_inline_thread_title(thread),
+        )
+        view._composer.mount_thread(item)
+        return item
     if thread.is_resolved:
         classes = "--thread --resolved --inline"
         collapsed = True

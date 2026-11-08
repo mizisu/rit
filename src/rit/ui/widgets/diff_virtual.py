@@ -18,6 +18,7 @@ from textual.widgets import Static
 from rit.ui.widgets import diff_folding as _folding
 from rit.ui.widgets import diff_geometry as _geometry
 from rit.ui.widgets.diff_types import SplitDiffBlock, UnifiedDiffBlock, VirtualState
+from rit.ui.widgets.review_thread_card import ReviewThreadItem
 
 if TYPE_CHECKING:
     from textual.screen import Screen
@@ -117,8 +118,8 @@ def _extra_heights_by_line(view) -> dict[int, int]:
     from rit.ui.widgets.diff_comments import (
         COLLAPSED_PENDING_DRAFT_HEIGHT,
         estimate_pending_draft_height,
-        estimate_thread_height,
         pending_draft_is_collapsed,
+        thread_height,
     )
 
     extra_heights: dict[int, int] = {}
@@ -140,12 +141,20 @@ def _extra_heights_by_line(view) -> dict[int, int]:
     comment_map = getattr(view, "_comment_threads_by_line", {})
     for line_index, threads in comment_map.items():
         height = (
-            estimate_thread_height(threads[0])
+            thread_height(view, threads[0])
             if len(threads) == 1
-            else sum(estimate_thread_height(thread) for thread in threads)
+            else sum(thread_height(view, thread) for thread in threads)
         )
         extra_heights[line_index] = extra_heights.get(line_index, 0) + height
 
+    composer = getattr(view, "_composer", None)
+    if composer is not None and (session := composer.session) is not None:
+        line = view._inline_comment_editor_line_index
+        if session.root_id is None and session.kind == "inline" and line is not None:
+            extra_heights[line] = (
+                extra_heights.get(line, 0) + composer.estimate_height()
+            )
+    extra_heights.update(getattr(view, "_annotation_line_heights", {}))
     return extra_heights
 
 
@@ -153,8 +162,8 @@ def _extra_heights_by_hunk(view) -> dict[int, int]:
     from rit.ui.widgets.diff_comments import (
         COLLAPSED_PENDING_DRAFT_HEIGHT,
         estimate_pending_draft_height,
-        estimate_thread_height,
         pending_draft_is_collapsed,
+        thread_height,
     )
 
     if view._diff is None:
@@ -178,9 +187,17 @@ def _extra_heights_by_hunk(view) -> dict[int, int]:
                 else estimate_pending_draft_height(draft)
             )
         for thread in thread_map.get(path, ()):
-            height += estimate_thread_height(thread)
+            height += thread_height(view, thread)
         if height:
             extra_heights[hunk_index] = height
+    composer = getattr(view, "_composer", None)
+    if composer is not None and (session := composer.session) is not None:
+        hunk = view._file_comment_editor_hunk_index
+        if session.root_id is None and session.kind == "file" and hunk is not None:
+            extra_heights[hunk] = (
+                extra_heights.get(hunk, 0) + composer.estimate_height()
+            )
+    extra_heights.update(getattr(view, "_annotation_hunk_heights", {}))
     return extra_heights
 
 
@@ -522,6 +539,17 @@ async def _remove_virtualized_lines(view, start: int, end: int) -> None:
         return
 
     widgets: list[Widget] = []
+    composer = getattr(view, "_composer", None)
+    if (
+        composer is not None
+        and composer.line is not None
+        and start <= composer.line <= end
+    ):
+        if composer.layout is not None and not isinstance(
+            composer.layout, ReviewThreadItem
+        ):
+            widgets.append(composer.layout)
+        composer.capture(evicted=True)
     comment_widgets_map = getattr(view, "_comment_widgets_by_line", {})
     comment_layout_widgets_map = getattr(view, "_comment_layout_widgets_by_line", {})
     pending_draft_widgets_map = getattr(view, "_pending_comment_widgets_by_line", {})
@@ -556,6 +584,8 @@ async def _remove_virtualized_lines(view, start: int, end: int) -> None:
 
 
 async def _remove_mounted_file_comment_annotations(view, hunk_index: int) -> None:
+    if view._composer.hunk == hunk_index:
+        view._composer.capture(evicted=True)
     widgets = view._file_comment_annotation_widgets_by_hunk.pop(hunk_index, ())
     view._pending_file_comment_widgets_by_hunk.pop(hunk_index, None)
     view._file_comment_widgets_by_hunk.pop(hunk_index, None)

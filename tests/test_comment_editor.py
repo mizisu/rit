@@ -5,9 +5,9 @@ from textual.widgets import Button, Footer, OptionList, TextArea
 from rit.app import RitApp
 from rit.core.diff import parse_patch
 from rit.state.store import PRStore
-from rit.ui.screens.comment_submit import CommentSubmitScreen
 from rit.ui.screens.main import MainScreen
 from rit.ui.widgets.comment_editor import EditorKind, InlineCommentEditor
+from tests.conftest import wait_until
 
 
 class _CommentEditorTestApp(App[None]):
@@ -158,24 +158,43 @@ async def test_comment_editor_owns_tab_while_open(
         assert await diff_view.open_inline_comment_editor() is True
         await pilot.pause()
 
-        assert isinstance(app.screen, CommentSubmitScreen)
-        assert app.screen.styles.background.a == 0
-        assert app.screen.query_one("#comment-submit-dialog").styles.background.a == 1
-        assert screen in app._background_screens
+        assert app.screen is screen
+        assert len(app.screen_stack) == 2
+        assert diff_view.query_one(InlineCommentEditor).has_class("-compact")
         focus_targets = (
             app.screen.query_one("#comment-editor-queue", Button),
             app.screen.query_one("#comment-editor-post", Button),
             app.screen.query_one("#comment-editor-cancel", Button),
             app.screen.query_one("#comment-editor-body", TextArea),
         )
+        assert focus_targets[0].disabled and focus_targets[1].disabled
+        await pilot.press("tab")
+        assert app.screen.focused is focus_targets[2]
+        await pilot.press("tab")
+        assert app.screen.focused is focus_targets[3]
+        assert str(focus_targets[0].label) == "Save draft  Ctrl+S"
+        await pilot.press("h", "i")
+        await wait_until(lambda: not focus_targets[0].disabled)
+        assert app.screen.focused is focus_targets[-1]
+        assert app.screen.query_one(TextArea).text == "hi"
+        buttons = focus_targets[:-1]
+        normal_background = buttons[1].styles.background
+        assert all(not button.has_focus for button in buttons)
+        assert all(button.styles.background == normal_background for button in buttons)
         for target in focus_targets:
             await pilot.press("tab")
             assert screen.current_tab == 1
             assert app.screen.focused is target
+            for button in buttons:
+                assert (button.styles.background != normal_background) == (
+                    button is target
+                )
 
         await pilot.press("shift+tab")
         assert screen.current_tab == 1
         assert app.screen.focused is focus_targets[-2]
+        for action in ("quit", "open_pr", "settings"):
+            assert app.check_action(action, ()) is False
 
 
 def test_inline_comment_editor_has_no_post_now_shortcut() -> None:
@@ -258,31 +277,33 @@ async def test_file_comment_editor_offers_pending_and_post_now_buttons() -> None
 async def test_existing_comment_editor_shows_update_button() -> None:
     class TestApp(App[None]):
         def compose(self) -> ComposeResult:
-            yield InlineCommentEditor(
-                kind="inline",
-                title="Edit inline comment",
-                placeholder="Edit comment...",
-                update_existing=True,
-            )
+            for compact in (False, True):
+                yield InlineCommentEditor(
+                    kind="inline",
+                    title="Edit inline comment",
+                    placeholder="Edit comment...",
+                    update_existing=True,
+                    compact=compact,
+                )
 
     app = TestApp()
     async with app.run_test() as pilot:
         await pilot.pause()
 
-        buttons = [
-            app.query_one("#comment-editor-submit", Button),
-            app.query_one("#comment-editor-cancel", Button),
-        ]
-
-        assert [button.id for button in buttons] == [
-            "comment-editor-submit",
-            "comment-editor-cancel",
-        ]
-        assert [str(button.label) for button in buttons] == [
-            "Update  Ctrl+S",
-            "Cancel  Esc",
-        ]
-        assert buttons[0].variant == "primary"
+        for editor in app.query(InlineCommentEditor):
+            buttons = [
+                editor.query_one("#comment-editor-submit", Button),
+                editor.query_one("#comment-editor-cancel", Button),
+            ]
+            assert [button.id for button in buttons] == [
+                "comment-editor-submit",
+                "comment-editor-cancel",
+            ]
+            assert [str(button.label) for button in buttons] == [
+                "Update  Ctrl+S",
+                "Discard" if editor.has_class("-compact") else "Cancel  Esc",
+            ]
+            assert buttons[0].variant == "primary"
 
 
 @pytest.mark.asyncio

@@ -52,6 +52,7 @@ def _can_render_in_unified_block(view, line: DiffLine) -> bool:
     return (
         line.line_index not in view._comment_threads_by_line
         and line.line_index not in view._pending_comment_drafts_by_line
+        and line.line_index != getattr(view, "_inline_comment_editor_line_index", None)
     )
 
 

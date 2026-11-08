@@ -179,6 +179,7 @@ _FILES_BINDINGS = [
     Binding("r", "toggle_resolve_file", "Resolve", group=_COMMENT_GROUP),
     Binding("m", "toggle_file_viewed", "Mark Viewed", group=_FILE_GROUP),
     Binding("s", "review_scope", "Scope", group=_FILE_GROUP),
+    Binding("ctrl+r", "refresh_files", "Refresh", group=_FILE_GROUP),
     Binding("comma", "previous_commit", "Previous Commit", show=False),
     Binding("full_stop", "next_commit", "Next Commit", show=False),
 ]
@@ -291,6 +292,9 @@ class MainScreen(Screen[None]):
             return
 
         self.current_tab = tab_index
+        self.file_changes.set_updates_active(
+            tab_id == "files" and self.app.screen is self
+        )
 
         if tab_id == "pr-info":
             self._pending_overview_file = None
@@ -304,6 +308,13 @@ class MainScreen(Screen[None]):
                     self.file_changes.restore_focus() if self.current_tab == 1 else None
                 )
             )
+
+    def on_screen_suspend(self) -> None:
+        self.file_changes.set_updates_active(False)
+
+    def on_screen_resume(self) -> None:
+        if self.is_mounted and self.file_changes.is_mounted:
+            self.file_changes.set_updates_active(self.current_tab == 1)
 
     def watch_current_tab(self, old_tab: int, new_tab: int) -> None:
         self._refresh_tab_bindings()
@@ -327,12 +338,16 @@ class MainScreen(Screen[None]):
         refs = (event.pr.base_sha, event.pr.head_sha)
         if not all(refs):
             return
+        if event.files_staged:
+            self._files_load_requested = True
         if refs == self._pr_overview_refs:
             self._refresh_merge_status()
             return
-        if all(self._pr_overview_refs):
+        if all(self._pr_overview_refs) and not event.files_staged:
             self._invalidate_files_workspace()
         self._pr_overview_refs = refs
+        if self.current_tab == 1:
+            self.file_changes.poll_updates()
         self.run_worker(
             self.store.load_pr_overview(),
             name="load-pr-overview",
@@ -362,6 +377,15 @@ class MainScreen(Screen[None]):
     def on_scope_updated(self) -> None:
         self.file_changes.refresh_scope()
         self.refresh_bindings()
+
+    @on(PRStore.RevisionUpdated)
+    def on_revision_updated(self) -> None:
+        self.file_changes.refresh_scope()
+        self.refresh_bindings()
+
+    def action_refresh_files(self) -> None:
+        if self.current_tab == 1:
+            self.file_changes.refresh_workspace()
 
     def action_review_scope(self) -> None:
         self.file_changes.open_review_scope()
@@ -718,6 +742,8 @@ class MainScreen(Screen[None]):
             return
 
         diff_view = self.file_changes.diff_view
+        if diff_view._composer.resume():
+            return
         if diff_view.selected_reply_comment() is not None:
             self.run_worker(
                 diff_view.open_reply_comment_editor(),
@@ -746,6 +772,8 @@ class MainScreen(Screen[None]):
             self.notify("Switch to All changes to edit comments", severity="warning")
             return
         diff_view = self.file_changes.diff_view
+        if diff_view._composer.resume():
+            return
         if (
             diff_view.active_pending_draft_index() is None
             and diff_view.active_review_comment() is None
@@ -783,6 +811,10 @@ class MainScreen(Screen[None]):
     def action_review(self) -> None:
         if self.current_tab not in {0, 1} or self.store.state.pr is None:
             return
+        session = self.file_changes.diff_view._composer.session
+        if session is not None and session.buffer.submitting:
+            self.notify("Wait for the comment submission to finish", severity="warning")
+            return
         if not self.store.review_writable:
             self.notify(
                 "Switch to All changes to submit a PR review", severity="warning"
@@ -790,9 +822,7 @@ class MainScreen(Screen[None]):
             return
         self.app.push_screen(
             ReviewSubmitScreen(
-                pending_comments_count=len(self.store.state.pending_review.comments),
                 pending_comments=list(self.store.state.pending_review.comments),
-                initial_body=self.store.state.pending_review.body,
                 store=self.store,
             ),
             self._handle_review_submit,
@@ -1056,6 +1086,9 @@ class MainScreen(Screen[None]):
             return
 
         diff_view = self.file_changes.diff_view
+        session = diff_view._composer.session
+        if session is not None and not diff_view._composer.begin_submit(event.mode):
+            return
         if event.kind == "reply":
             reply_target = diff_view.reply_comment_target()
             if reply_target is None or any(
@@ -1088,6 +1121,7 @@ class MainScreen(Screen[None]):
                 self._update_review_comment(event.body, edit_target, kind=event.kind),
                 exclusive=False,
                 name="_update_review_comment",
+                exit_on_error=False,
             )
             return
 
@@ -1106,6 +1140,7 @@ class MainScreen(Screen[None]):
                     ),
                     exclusive=False,
                     name="_post_file_comment",
+                    exit_on_error=False,
                 )
                 return
             self.run_worker(
@@ -1114,6 +1149,7 @@ class MainScreen(Screen[None]):
                 ),
                 exclusive=False,
                 name="_save_file_comment_draft",
+                exit_on_error=False,
             )
             return
 
@@ -1141,6 +1177,7 @@ class MainScreen(Screen[None]):
                 ),
                 exclusive=False,
                 name="_post_inline_comment",
+                exit_on_error=False,
             )
             return
         self.run_worker(
@@ -1155,6 +1192,7 @@ class MainScreen(Screen[None]):
             ),
             exclusive=False,
             name="_save_inline_comment_draft",
+            exit_on_error=False,
         )
 
     @on(InlineCommentEditor.Cancelled)
@@ -1223,6 +1261,8 @@ class MainScreen(Screen[None]):
             return
 
         diff_view = self.file_changes.diff_view
+        if diff_view.current_file != current_file:
+            return
         selected_header_path = diff_view.selected_file_header_path()
         diff = self.store.get_file_diff(current_file)
         if diff is None and diff_view.current_file == current_file:
@@ -1231,6 +1271,7 @@ class MainScreen(Screen[None]):
             return
 
         scroll_y = diff_view.scroll_y
+        composer_session = diff_view._composer.session
         if diff_view._showing_full_file:
             view_revision = diff_view.view_revision
             content = await self.store.get_file_content(current_file)
@@ -1265,7 +1306,10 @@ class MainScreen(Screen[None]):
             diff_view.focus()
 
         def restore_scroll() -> None:
-            if diff_view.current_file == current_file:
+            if (
+                diff_view.current_file == current_file
+                and diff_view._composer.session is composer_session
+            ):
                 diff_view.scroll_to(y=scroll_y, animate=False)
 
         diff_view.call_after_refresh(restore_scroll)
@@ -1306,28 +1350,26 @@ class MainScreen(Screen[None]):
         current_line = diff_view.cursor_line
         current_pane = diff_view.active_pane
 
-        async def refresh_file_drafts() -> None:
+        async def refresh_drafts() -> None:
             self.file_changes.file_tree.refresh_files()
-            if current_file is not None:
-                await self._refresh_diff_preserving_cursor(
-                    current_file,
-                    current_line,
-                    current_pane,
-                    focus_diff=True,
-                )
+            await self._refresh_diff_preserving_cursor(
+                current_file,
+                current_line,
+                current_pane,
+                focus_diff=not diff_view._comment_editor_is_open(),
+            )
 
-        await diff_view.close_file_comment_editor()
         try:
             await self.store.queue_pending_file_comment(
                 body,
                 path=path,
                 draft_index=draft_index,
-                after_local_save=refresh_file_drafts,
+                after_local_save=refresh_drafts,
             )
         except Exception:
-            await refresh_file_drafts()
+            await refresh_drafts()
             raise
-
+        await diff_view.close_file_comment_editor()
         self.pr_info.refresh_comments()
         return True
 
@@ -1489,16 +1531,15 @@ class MainScreen(Screen[None]):
         current_line = diff_view.cursor_line
         current_pane = diff_view.active_pane
 
-        async def refresh_current_diff() -> None:
+        async def refresh_drafts() -> None:
             self.file_changes.file_tree.refresh_files()
             await self._refresh_diff_preserving_cursor(
                 current_file,
                 current_line,
                 current_pane,
-                focus_diff=True,
+                focus_diff=not diff_view._comment_editor_is_open(),
             )
 
-        await diff_view.close_inline_comment_editor()
         try:
             await self.store.queue_pending_inline_comment(
                 body,
@@ -1508,12 +1549,12 @@ class MainScreen(Screen[None]):
                 start_line=start_line,
                 start_side=start_side,
                 draft_index=draft_index,
-                after_local_save=refresh_current_diff,
+                after_local_save=refresh_drafts,
             )
         except Exception:
-            await refresh_current_diff()
+            await refresh_drafts()
             raise
-
+        await diff_view.close_inline_comment_editor()
         return True
 
     async def _delete_comment(
@@ -1555,6 +1596,19 @@ class MainScreen(Screen[None]):
         return "comment"
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker.name in {
+            "_post_inline_comment",
+            "_post_file_comment",
+            "_post_review_reply",
+            "_save_inline_comment_draft",
+            "_save_file_comment_draft",
+            "_save_review_reply_draft",
+            "_update_review_comment",
+        } and event.state in {WorkerState.ERROR, WorkerState.CANCELLED}:
+            error = self._worker_error_message(
+                event.worker, "Could not save. Your text is kept; retry when ready."
+            )
+            self.file_changes.diff_view._composer.set_submitting(False, error)
         if (
             event.worker.name == "_toggle_resolve"
             and event.state == WorkerState.SUCCESS
@@ -1755,7 +1809,18 @@ class MainScreen(Screen[None]):
     def _worker_error_message(worker: Worker, fallback: str) -> str:
         error = worker.error
         if isinstance(error, (UnsupportedInlineCommentTarget, GitHubError)):
-            return str(error)
+            message = str(error)
+            if "can only have one pending review" in message:
+                return "You have a pending review. Use Save draft, or submit it first."
+            if (
+                "Could not resolve to a node" in message
+                and worker.name == "_update_review_comment"
+            ):
+                return (
+                    "Comment no longer available. Your text is kept. "
+                    "Copy it, then discard and open a new comment."
+                )
+            return message
         return fallback
 
     def on_key(self, event: events.Key) -> None:
@@ -1981,7 +2046,7 @@ class MainScreen(Screen[None]):
                 name="sync-file-viewed",
             )
         if advance:
-            self.file_changes.select_file_after(filename)
+            self.file_changes.select_next_unviewed_file(filename)
 
     def _on_file_viewed_toggled(self, filename: str, state: FileViewedState) -> None:
         if state == FileViewedState.VIEWED:
