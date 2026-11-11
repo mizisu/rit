@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import ClassVar, Literal
 from urllib.parse import urlsplit
 
 from textual import events, getters, on
 from textual.app import ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import VerticalScroll
 from textual.reactive import reactive
 from textual.screen import Screen
@@ -186,7 +186,7 @@ _FILES_BINDINGS = [
 
 
 class MainScreen(Screen[None]):
-    BINDINGS = _COMMON_BINDINGS + _PR_INFO_BINDINGS
+    BINDINGS: ClassVar[list[BindingType]] = [*_COMMON_BINDINGS, *_PR_INFO_BINDINGS]
 
     current_tab: reactive[int] = reactive(0)
 
@@ -1359,14 +1359,19 @@ class MainScreen(Screen[None]):
                 focus_diff=not diff_view._comment_editor_is_open(),
             )
 
+        async def show_saved_draft() -> None:
+            diff_view._composer.hide_saved_draft()
+            await refresh_drafts()
+
         try:
             await self.store.queue_pending_file_comment(
                 body,
                 path=path,
                 draft_index=draft_index,
-                after_local_save=refresh_drafts,
+                after_local_save=show_saved_draft,
             )
         except Exception:
+            diff_view._composer.restore_saved_draft()
             await refresh_drafts()
             raise
         await diff_view.close_file_comment_editor()
@@ -1540,6 +1545,10 @@ class MainScreen(Screen[None]):
                 focus_diff=not diff_view._comment_editor_is_open(),
             )
 
+        async def show_saved_draft() -> None:
+            diff_view._composer.hide_saved_draft()
+            await refresh_drafts()
+
         try:
             await self.store.queue_pending_inline_comment(
                 body,
@@ -1549,9 +1558,10 @@ class MainScreen(Screen[None]):
                 start_line=start_line,
                 start_side=start_side,
                 draft_index=draft_index,
-                after_local_save=refresh_drafts,
+                after_local_save=show_saved_draft,
             )
         except Exception:
+            diff_view._composer.restore_saved_draft()
             await refresh_drafts()
             raise
         await diff_view.close_inline_comment_editor()
@@ -1893,16 +1903,16 @@ class MainScreen(Screen[None]):
             isinstance(ancestor, InlineCommentEditor) for ancestor in focused.ancestors
         )
 
-    def _move_focus(self, direction: Literal["left", "right"]) -> None:
+    def _move_pane_focus(self, direction: Literal["left", "right"]) -> None:
         panel = self.pr_info if self.current_tab == 0 else self.file_changes
         if not panel.move_focus(direction):
             self.app.tmux_navigation.select_pane(direction)
 
     def action_focus_left(self) -> None:
-        self._move_focus("left")
+        self._move_pane_focus("left")
 
     def action_focus_right(self) -> None:
-        self._move_focus("right")
+        self._move_pane_focus("right")
 
     def action_focus_file_tree(self) -> None:
         if self.current_tab == 1:

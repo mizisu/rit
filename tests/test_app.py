@@ -11,6 +11,7 @@ from rit.app import RitApp
 from rit.cli import parse_pr_reference
 from rit.core.diff import parse_patch
 from rit.core.types import FileDiff
+from rit.services.github import GitHubService
 from rit.state.models import (
     PR,
     FileViewedState,
@@ -24,6 +25,7 @@ from rit.state.models import (
     ReviewState,
     ReviewThread,
 )
+from rit.ui.screens.main import MainScreen
 from rit.ui.screens.settings import SettingsScreen
 from tests.conftest import wait_until
 
@@ -820,6 +822,7 @@ class TestRitApp:
             await pilot.pause()
 
             screen = app.screen
+            assert isinstance(screen, MainScreen)
             file_count = screen.query_one("#file-count", Static)
 
             assert screen.header.pr_title == "Staged PR"
@@ -1155,7 +1158,7 @@ class TestRitApp:
         async with app.run_test() as pilot:
             screen = cast(MainScreen, app.screen)
             screen.store.state.pr = PR(number=123, head_sha="deadbeef")
-            screen.store._service = CommentService()  # type: ignore[assignment]
+            screen.store._service = cast(GitHubService, CommentService())
             screen.switch_tab(1)
             diff_view = screen.file_changes.diff_view
             await diff_view.show_diff("All files", source_diff)
@@ -1202,7 +1205,7 @@ class TestRitApp:
             screen.current_tab = 1
             screen.store.state.pr = PR(number=123, head_sha="deadbeef")
             screen.store.state.file_diffs = {"preview.py": source_diff}
-            screen.store._service = DraftService()  # type: ignore[assignment]
+            screen.store._service = cast(GitHubService, DraftService())
             diff_view = screen.file_changes.diff_view
             await diff_view.show_diff("preview.py", source_diff)
             await pilot.pause()
@@ -1252,7 +1255,7 @@ class TestRitApp:
             await pilot.pause()
             screen.store.state.pr = PR(number=123, head_sha="deadbeef")
             screen.store.state.file_diffs = {"preview.py": source_diff}
-            screen.store._service = CommentService()  # type: ignore[assignment]
+            screen.store._service = cast(GitHubService, CommentService())
             diff_view = screen.file_changes.diff_view
             await diff_view.show_diff("preview.py", source_diff)
             await pilot.pause()
@@ -1281,28 +1284,33 @@ class TestRitApp:
             assert diff_view.inline_comment_target() is None
             assert round(diff_view.scroll_y) == scroll_before
 
+    @pytest.mark.parametrize("file_level", [False, True])
     async def test_update_inline_comment_draft_renders_before_sync_finishes(
         self,
         app: RitApp,
         monkeypatch: pytest.MonkeyPatch,
+        file_level: bool,
     ) -> None:
         from rit.ui.screens.main import MainScreen
         from rit.ui.widgets.comment_card import CommentCard
+        from rit.ui.widgets.comment_editor import InlineCommentEditor
 
-        patch = """@@ -2,2 +2,3 @@
- line 2
-+line 3 added
- line 4"""
-        source_diff = parse_patch(patch, "preview.py")
+        source_diff = parse_patch("@@ -0,0 +1 @@\n+new", "preview.py")
+        source_diff.hunks[0].starts_file = file_level
 
         class BlockingDraftService:
             def __init__(self) -> None:
                 self.create_started = asyncio.Event()
                 self.allow_create = asyncio.Event()
+                self.fail_create = True
+                self.create_calls = 0
 
             async def create_pending_review(self, *args, **kwargs) -> PRReview:
+                self.create_calls += 1
                 self.create_started.set()
                 await self.allow_create.wait()
+                if self.fail_create:
+                    raise RuntimeError("sync failed")
                 return PRReview(id=88)
 
         service = BlockingDraftService()
@@ -1312,12 +1320,11 @@ class TestRitApp:
             screen.current_tab = 1
             screen.store.state.pr = PR(number=123, head_sha="deadbeef")
             screen.store.state.file_diffs = {"preview.py": source_diff}
-            screen.store._service = service  # type: ignore[assignment]
+            screen.store._service = cast(GitHubService, service)
             diff_view = screen.file_changes.diff_view
             await diff_view.show_diff("preview.py", source_diff)
             await pilot.pause()
-            current_line = diff_view._line_index_by_new_number[3]
-            diff_view.cursor_line = current_line
+            diff_view.cursor_line = 0
             refresh_calls = 0
             original_refresh = screen._refresh_diff_preserving_cursor
 
@@ -1330,24 +1337,67 @@ class TestRitApp:
                 screen, "_refresh_diff_preserving_cursor", count_refresh
             )
 
-            task = asyncio.create_task(
-                screen._save_inline_comment_draft(
-                    "hello draft",
-                    path="preview.py",
-                    line=3,
-                    side="RIGHT",
-                )
+            if file_level:
+                diff_view._set_file_header_selection(0)
+                assert await diff_view.open_file_comment_editor()
+            else:
+                assert await diff_view.open_inline_comment_editor()
+            body = diff_view.query_one(TextArea)
+            await wait_until(lambda: body.has_focus)
+            body.insert("hello draft")
+            body.move_cursor((0, 5))
+            history, selection = body.history, body.selection
+            draft_id = (
+                "#pending-file-draft-0-0" if file_level else "#pending-draft-0-right-0"
             )
-            await asyncio.wait_for(service.create_started.wait(), timeout=1)
-            await pilot.pause()
 
-            draft = diff_view.query_one("#pending-draft-1-right-0", CommentCard)
-            assert draft._body == "hello draft"
-            assert not task.done()
-
-            service.allow_create.set()
-            assert await task is True
-            assert refresh_calls == 1
+            for fail_sync in (True, False):
+                service.fail_create = fail_sync
+                service.create_started.clear()
+                service.allow_create.clear()
+                refresh_calls = 0
+                await pilot.press("ctrl+s")
+                try:
+                    await asyncio.wait_for(service.create_started.wait(), timeout=1)
+                    draft = diff_view.query_one(draft_id, CommentCard)
+                    assert draft._body == "hello draft"
+                    assert not diff_view.query(InlineCommentEditor), (
+                        "Saved draft and its editor are both visible during sync"
+                    )
+                    assert diff_view.has_focus
+                    assert diff_view._composer.resume()
+                    await diff_view._composer.rerender()
+                    assert not diff_view.query(InlineCommentEditor)
+                finally:
+                    service.allow_create.set()
+                    await wait_until(
+                        lambda: all(worker.is_finished for worker in screen.workers),
+                        timeout=2,
+                    )
+                if fail_sync:
+                    body = diff_view.query_one(TextArea)
+                    await wait_until(
+                        lambda body=body: (
+                            body.has_focus
+                            and not body.read_only
+                            and diff_view.query_one(".comment-editor-status").has_class(
+                                "-error"
+                            )
+                        )
+                    )
+                    assert body.text == "hello draft"
+                    assert body.history is history and body.selection == selection
+                    assert screen.store.state.pending_review.comments == []
+                    assert not diff_view.query(draft_id)
+                    assert refresh_calls == 2
+                else:
+                    assert diff_view._composer.session is None
+                    assert not diff_view.query(InlineCommentEditor)
+                    assert diff_view.query_one(draft_id, CommentCard)._body == (
+                        "hello draft"
+                    )
+                    assert refresh_calls == 1
+            assert service.create_calls == 2
 
     @pytest.mark.parametrize("file_level", [False, True])
     async def test_reply_and_edit_submitted_comment_from_diff_view(
@@ -1437,7 +1487,7 @@ class TestRitApp:
                 )
             )
             screen.store.state.file_diffs = {"preview.py": source_diff}
-            screen.store._service = service  # type: ignore[assignment]
+            screen.store._service = cast(GitHubService, service)
             screen.switch_tab(1)
             diff_view = screen.file_changes.diff_view
             await diff_view.show_diff("preview.py", source_diff)
@@ -1659,7 +1709,7 @@ class TestRitApp:
                 line=3,
                 side="RIGHT",
             )
-            screen.store._service = service  # type: ignore[assignment]
+            screen.store._service = cast(GitHubService, service)
             diff_view = screen.file_changes.diff_view
             await diff_view.show_diff("preview.py", source_diff)
             await pilot.pause()
@@ -1732,7 +1782,7 @@ class TestRitApp:
                 line=3,
                 side="RIGHT",
             )
-            screen.store._service = service  # type: ignore[assignment]
+            screen.store._service = cast(GitHubService, service)
             diff_view = screen.file_changes.diff_view
             await diff_view.show_diff("preview.py", source_diff)
             await pilot.pause()
@@ -1856,7 +1906,7 @@ class TestRitApp:
             screen.store.state.file_diffs = {"preview.py": source_diff}
             screen.store.state.review_threads = [thread]
             screen.store.state.comments = [comment]
-            screen.store._service = service  # type: ignore[assignment]
+            screen.store._service = cast(GitHubService, service)
             screen.switch_tab(1)
             diff_view = screen.file_changes.diff_view
             await diff_view.show_diff("preview.py", source_diff)
@@ -1911,7 +1961,7 @@ class TestRitApp:
             screen.store.state.pr = PR(number=123)
             screen.store.state.reviews = [PRReview(id=91, state=ReviewState.COMMENTED)]
             screen.store.state.comments = [comment]
-            screen.store._service = service  # type: ignore[assignment]
+            screen.store._service = cast(GitHubService, service)
             timeline = screen.pr_info._timeline_widget()
             await timeline._build_timeline_async()
             await pilot.pause()
@@ -1962,7 +2012,7 @@ class TestRitApp:
             screen.store.state.pr = PR(number=123, head_sha="deadbeef")
             screen.store.state.file_diffs = {"preview.py": source_diff}
             screen.store.state.file_contents[("deadbeef", "preview.py")] = full_content
-            screen.store._service = service  # type: ignore[assignment]
+            screen.store._service = cast(GitHubService, service)
             diff_view = screen.file_changes.diff_view
             await diff_view.show_full_file_preview(
                 "preview.py",
@@ -2013,7 +2063,7 @@ class TestRitApp:
                 "one.py": parse_patch(patch, "one.py"),
                 "two.py": parse_patch(patch, "two.py"),
             }
-            screen.store._service = DraftService()  # type: ignore[assignment]
+            screen.store._service = cast(GitHubService, DraftService())
             screen.file_changes.refresh_files()
             await pilot.pause()
             await pilot.pause()

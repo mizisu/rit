@@ -67,6 +67,9 @@ class DiffCommentComposer:
     def resume(self) -> bool:
         if self.session is None:
             return False
+        if self.session.suspended and self.session.buffer.submitting:
+            self.view.notify("Wait for the comment submission to finish")
+            return True
         suspended = self.session.suspended
         self.session.suspended = False
         line = self._anchor_line()
@@ -121,6 +124,22 @@ class DiffCommentComposer:
         await self.rerender()
         if session.suspended and session.buffer.text:
             self.view.notify("Unsent text kept locally. Press c to resume.", timeout=3)
+
+    def hide_saved_draft(self) -> None:
+        """Hide locally saved input on the next render, retaining it for recovery."""
+        if self.session is None:
+            return
+        self.capture()
+        self.session.suspended = True
+        self._focus_on_mount = False
+        self.view.screen.set_focus(self.view, scroll_visible=False)
+
+    def restore_saved_draft(self) -> None:
+        """Restore input on the next render after draft synchronization fails."""
+        if self.session is None or not self.session.suspended:
+            return
+        self.session.suspended = False
+        self._focus_on_mount = True
 
     def _restore_selection(self) -> None:
         from rit.ui.widgets.diff_comments import select_comment_widget
