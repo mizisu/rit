@@ -8,15 +8,15 @@ A terminal UI for reviewing GitHub pull requests.
 
 ## Requirements
 
-- Python 3.14+
+- Python 3.14+ (Python 3.15.2 recommended)
 - uv
 - GitHub CLI (`gh`)
-- Rust 1.91+ when installing from source
+- Rust 1.95+ when installing from source
 
 ## Installation
 
 ```bash
-uv tool install --python 3.14 git+https://github.com/mizisu/rit.git
+uv tool install --python 3.15.2 git+https://github.com/mizisu/rit.git
 gh auth login
 ```
 
