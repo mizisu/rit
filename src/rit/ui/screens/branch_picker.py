@@ -4,7 +4,7 @@ from typing import ClassVar, Literal
 
 from textual import on
 from textual.app import ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, OptionList, Static
@@ -54,7 +54,7 @@ class BranchPickerScreen(ModalScreen[Literal["head", "base"] | None]):
     }
     """
 
-    BINDINGS: ClassVar[list[Binding]] = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("j", "cursor_down", "Next", show=False),
         Binding("k", "cursor_up", "Prev", show=False),
         Binding("escape", "cancel", "Cancel", show=False),

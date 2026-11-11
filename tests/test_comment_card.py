@@ -1,8 +1,10 @@
 from collections.abc import Callable
 from pathlib import Path
+from typing import cast
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.containers import Vertical
 from textual.widgets import Collapsible, Static
 
 from rit.ui.widgets import comment_card as comment_card_module
@@ -297,7 +299,7 @@ def test_comment_card_removes_rendered_body_without_copying_children() -> None:
 
     calls: list[str] = []
     card = CommentCard("Header", "Body")
-    card._content_container = Container()  # type: ignore[assignment]
+    card._content_container = cast(Vertical, Container())
 
     card._remove_rendered_body_widgets()
 

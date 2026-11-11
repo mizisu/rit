@@ -4,7 +4,7 @@ from typing import ClassVar
 
 from textual import on
 from textual.app import ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
@@ -59,7 +59,7 @@ class CommentDeleteScreen(ModalScreen[bool]):
     }
     """
 
-    BINDINGS: ClassVar[list[Binding]] = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("enter", "confirm", "Delete", show=False),
         Binding("y", "confirm", "Delete", show=False),
         Binding("n", "cancel", "Cancel", show=False),

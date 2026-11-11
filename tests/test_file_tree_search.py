@@ -2,7 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from typing import cast
+from typing import Never, SupportsIndex, cast, overload
 
 import pytest
 from textual.app import App, ComposeResult
@@ -10,6 +10,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Input, Static, Tree
 
 from rit.state.models import PRFile
+from rit.state.store import PRStore
 from rit.ui.widgets import file_tree as file_tree_module
 from rit.ui.widgets.file_tree import FileTree
 
@@ -110,7 +111,7 @@ def test_tree_actions_reuse_cached_tree_without_query(
 
     file_tree = FileTree()
     tree = FakeTree()
-    file_tree._tree_widget = tree  # type: ignore[assignment]
+    file_tree._tree_widget = cast(Tree[str], tree)
 
     def fail_query(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("tree action should reuse cached tree widget")
@@ -208,7 +209,7 @@ def test_file_search_reuses_cached_lowercase_filenames(
     )
     monkeypatch.setattr(file_tree, "_render_files", rendered.append)
 
-    file_tree.refresh_files(files)  # type: ignore[arg-type]
+    file_tree.refresh_files(cast(list[PRFile], files))
     Filename.fail_lower = True
     file_tree._set_search_query("app")
 
@@ -264,7 +265,7 @@ def test_search_input_change_skips_filter_when_normalized_query_is_unchanged(
         ),
     )
 
-    file_tree.on_search_input_changed(SimpleNamespace(value=" app "))
+    file_tree.on_search_input_changed(Input.Changed(Input(), " app "))
 
     assert file_tree._search_query == "app"
 
@@ -309,7 +310,9 @@ def test_directory_contents_reuses_cached_path_parts(
     class Filename(str):
         fail_split = False
 
-        def split(self, sep: str | None = None, maxsplit: int = -1) -> list[str]:
+        def split(
+            self, sep: str | None = None, maxsplit: SupportsIndex = -1
+        ) -> list[str]:
             if self.fail_split:
                 raise AssertionError(
                     "file tree rendering should reuse cached path parts"
@@ -329,11 +332,11 @@ def test_directory_contents_reuses_cached_path_parts(
     )
     monkeypatch.setattr(file_tree, "_render_files", lambda _files: None)
 
-    file_tree.refresh_files(files)  # type: ignore[arg-type]
+    file_tree.refresh_files(cast(list[PRFile], files))
     Filename.fail_split = True
 
     contents_by_path, files_by_path = file_tree._build_directory_contents(
-        files  # type: ignore[arg-type]
+        cast(list[PRFile], files)
     )
 
     assert contents_by_path[""].child_dirs == {"src": "src"}
@@ -363,7 +366,7 @@ def test_directory_contents_reads_each_filename_once() -> None:
     }
 
     contents_by_path, files_by_path = file_tree._build_directory_contents(
-        [file]  # type: ignore[list-item]
+        [cast(PRFile, file)]
     )
 
     assert file.filename_reads == 1
@@ -373,7 +376,13 @@ def test_directory_contents_reads_each_filename_once() -> None:
 
 def test_directory_contents_builds_directory_paths_without_prefix_slices() -> None:
     class PathParts(tuple[str, ...]):
-        def __getitem__(self, index: object) -> str | tuple[str, ...]:
+        @overload
+        def __getitem__(self, index: SupportsIndex) -> str: ...
+
+        @overload
+        def __getitem__(self, index: slice) -> Never: ...
+
+        def __getitem__(self, index: SupportsIndex | slice) -> str:
             if isinstance(index, slice):
                 raise AssertionError(
                     "directory path building should avoid prefix slices"
@@ -389,7 +398,7 @@ def test_directory_contents_builds_directory_paths_without_prefix_slices() -> No
     }
 
     contents_by_path, files_by_path = file_tree._build_directory_contents(
-        [FakeFile()]  # type: ignore[list-item]
+        [cast(PRFile, FakeFile())]
     )
 
     assert contents_by_path["src/rit/ui"].child_dirs == {
@@ -402,7 +411,9 @@ def test_compact_directory_path_reuses_cached_directory_names() -> None:
     class Path(str):
         fail_rsplit = False
 
-        def rsplit(self, sep: str | None = None, maxsplit: int = -1) -> list[str]:
+        def rsplit(
+            self, sep: str | None = None, maxsplit: SupportsIndex = -1
+        ) -> list[str]:
             if self.fail_rsplit:
                 raise AssertionError("directory labels should reuse cached names")
             return super().rsplit(sep, maxsplit)
@@ -411,7 +422,7 @@ def test_compact_directory_path_reuses_cached_directory_names() -> None:
     child = Path("src/widgets")
     file_tree = FileTree()
     file_tree._directory_name_by_path = {root: "src", child: "widgets"}
-    contents_by_path = {
+    contents_by_path: dict[str, file_tree_module._DirectoryContents] = {
         root: file_tree_module._DirectoryContents(
             child_dirs={"widgets": child},
         ),
@@ -432,7 +443,9 @@ def test_file_label_reuses_cached_path_parts_for_basename() -> None:
     class Filename(str):
         fail_split = False
 
-        def split(self, sep: str | None = None, maxsplit: int = -1) -> list[str]:
+        def split(
+            self, sep: str | None = None, maxsplit: SupportsIndex = -1
+        ) -> list[str]:
             if self.fail_split:
                 raise AssertionError("file labels should reuse cached path parts")
             return super().split(sep, maxsplit)
@@ -450,7 +463,7 @@ def test_file_label_reuses_cached_path_parts_for_basename() -> None:
     file_tree._file_path_parts_by_filename = {FakeFile.filename: ("src", "app.py")}
     Filename.fail_split = True
 
-    label = file_tree._file_label(FakeFile(), show_path=False)  # type: ignore[arg-type]
+    label = file_tree._file_label(cast(PRFile, FakeFile()), show_path=False)
 
     assert "app.py" in label.plain
 
@@ -474,9 +487,9 @@ def test_file_label_uses_pending_comment_count_without_collecting_comments() -> 
         viewer_viewed_state = "UNVIEWED"
 
     file_tree = FileTree()
-    file_tree.store = FakeStore()  # type: ignore[assignment]
+    file_tree.store = cast(PRStore, FakeStore())
 
-    label = file_tree._file_label(FakeFile(), show_path=True)  # type: ignore[arg-type]
+    label = file_tree._file_label(cast(PRFile, FakeFile()), show_path=True)
 
     assert "[draft 2]" in label.plain
 
@@ -487,7 +500,9 @@ def test_copy_current_file_reuses_cached_path_parts_for_basename(
     class Filename(str):
         fail_split = False
 
-        def split(self, sep: str | None = None, maxsplit: int = -1) -> list[str]:
+        def split(
+            self, sep: str | None = None, maxsplit: SupportsIndex = -1
+        ) -> list[str]:
             if self.fail_split:
                 raise AssertionError("basename copy should reuse cached path parts")
             return super().split(sep, maxsplit)
@@ -543,7 +558,7 @@ def test_refresh_files_builds_filename_caches_in_one_pass(
         lambda **_kwargs: None,
     )
 
-    file_tree.refresh_files(files)  # type: ignore[arg-type]
+    file_tree.refresh_files(cast(list[PRFile], files))
 
     assert file_tree._file_search_names == ["src/app.py", "tests/test_app.py"]
     assert file_tree._file_path_parts_by_filename == {

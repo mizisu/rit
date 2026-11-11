@@ -1,5 +1,6 @@
 import json
 
+from rit.services.graphql_request import mapping
 from rit.services.pr_reviewer_request import (
     add_assignees,
     fetch_assignee_candidates,
@@ -51,9 +52,7 @@ async def test_fetch_reviewer_user_candidates_paginates_graphql_collaborators() 
                     end_cursor="cursor-1",
                 )
             )
-        return json.dumps(
-            _connection("collaborators", [{"id": "U_2", "login": "bob"}])
-        )
+        return json.dumps(_connection("collaborators", [{"id": "U_2", "login": "bob"}]))
 
     users = await fetch_reviewer_user_candidates("owner", "repo", runner)
 
@@ -142,7 +141,7 @@ async def test_request_reviewers_uses_graphql_login_mutation() -> None:
         runner=runner,
     )
 
-    assert calls[1]["variables"]["input"] == {
+    assert mapping(calls[1]["variables"])["input"] == {
         "pullRequestId": "PR_node",
         "userLogins": ["alice"],
         "teamSlugs": ["backend"],
@@ -211,7 +210,7 @@ async def test_remove_requested_reviewers_replaces_remaining_graphql_actors() ->
         runner=runner,
     )
 
-    assert calls[1]["variables"]["input"] == {
+    assert mapping(calls[1]["variables"])["input"] == {
         "pullRequestId": "PR_node",
         "userIds": ["U_bob"],
         "botIds": [],
@@ -234,17 +233,19 @@ async def test_add_assignees_resolves_graphql_user_ids() -> None:
         if "addAssigneesToAssignable" in query:
             mutation_inputs.append(payload["variables"]["input"])
             return json.dumps(
-                {"data": {"addAssigneesToAssignable": {"assignable": {"__typename": "PullRequest"}}}}
+                {
+                    "data": {
+                        "addAssigneesToAssignable": {
+                            "assignable": {"__typename": "PullRequest"}
+                        }
+                    }
+                }
             )
-        return json.dumps(
-            {"data": {"repository": {"pullRequest": {"id": "PR_node"}}}}
-        )
+        return json.dumps({"data": {"repository": {"pullRequest": {"id": "PR_node"}}}})
 
     await add_assignees("owner", "repo", 123, ["alice"], runner=runner)
 
-    assert mutation_inputs == [
-        {"assignableId": "PR_node", "assigneeIds": ["U_alice"]}
-    ]
+    assert mutation_inputs == [{"assignableId": "PR_node", "assigneeIds": ["U_alice"]}]
 
 
 async def test_remove_assignees_uses_current_graphql_actor_ids() -> None:
@@ -256,7 +257,13 @@ async def test_remove_assignees_uses_current_graphql_actor_ids() -> None:
         calls.append(payload)
         if "removeAssigneesFromAssignable" in payload["query"]:
             return json.dumps(
-                {"data": {"removeAssigneesFromAssignable": {"assignable": {"__typename": "PullRequest"}}}}
+                {
+                    "data": {
+                        "removeAssigneesFromAssignable": {
+                            "assignable": {"__typename": "PullRequest"}
+                        }
+                    }
+                }
             )
         return json.dumps(
             {
@@ -281,7 +288,7 @@ async def test_remove_assignees_uses_current_graphql_actor_ids() -> None:
 
     await remove_assignees("owner", "repo", 123, ["alice"], runner=runner)
 
-    assert calls[1]["variables"]["input"] == {
+    assert mapping(calls[1]["variables"])["input"] == {
         "assignableId": "PR_node",
         "assigneeIds": ["U_alice"],
     }

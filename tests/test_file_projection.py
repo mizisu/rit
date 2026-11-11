@@ -1,4 +1,5 @@
 from collections.abc import Iterable, Sequence
+from typing import Never
 
 from rit.core.diff import ParsedFilePatchSummary
 from rit.core.types import DiffHunk, DiffLine, FileDiff
@@ -342,7 +343,7 @@ def test_parse_file_patch_summaries_skips_empty_sequence_iteration() -> None:
         def __len__(self) -> int:
             return 0
 
-        def __getitem__(self, index: int) -> str:
+        def __getitem__(self, index: int | slice) -> Never:
             raise IndexError(index)
 
         def __iter__(self):

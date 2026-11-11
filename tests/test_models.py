@@ -2,7 +2,7 @@
 
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Literal, get_args, get_origin, get_type_hints
+from typing import Literal, Never, get_args, get_origin, get_type_hints, overload
 
 import rit.state.models as models_module
 from rit.state.models import (
@@ -576,7 +576,7 @@ class TestGroupCommentsIntoThreads:
             def __len__(self) -> int:
                 return 0
 
-            def __getitem__(self, index: int) -> PRComment:
+            def __getitem__(self, index: int | slice) -> Never:
                 raise IndexError(index)
 
             def __iter__(self):
@@ -602,7 +602,13 @@ class TestGroupCommentsIntoThreads:
             def __len__(self) -> int:
                 return 1
 
-            def __getitem__(self, index: int) -> PRComment:
+            @overload
+            def __getitem__(self, index: int) -> PRComment: ...
+
+            @overload
+            def __getitem__(self, index: slice) -> Never: ...
+
+            def __getitem__(self, index: int | slice) -> PRComment:
                 if index == 0:
                     return comment
                 raise IndexError(index)

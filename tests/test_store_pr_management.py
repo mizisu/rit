@@ -1,5 +1,8 @@
+from typing import cast
+
 import pytest
 
+from rit.services.github import GitHubService
 from rit.state.models import PR, PRTeam, PRUser, ReviewRequest
 from rit.state.store import PRStore
 
@@ -84,7 +87,7 @@ async def test_set_requested_reviewers_diffs_users_and_teams() -> None:
     store = PRStore(pr_number=123)
     store.state.pr = current
     service = FakePRManagementService(summary)
-    store._service = service
+    store._service = cast(GitHubService, service)
 
     changed = await store.set_requested_reviewers(users=["bob"], teams=["ops"])
 
@@ -104,7 +107,7 @@ async def test_set_requested_reviewers_noops_when_selection_unchanged() -> None:
     store = PRStore(pr_number=123)
     store.state.pr = current
     service = FakePRManagementService(current)
-    store._service = service
+    store._service = cast(GitHubService, service)
 
     changed = await store.set_requested_reviewers(users=["alice"], teams=[])
 
@@ -120,7 +123,7 @@ async def test_set_assignees_diffs_logins() -> None:
     store = PRStore(pr_number=123)
     store.state.pr = current
     service = FakePRManagementService(summary)
-    store._service = service
+    store._service = cast(GitHubService, service)
 
     changed = await store.set_assignees(["bob"])
 

@@ -27,6 +27,7 @@ class CaptureFileChanges:
 def test_toggle_file_viewed_advances_only_when_marking_in_diff(
     state: FileViewedState,
     diff_focused: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     file = PRFile(filename="one.py", viewer_viewed_state=state)
     updates: list[str] = []
@@ -57,15 +58,11 @@ def test_toggle_file_viewed_advances_only_when_marking_in_diff(
         def update_file_view_state(self, filename: str) -> None:
             updates.append(filename)
 
-    class TestScreen(MainScreen):
-        @property
-        def file_changes(self) -> FileChanges:
-            return FileChanges()
-
-        def run_worker(self, coro, *args: object, **kwargs: object) -> None:
-            coro.close()
-
-    screen = TestScreen(owner="test", repo="repo", pr_number=123)
+    monkeypatch.setattr(
+        MainScreen, "file_changes", property(lambda _self: FileChanges())
+    )
+    screen = MainScreen(owner="test", repo="repo", pr_number=123)
+    monkeypatch.setattr(screen, "run_worker", lambda coro, **_kwargs: coro.close())
     screen.current_tab = 1
     screen.store.state.files = [file]
     screen.store.state.pr = PR(number=123, node_id="PR_123")
@@ -231,6 +228,7 @@ async def test_toggle_targets_new_file_when_focus_moves_during_viewed_refresh(
 @pytest.mark.parametrize("fail_sync", [False, True])
 async def test_sync_file_viewed_reraises_unexpected_flash_errors(
     fail_sync: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     file = PRFile(filename="src/app.py")
     file_changes = CaptureFileChanges()
@@ -244,16 +242,15 @@ async def test_sync_file_viewed_reraises_unexpected_flash_errors(
                 raise GitHubError("failed")
             return True
 
-    class TestScreen(MainScreen):
-        @property
-        def file_changes(self) -> CaptureFileChanges:
-            return file_changes
+    def fail_flash(message: Flash) -> None:
+        messages.append(message)
+        raise RuntimeError("flash dispatch failed")
 
-        def post_message(self, message: Flash) -> None:
-            messages.append(message)
-            raise RuntimeError("flash dispatch failed")
-
-    screen = TestScreen(owner="test", repo="repo", pr_number=123)
+    monkeypatch.setattr(
+        MainScreen, "file_changes", property(lambda _self: file_changes)
+    )
+    screen = MainScreen(owner="test", repo="repo", pr_number=123)
+    monkeypatch.setattr(screen, "post_message", fail_flash)
     screen.store = Store()
     screen.store.state.files = [file]
     assert screen.store.viewed_files.toggle(file.filename)

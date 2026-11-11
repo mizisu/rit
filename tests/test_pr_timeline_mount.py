@@ -1,9 +1,11 @@
+from collections.abc import Iterable
 from datetime import UTC, datetime
-from typing import ClassVar
+from typing import ClassVar, cast
 
 import pytest
 from textual.app import App, ComposeResult
 from textual.binding import BindingType
+from textual.containers import Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.geometry import Region
 from textual.message_pump import NoActiveAppError
@@ -13,6 +15,7 @@ from textual.widgets import Collapsible, Static
 import rit.ui.components.pr_timeline as pr_timeline_module
 from rit.state.models import (
     PR,
+    CommentThread,
     PRIssueComment,
     PRReview,
     PRTimelineEvent,
@@ -236,7 +239,7 @@ def test_timeline_is_scroll_at_top_reraises_unexpected_offset_errors() -> None:
         def scroll_offset(self) -> object:
             raise RuntimeError("scroll offset failed")
 
-    timeline._scroll_container = BrokenScrollContainer()
+    timeline._scroll_container = cast(VerticalScroll, BrokenScrollContainer())
 
     with pytest.raises(RuntimeError, match="scroll offset failed"):
         timeline._is_scroll_at_top()
@@ -249,7 +252,7 @@ def test_timeline_restore_scroll_home_ignores_missing_active_app() -> None:
         def scroll_home(self, *, animate: bool) -> None:
             raise NoActiveAppError()
 
-    timeline._scroll_container = UnmountedScrollContainer()
+    timeline._scroll_container = cast(VerticalScroll, UnmountedScrollContainer())
 
     timeline._restore_scroll_home()
 
@@ -261,7 +264,7 @@ def test_timeline_restore_scroll_home_reraises_unexpected_scroll_errors() -> Non
         def scroll_home(self, *, animate: bool) -> None:
             raise RuntimeError("scroll home failed")
 
-    timeline._scroll_container = BrokenScrollContainer()
+    timeline._scroll_container = cast(VerticalScroll, BrokenScrollContainer())
 
     with pytest.raises(RuntimeError, match="scroll home failed"):
         timeline._restore_scroll_home()
@@ -277,7 +280,7 @@ def test_timeline_update_selection_ignores_missing_active_app_while_scrolling() 
         def scroll_to_widget(self, _widget: Widget, *, animate: bool) -> None:
             raise NoActiveAppError()
 
-    timeline._scroll_container = UnmountedScrollContainer()
+    timeline._scroll_container = cast(VerticalScroll, UnmountedScrollContainer())
 
     timeline._update_selection(0)
 
@@ -295,7 +298,7 @@ def test_timeline_update_selection_reraises_unexpected_scroll_errors() -> None:
         def scroll_to_widget(self, _widget: Widget, *, animate: bool) -> None:
             raise RuntimeError("scroll to widget failed")
 
-    timeline._scroll_container = BrokenScrollContainer()
+    timeline._scroll_container = cast(VerticalScroll, BrokenScrollContainer())
 
     with pytest.raises(RuntimeError, match="scroll to widget failed"):
         timeline._update_selection(0)
@@ -315,10 +318,6 @@ def test_mount_review_with_threads_uses_projection_order_without_resorting(
     first = Thread()
     second = Thread()
 
-    class OrderedThreads:
-        def __iter__(self):
-            return iter((first, second))
-
     monkeypatch.setattr(
         timeline,
         "_mount_comment_thread",
@@ -326,9 +325,9 @@ def test_mount_review_with_threads_uses_projection_order_without_resorting(
     )
 
     timeline._mount_review_with_threads(
-        object(),
+        Vertical(),
         PRReview(state=ReviewState.COMMENTED, body=""),
-        OrderedThreads(),
+        cast(list[CommentThread], [first, second]),
         body_mount_delay=0,
     )
 
@@ -381,7 +380,7 @@ def test_timeline_refresh_thread_metadata_does_not_copy_thread_items(
     widget = Widget()
 
     class NoListItems:
-        def __init__(self, items: object) -> None:
+        def __init__(self, items: Iterable[object]) -> None:
             self._items = items
 
         def __iter__(self):
@@ -622,7 +621,7 @@ def test_timeline_select_first_visible_item_falls_back_without_active_app() -> N
         def scroll_offset(self) -> object:
             raise NoActiveAppError()
 
-    timeline._scroll_container = UnmountedScrollContainer()
+    timeline._scroll_container = cast(VerticalScroll, UnmountedScrollContainer())
 
     timeline.select_first_visible_item()
 
@@ -640,7 +639,7 @@ def test_timeline_select_first_visible_item_reraises_unexpected_scroll_errors() 
         def scroll_offset(self) -> object:
             raise RuntimeError("scroll offset failed")
 
-    timeline._scroll_container = BrokenScrollContainer()
+    timeline._scroll_container = cast(VerticalScroll, BrokenScrollContainer())
 
     with pytest.raises(RuntimeError, match="scroll offset failed"):
         timeline.select_first_visible_item()
@@ -656,7 +655,7 @@ def test_timeline_select_first_visible_item_reraises_unexpected_region_errors() 
 
     timeline._navigable_items = [BrokenRegionWidget()]
     timeline._navigable_items_valid = True
-    timeline._scroll_container = SimpleScrollContainer()
+    timeline._scroll_container = cast(VerticalScroll, SimpleScrollContainer())
 
     with pytest.raises(RuntimeError, match="region failed"):
         timeline.select_first_visible_item()
@@ -684,11 +683,6 @@ async def test_timeline_toggle_resolve_reraises_unexpected_success_message_error
         def error(self, _message: str) -> None:
             pass
 
-    class TestTimeline(PRTimeline):
-        @property
-        def log(self) -> Logger:
-            return Logger()
-
     class Store:
         async def resolve_thread(self, thread_id: str, root_id: int) -> bool:
             return True
@@ -696,8 +690,9 @@ async def test_timeline_toggle_resolve_reraises_unexpected_success_message_error
     def post_message(_message: object) -> None:
         raise RuntimeError("message dispatch failed")
 
-    timeline = TestTimeline(PRStore())
-    timeline.store = Store()
+    monkeypatch.setattr(PRTimeline, "log", property(lambda _self: Logger()))
+    timeline = PRTimeline(PRStore())
+    timeline.store = cast(PRStore, Store())
     monkeypatch.setattr(
         timeline,
         "get_current_thread_info",

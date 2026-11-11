@@ -1,7 +1,5 @@
 """GitHub-compatible Markdown parsing and rendering."""
 
-from typing import ClassVar
-
 from markdown_it import MarkdownIt
 from markdown_it.rules_core import StateCore
 from textual.widgets import Markdown
@@ -10,7 +8,7 @@ from textual.widgets import Markdown
 class GitHubMarkdown(Markdown):
     """Markdown with document-style bullets and consistent nesting."""
 
-    BULLETS: ClassVar[list[str]] = ["•  ", "◦  ", "▪  "]
+    BULLETS: list[str] = ["•  ", "◦  ", "▪  "]  # noqa: RUF012 -- Matches Textual’s shared instance-typed list.
 
 
 def github_markdown_parser() -> MarkdownIt:

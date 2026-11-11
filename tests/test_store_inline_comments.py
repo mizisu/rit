@@ -1,8 +1,10 @@
 import asyncio
+from typing import cast
 
 import pytest
 
 from rit.core.diff import parse_patch
+from rit.services.github import GitHubService
 from rit.state.models import (
     PR,
     NodeList,
@@ -229,7 +231,7 @@ class BlockingPRDataService(FakeInlineCommentService):
 async def test_delete_submitted_review_comment_forgets_recent_projection() -> None:
     store = PRStore(pr_number=123)
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
     comment = PRComment(
         id=501,
         node_id="PRRC_501",
@@ -249,7 +251,7 @@ async def test_delete_submitted_review_comment_forgets_recent_projection() -> No
 async def test_update_submitted_review_comment_updates_local_projection() -> None:
     store = PRStore(pr_number=123)
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
     comment = PRComment(
         id=501,
         node_id="PRRC_501",
@@ -338,7 +340,7 @@ async def test_submit_inline_comment_uses_head_sha_and_target() -> None:
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     comment = await store.submit_inline_comment(
         "  hello inline  ",
@@ -362,7 +364,7 @@ async def test_post_comment_submits_only_selected_pending_draft(
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
     for body in ("first", "second"):
         if file_level:
             store.save_pending_file_comment(body, path="src/app.py")
@@ -398,7 +400,7 @@ async def test_post_file_comment_preserves_other_drafts_during_submission(
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
     original = store.save_pending_file_comment("original", path="b.py")
 
     async def submit(body: str, *, path: str) -> PRComment:
@@ -426,7 +428,7 @@ async def test_submit_file_comment_uses_head_sha_without_line_target() -> None:
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     comment = await store.submit_file_comment(
         "  check the whole file  ",
@@ -449,7 +451,7 @@ async def test_queue_pending_file_comment_edits_selected_draft_without_duplicate
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
     for body in ("first", "second"):
         if synced:
             await store.queue_pending_file_comment(body, path="src/app.py")
@@ -490,7 +492,7 @@ async def test_queue_pending_file_comment_creates_file_level_review_draft() -> N
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     draft = await store.queue_pending_file_comment(
         "  check the whole file  ",
@@ -539,7 +541,7 @@ async def test_submit_inline_comment_on_unchanged_line_is_rejected() -> None:
         )
     }
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     with pytest.raises(UnsupportedInlineCommentTarget, match="outside the PR diff"):
         await store.submit_inline_comment(
@@ -558,7 +560,7 @@ async def test_submit_inline_comment_preserves_multiline_range() -> None:
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     comment = await store.submit_inline_comment(
         "hello",
@@ -655,7 +657,7 @@ async def test_upsert_pending_inline_comment_syncs_pending_review() -> None:
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
     previous_version = store.state.pending_review.revision
 
     draft = await store.upsert_pending_inline_comment(
@@ -678,7 +680,7 @@ async def test_queue_pending_inline_comment_adds_multiple_drafts_on_same_line() 
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     first = await store.queue_pending_inline_comment(
         "first",
@@ -713,7 +715,7 @@ async def test_queue_pending_inline_comment_edits_selected_draft_without_droppin
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     await store.queue_pending_inline_comment(
         "first",
@@ -760,7 +762,7 @@ async def test_edit_pending_comment_rendered_before_sync_does_not_duplicate(
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
     rendered: list[PendingReviewComment] = []
 
     async def render_local_save() -> None:
@@ -811,7 +813,7 @@ async def test_queue_pending_inline_comment_updates_server_draft_in_place() -> N
     )
     store.state.pending_review.comments = [original]
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     updated = await store.queue_pending_inline_comment(
         "updated",
@@ -850,7 +852,7 @@ async def test_queue_pending_comment_rolls_back_failed_server_edit(
     store.state.pending_review.comments = [original]
     service = BlockingReviewCommentUpdateService()
     service.fail_update = True
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     queue = (
         store.queue_pending_file_comment("updated", path="src/app.py", draft_index=0)
@@ -907,7 +909,7 @@ async def test_pending_review_rollback_preserves_existing_version_capture_policy
         service.fail_create = True
         service.list_review_comments_result = [_created_review_comment(91, 1, original)]
         started, release = service.create_started, service.allow_create
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     def save_newer_draft() -> None:
         store.save_pending_inline_comment(
@@ -956,7 +958,7 @@ async def test_remove_pending_inline_comment_deletes_selected_draft_without_drop
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     await store.queue_pending_inline_comment(
         "first",
@@ -1043,7 +1045,7 @@ async def test_remove_pending_inline_comment_marks_replaced_review_obsolete() ->
             pull_request_review_id=91,
         ),
     ]
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     deleted = await store.remove_pending_inline_comment(
         path="src/app.py",
@@ -1135,7 +1137,7 @@ async def test_upsert_pending_inline_comment_preserves_server_drafts_on_sync() -
             }
         )
     ]
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     await store.upsert_pending_inline_comment(
         "new draft",
@@ -1177,7 +1179,7 @@ async def test_upsert_pending_inline_comment_preserves_server_pending_draft_posi
             }
         )
     ]
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     await store.upsert_pending_inline_comment(
         "new draft",
@@ -1215,7 +1217,7 @@ async def test_upsert_pending_inline_comment_does_not_delete_when_server_fetch_f
         raise RuntimeError("cannot load pending comments")
 
     service.list_review_comments = list_review_comments  # type: ignore[method-assign]
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     with pytest.raises(RuntimeError, match="cannot load pending comments"):
         await store.upsert_pending_inline_comment(
@@ -1238,7 +1240,7 @@ async def test_upsert_pending_inline_comment_does_not_delete_when_server_comment
     store.state.pr = PR(number=123, head_sha="deadbeef")
     store.state.pending_review.review_id = 91
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     with pytest.raises(RuntimeError, match="not replacing pending review"):
         await store.upsert_pending_inline_comment(
@@ -1264,7 +1266,7 @@ async def test_upsert_pending_inline_comment_keeps_unchanged_line_local() -> Non
         )
     }
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     draft = await store.upsert_pending_inline_comment(
         "hello outside hunk",
@@ -1290,7 +1292,7 @@ async def test_upsert_pending_inline_comment_syncs_mixed_pending_comments() -> N
         )
     }
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     diff_draft = await store.upsert_pending_inline_comment(
         "hello diff",
@@ -1325,7 +1327,7 @@ async def test_queue_pending_comment_runs_hook_after_local_save_before_sync(
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = BlockingPendingReviewService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
     hook_started = asyncio.Event()
     allow_hook = asyncio.Event()
 
@@ -1370,7 +1372,7 @@ async def test_upsert_pending_inline_comment_updates_local_state_before_sync_fin
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = BlockingPendingReviewService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     task = asyncio.create_task(
         store.upsert_pending_inline_comment(
@@ -1416,7 +1418,7 @@ async def test_upsert_pending_inline_comment_rolls_back_local_state_on_sync_fail
         )
     ]
     service.fail_create = True
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     task = asyncio.create_task(
         store.upsert_pending_inline_comment(
@@ -1443,7 +1445,7 @@ async def test_remove_pending_inline_comment_deletes_server_pending_review() -> 
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     await store.upsert_pending_inline_comment(
         "hello",
@@ -1482,7 +1484,7 @@ async def test_remove_pending_inline_comment_runs_hook_after_local_delete_before
     service.list_review_comments_result = [
         _created_review_comment(100, 1, store.state.pending_review.comments[0])
     ]
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
     hook_started = asyncio.Event()
     allow_hook = asyncio.Event()
 
@@ -1529,7 +1531,7 @@ async def test_remove_pending_inline_comment_updates_local_state_before_sync_fin
     service.list_review_comments_result = [
         _created_review_comment(100, 1, store.state.pending_review.comments[0])
     ]
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     task = asyncio.create_task(
         store.remove_pending_inline_comment(
@@ -1553,7 +1555,7 @@ async def test_load_pending_review_does_not_clear_local_drafts() -> None:
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = FakeInlineCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
     draft = store.save_pending_inline_comment(
         "local draft",
         path="src/app.py",
@@ -1574,7 +1576,7 @@ async def test_stale_pr_refresh_does_not_clear_new_pending_drafts() -> None:
     store.state.pr = PR(number=123, head_sha="deadbeef")
     service = BlockingPRDataService()
     service.pr_all_result = PR(number=123, head_sha="deadbeef")
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     refresh_task = asyncio.create_task(store._load_pr_data())
     await asyncio.wait_for(service.get_started.wait(), timeout=1)
@@ -1617,7 +1619,7 @@ async def test_load_pr_data_restores_pending_review_comments() -> None:
         return PR(number=pr_number, reviews_connection=NodeList(nodes=[pending_review]))
 
     service.get_pr_all = get_pr_all  # type: ignore[method-assign]
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
     previous_version = store.state.pending_review.revision
 
     await store._load_pr_data()
@@ -1677,7 +1679,7 @@ async def test_load_pr_data_restores_pending_review_comment_from_thread_anchor()
         )
 
     service.get_pr_all = get_pr_all  # type: ignore[method-assign]
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     await store._load_pr_data()
 

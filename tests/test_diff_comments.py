@@ -1,11 +1,12 @@
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 
 from rit.core.diff import parse_patch
 from rit.core.types import DiffHunk, DiffLine
-from rit.state.pending_review_workspace import PendingReviewWorkspace
 from rit.state.models import (
     NodeList,
     PendingReviewComment,
@@ -14,9 +15,12 @@ from rit.state.models import (
     ReviewState,
     ReviewThread,
 )
+from rit.state.pending_review_workspace import PendingReviewWorkspace
+from rit.state.store import PRStore
 from rit.ui.messages import Flash
 from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets.diff_view import DiffView
+from rit.ui.widgets.inline_review_thread import InlineReviewThread
 
 
 def test_comment_navigation_has_no_key_bindings() -> None:
@@ -26,9 +30,12 @@ def test_comment_navigation_has_no_key_bindings() -> None:
         _PR_INFO_BINDINGS,
     )
 
-    bindings = _COMMON_BINDINGS + _FILES_BINDINGS + _PR_INFO_BINDINGS + DiffView.BINDINGS
+    bindings = (
+        _COMMON_BINDINGS + _FILES_BINDINGS + _PR_INFO_BINDINGS + DiffView.BINDINGS
+    )
     assert all(
-        binding.action not in {"next_comment", "prev_comment"} for binding in bindings
+        binding.action not in {"next_comment", "prev_comment"}
+        for binding in Binding.make_bindings(bindings)
     )
 
 
@@ -93,7 +100,7 @@ def test_resolve_line_index_prefers_left_side_mapping() -> None:
         side="LEFT",
     )
 
-    assert _comments._resolve_line_index(view, comment) == 3
+    assert _comments._resolve_line_index(cast(DiffView, view), comment) == 3
 
 
 def test_resolve_line_index_prefers_thread_diff_side_when_comment_side_absent() -> None:
@@ -115,7 +122,9 @@ def test_resolve_line_index_prefers_thread_diff_side_when_comment_side_absent() 
         comments_connection=NodeList(nodes=[comment]),
     )
 
-    assert _comments._resolve_line_index(view, comment, thread=thread) == 3
+    assert (
+        _comments._resolve_line_index(cast(DiffView, view), comment, thread=thread) == 3
+    )
     assert _comments._comment_target_side(comment, thread=thread) == "old"
 
 
@@ -144,7 +153,7 @@ def test_resolve_line_index_falls_back_to_diff_hunk_region() -> None:
         diff_hunk=patch,
     )
 
-    assert _comments._resolve_line_index(view, comment) == 1
+    assert _comments._resolve_line_index(cast(DiffView, view), comment) == 1
 
 
 def test_build_comment_map_skips_sort_when_no_comment_lines(
@@ -179,7 +188,7 @@ def test_build_comment_map_skips_sort_when_no_comment_lines(
         raising=False,
     )
 
-    _comments.build_comment_map(view)
+    _comments.build_comment_map(cast(DiffView, view))
 
     assert view._comment_line_indices == []
 
@@ -216,7 +225,7 @@ def test_build_comment_map_keeps_file_comment_separate_from_line_one() -> None:
         _pending_comment_layout_widgets_by_line={},
     )
 
-    _comments.build_comment_map(view)
+    _comments.build_comment_map(cast(DiffView, view))
 
     assert view._pending_comment_drafts_by_line == {}
     assert view._pending_file_comment_drafts_by_path == {"test.py": [draft]}
@@ -259,7 +268,7 @@ def test_build_comment_map_skips_sort_for_single_comment_line(
         raising=False,
     )
 
-    _comments.build_comment_map(view)
+    _comments.build_comment_map(cast(DiffView, view))
 
     assert view._comment_line_indices == [4]
 
@@ -292,7 +301,7 @@ def test_build_comment_map_skips_sort_for_single_thread_line(
         raising=False,
     )
 
-    _comments.build_comment_map(view)
+    _comments.build_comment_map(cast(DiffView, view))
 
     assert view._comment_line_indices == [4]
 
@@ -346,7 +355,7 @@ def test_build_comment_map_skips_pending_review_thread_already_rendered_as_draft
         _pending_comment_layout_widgets_by_line={},
     )
 
-    _comments.build_comment_map(view)
+    _comments.build_comment_map(cast(DiffView, view))
 
     assert view._pending_comment_drafts_by_line == {4: [draft]}
     assert view._comment_threads_by_line == {}
@@ -402,7 +411,7 @@ def test_build_comment_map_skips_pending_review_thread_when_server_reissues_id()
         _pending_comment_layout_widgets_by_line={},
     )
 
-    _comments.build_comment_map(view)
+    _comments.build_comment_map(cast(DiffView, view))
 
     assert view._pending_comment_drafts_by_line == {4: [draft]}
     assert view._comment_threads_by_line == {}
@@ -457,7 +466,7 @@ def test_build_comment_map_skips_stale_pending_review_thread_after_resync() -> N
         _pending_comment_layout_widgets_by_line={},
     )
 
-    _comments.build_comment_map(view)
+    _comments.build_comment_map(cast(DiffView, view))
 
     assert view._pending_comment_drafts_by_line == {4: [draft]}
     assert view._comment_threads_by_line == {}
@@ -491,7 +500,9 @@ def test_build_comment_map_hides_replaced_pending_thread_matching_remaining_draf
     view = SimpleNamespace(
         store=SimpleNamespace(
             state=SimpleNamespace(
-                pending_review=PendingReviewWorkspace(review_id=100, comments=[draft], obsolete_review_ids={91}),
+                pending_review=PendingReviewWorkspace(
+                    review_id=100, comments=[draft], obsolete_review_ids={91}
+                ),
                 reviews=[PRReview(id=100, state=ReviewState.PENDING)],
                 review_threads=[thread],
             ),
@@ -514,7 +525,7 @@ def test_build_comment_map_hides_replaced_pending_thread_matching_remaining_draf
         _pending_comment_layout_widgets_by_line={},
     )
 
-    _comments.build_comment_map(view)
+    _comments.build_comment_map(cast(DiffView, view))
 
     assert view._pending_comment_drafts_by_line == {4: [draft]}
     assert view._comment_threads_by_line == {}
@@ -572,7 +583,7 @@ def test_build_comment_map_keeps_submitted_thread_matching_draft_content() -> No
         _pending_comment_layout_widgets_by_line={},
     )
 
-    _comments.build_comment_map(view)
+    _comments.build_comment_map(cast(DiffView, view))
 
     assert view._pending_comment_drafts_by_line == {4: [draft]}
     assert view._comment_threads_by_line == {4: [thread]}
@@ -620,7 +631,7 @@ def test_build_comment_map_hides_pending_review_thread_after_local_delete() -> N
         _pending_comment_layout_widgets_by_line={},
     )
 
-    _comments.build_comment_map(view)
+    _comments.build_comment_map(cast(DiffView, view))
 
     assert view._pending_comment_drafts_by_line == {}
     assert view._comment_threads_by_line == {}
@@ -635,13 +646,15 @@ def test_pending_comments_for_current_diff_skips_empty_state_scan() -> None:
     drafts = EmptyDrafts()
     view = SimpleNamespace(
         store=SimpleNamespace(
-            state=SimpleNamespace(pending_review=PendingReviewWorkspace(comments=drafts)),
+            state=SimpleNamespace(
+                pending_review=PendingReviewWorkspace(comments=drafts)
+            ),
         ),
     )
 
     assert (
         _comments._pending_comments_for_current_diff(
-            view,
+            cast(DiffView, view),
             frozenset({"a.py", "b.py"}),
         )
         == ()
@@ -664,7 +677,7 @@ def test_comment_widgets_in_order_skips_list_copy_for_empty_line(
         raising=False,
     )
 
-    assert _comments.comment_widgets_in_order(view, 7) == []
+    assert _comments.comment_widgets_in_order(cast(DiffView, view), 7) == []
 
 
 def test_comment_widgets_in_order_reuses_single_widget_group(
@@ -691,8 +704,14 @@ def test_comment_widgets_in_order_reuses_single_widget_group(
         _comment_widgets_by_line={7: comment_widgets},
     )
 
-    assert _comments.comment_widgets_in_order(pending_only_view, 7) is pending_widgets
-    assert _comments.comment_widgets_in_order(comment_only_view, 7) is comment_widgets
+    assert (
+        _comments.comment_widgets_in_order(cast(DiffView, pending_only_view), 7)
+        is pending_widgets
+    )
+    assert (
+        _comments.comment_widgets_in_order(cast(DiffView, comment_only_view), 7)
+        is comment_widgets
+    )
 
 
 def test_total_comments_at_line_skips_default_list_allocation() -> None:
@@ -709,7 +728,7 @@ def test_total_comments_at_line_skips_default_list_allocation() -> None:
         _comment_widgets_by_line=NoDefaultDict(),
     )
 
-    assert _comments.total_comments_at_line(view, 7) == 0
+    assert _comments.total_comments_at_line(cast(DiffView, view), 7) == 0
 
 
 def test_active_thread_skips_default_list_allocation() -> None:
@@ -725,7 +744,7 @@ def test_active_thread_skips_default_list_allocation() -> None:
         _comment_threads_by_line=NoDefaultDict(),
     )
 
-    assert _comments.active_thread(view, 7) is None
+    assert _comments.active_thread(cast(DiffView, view), 7) is None
 
 
 def test_active_pending_draft_skips_default_list_allocation() -> None:
@@ -740,7 +759,7 @@ def test_active_pending_draft_skips_default_list_allocation() -> None:
         _pending_comment_drafts_by_line=NoDefaultDict(),
     )
 
-    assert _comments.active_pending_draft(view, 7) is None
+    assert _comments.active_pending_draft(cast(DiffView, view), 7) is None
 
 
 def test_pending_draft_widget_builds_side_id_without_lower_call() -> None:
@@ -808,7 +827,8 @@ async def test_refresh_thread_metadata_updates_inline_thread_without_rerender() 
 +new alpha
  line2"""
     thread = _make_thread(line=2, original_line=2, side="RIGHT")
-    store = SimpleNamespace(state=SimpleNamespace(files=[], review_threads=[thread]))
+    store = PRStore()
+    store.state.review_threads = [thread]
 
     class TestApp(App):
         def compose(self) -> ComposeResult:
@@ -830,6 +850,7 @@ async def test_refresh_thread_metadata_updates_inline_thread_without_rerender() 
 
         assert diff_view._comment_widgets_by_line[line_index][0] is widget
         assert diff_view._comment_threads_by_line[line_index][0].id == "thread-1"
+        assert isinstance(widget, InlineReviewThread)
         assert widget.is_resolved is True
 
 
@@ -862,7 +883,7 @@ async def test_toggle_resolve_rolls_back_and_flashes_when_store_update_fails(
         lambda _view, _line, _thread, is_resolved: updates.append(is_resolved),
     )
 
-    await _comments.toggle_resolve(view)
+    await _comments.toggle_resolve(cast(DiffView, view))
 
     assert updates == [True, False]
     assert view.messages[-1].content == "Error: mutation failed"
@@ -899,7 +920,7 @@ async def test_toggle_resolve_reraises_unexpected_success_flash_errors(
     )
 
     with pytest.raises(RuntimeError, match="flash dispatch failed"):
-        await _comments.toggle_resolve(view)
+        await _comments.toggle_resolve(cast(DiffView, view))
 
     assert updates == [True]
 
@@ -912,7 +933,8 @@ async def test_unified_comment_jump_uses_new_side_anchor_for_right_comment() -> 
 +new alpha
  line2"""
     thread = _make_thread(line=2, original_line=2, side="RIGHT")
-    store = SimpleNamespace(state=SimpleNamespace(files=[], review_threads=[thread]))
+    store = PRStore()
+    store.state.review_threads = [thread]
 
     class TestApp(App):
         def compose(self) -> ComposeResult:
@@ -950,7 +972,8 @@ async def test_split_comment_jump_sets_old_pane_for_left_comment() -> None:
 +new alpha
  line2"""
     thread = _make_thread(line=2, original_line=2, side="LEFT")
-    store = SimpleNamespace(state=SimpleNamespace(files=[], review_threads=[thread]))
+    store = PRStore()
+    store.state.review_threads = [thread]
 
     class TestApp(App):
         def compose(self) -> ComposeResult:
@@ -987,7 +1010,8 @@ async def test_split_comment_jump_uses_thread_diff_side_when_graphql_comment_has
         side="",
         thread_diff_side="LEFT",
     )
-    store = SimpleNamespace(state=SimpleNamespace(files=[], review_threads=[thread]))
+    store = PRStore()
+    store.state.review_threads = [thread]
 
     class TestApp(App):
         def compose(self) -> ComposeResult:

@@ -1,7 +1,9 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import cast
 
 import pytest
 
+from rit.services.github import GitHubService
 from rit.state.models import PR, PRIssueComment, PRUser
 from rit.state.store import PRStore
 
@@ -16,8 +18,8 @@ class FakeCommentService:
             id=1,
             body=body,
             user=PRUser(login="alice"),
-            created_at=datetime(2024, 1, 2, tzinfo=timezone.utc),
-            updated_at=datetime(2024, 1, 2, tzinfo=timezone.utc),
+            created_at=datetime(2024, 1, 2, tzinfo=UTC),
+            updated_at=datetime(2024, 1, 2, tzinfo=UTC),
         )
 
 
@@ -26,7 +28,7 @@ async def test_submit_issue_comment_updates_store_state() -> None:
     store = PRStore(pr_number=123)
     store.state.pr = PR(number=123)
     service = FakeCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     comment = await store.submit_issue_comment("  hello world  ")
 
@@ -41,7 +43,7 @@ async def test_submit_issue_comment_updates_store_state() -> None:
 async def test_submit_issue_comment_sorts_missing_and_aware_dates() -> None:
     store = PRStore(pr_number=123)
     service = FakeCommentService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
     existing = PRIssueComment(
         id=2,
         body="missing date",

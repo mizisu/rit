@@ -1,7 +1,10 @@
+from typing import cast
+
 import pytest
 
 from rit.core.diff import parse_patch
-from rit.state.models import PR, PRComment, PendingReviewComment, PRReview, ReviewState
+from rit.services.github import GitHubService
+from rit.state.models import PR, PendingReviewComment, PRComment, PRReview, ReviewState
 from rit.state.store import PRStore, UnsupportedInlineCommentTarget
 
 
@@ -74,7 +77,7 @@ class FakeReviewService:
 async def test_submit_review_passes_event_and_trimmed_body() -> None:
     store = PRStore(pr_number=123)
     service = FakeReviewService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     await store.submit_review("COMMENT", "  hello review  ")
 
@@ -85,7 +88,7 @@ async def test_submit_review_passes_event_and_trimmed_body() -> None:
 async def test_submit_review_allows_empty_body_for_approve() -> None:
     store = PRStore(pr_number=123)
     service = FakeReviewService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     await store.submit_review("APPROVE", "")
 
@@ -111,7 +114,7 @@ async def test_submit_review_includes_pending_comments_and_clears_them() -> None
     )
     previous_version = store.state.pending_review.revision
     service = FakeReviewService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     await store.submit_review("COMMENT", "")
 
@@ -141,7 +144,7 @@ async def test_submit_review_rejects_unsupported_inline_targets() -> None:
         )
     ]
     service = FakeReviewService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     with pytest.raises(UnsupportedInlineCommentTarget, match="outside the PR diff"):
         await store.submit_review("COMMENT", "")
@@ -162,7 +165,7 @@ async def test_submit_review_submits_existing_pending_review() -> None:
         side="RIGHT",
     )
     service = FakeReviewService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     await store.submit_review("COMMENT", "summary")
 
@@ -194,7 +197,7 @@ async def test_submitted_pending_comments_survive_stale_review_refresh() -> None
     service.submitted_review = PRReview(id=91, state=ReviewState.COMMENTED)
     service.review_comments_result = [submitted_comment]
     service.pr_all_result = PR(number=123)
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
 
     await store.submit_review("COMMENT", "")
     await store.refresh_review_data()

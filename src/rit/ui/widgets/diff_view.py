@@ -13,7 +13,7 @@ from textual import events, on
 from textual._animator import EasingFunction
 from textual._types import AnimationLevel, CallbackType
 from textual.app import ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, VerticalScroll
 from textual.content import Content
 from textual.geometry import Offset, Region, Spacing
@@ -135,7 +135,7 @@ class DiffView(VerticalScroll):
 
     DEFAULT_CSS = Path(__file__).with_suffix(".tcss").read_text()
 
-    BINDINGS: ClassVar[list[Binding]] = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("j", "scroll_down", "Scroll Down", show=False),
         Binding("k", "scroll_up", "Scroll Up", show=False),
         Binding("h", "cursor_left", "Left", show=False),

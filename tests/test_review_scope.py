@@ -442,6 +442,7 @@ async def test_compact_scope_picker_keyboard_workflow(
             lambda: (
                 main.store.state.scope.head_sha == C
                 and main.file_changes.workspace_ready
+                and main.file_changes.diff_view.has_focus
             ),
             timeout=3,
         )
@@ -451,6 +452,7 @@ async def test_compact_scope_picker_keyboard_workflow(
             lambda: (
                 main.store.state.scope.head_sha == B
                 and main.file_changes.workspace_ready
+                and main.file_changes.diff_view.has_focus
             ),
             timeout=3,
         )
@@ -490,6 +492,7 @@ async def test_compact_scope_picker_keyboard_workflow(
             lambda: (
                 main.store.state.scope.kind == "range"
                 and main.file_changes.workspace_ready
+                and main.file_changes.diff_view.has_focus
             ),
             timeout=3,
         )

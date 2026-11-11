@@ -1,11 +1,13 @@
 import asyncio
+from collections.abc import Sequence
+from typing import cast
 
 import pytest
 
 from rit.core.diff import parse_patch
 from rit.core.types import FileDiff
 from rit.state.models import PRFile
-import rit.ui.components.combined_diff as combined_diff
+from rit.ui.components import combined_diff
 from rit.ui.components.combined_diff import (
     build_combined_diff_document,
     load_missing_combined_file_diffs,
@@ -85,7 +87,7 @@ def test_combined_diff_document_reads_each_filename_once_when_loaded() -> None:
         filename: parse_patch(patch, filename) for filename in ["one.py", "two.py"]
     }
 
-    document = build_combined_diff_document(files, file_diffs)  # type: ignore[arg-type]
+    document = build_combined_diff_document(cast(Sequence[PRFile], files), file_diffs)
 
     assert document is not None
     assert document.file_line_starts == {"one.py": 0, "two.py": 2}
@@ -98,7 +100,7 @@ def test_combined_diff_document_preserves_file_metadata_on_start_hunks() -> None
             filename="renamed.py",
             status="renamed",
             patch=patch,
-            previousFilename="old.py",
+            previous_filename="old.py",
             additions=9,
             deletions=4,
         )

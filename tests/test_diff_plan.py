@@ -1,5 +1,7 @@
 """Tests for DiffView planning helpers."""
 
+from typing import Literal
+
 import pytest
 
 import rit.ui.widgets.diff_plan as diff_plan_module
@@ -61,7 +63,7 @@ def test_build_rendered_rows_reuses_non_modified_row_kind(
     def row_kind_for_line(
         line: DiffLine,
         *,
-        modified_side: str | None = None,
+        modified_side: Literal["old", "new"] | None = None,
     ) -> str:
         nonlocal calls
         calls += 1
@@ -114,6 +116,7 @@ def test_build_diff_plan_builds_rendered_rows_during_single_hunk_pass() -> None:
 
     plan = build_diff_plan(diff)
 
+    assert isinstance(diff.hunks, SinglePassHunks)
     assert diff.hunks.iterations == 1
     assert [row.anchor_id for row in plan.rendered_rows.rows_unified] == [
         "line-0",

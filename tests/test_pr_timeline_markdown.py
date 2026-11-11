@@ -1,10 +1,13 @@
 import asyncio
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.containers import Vertical, VerticalScroll
 from textual.widget import Widget
+from textual.widgets import Static
 
 from rit.state.models import (
     PR,
@@ -53,9 +56,9 @@ def test_initial_timeline_selection_does_not_scroll_viewport() -> None:
     timeline._current_index = -1
     calls: list[bool] = []
 
-    def fake_update_selection(index: int, scroll_to_view: bool = True) -> None:
+    def fake_update_selection(new_index: int, scroll_to_view: bool = True) -> None:
         calls.append(scroll_to_view)
-        timeline._current_index = index
+        timeline._current_index = new_index
 
     timeline._update_selection = fake_update_selection
 
@@ -80,7 +83,7 @@ def test_timeline_mount_review_uses_shared_review_state_display(
     )
 
     timeline._mount_review(
-        _FakeTimelineContainer(mounted),
+        cast(Vertical, _FakeTimelineContainer(mounted)),
         PRReview(
             body="LGTM",
             state=ReviewState.APPROVED,
@@ -105,7 +108,7 @@ def test_mount_review_with_threads_checks_review_body_without_allocating_strip(
     monkeypatch.setattr(pr_timeline_module, "CommentCard", _FakeTimelineCard)
 
     timeline._mount_review_with_threads(
-        _FakeTimelineContainer(mounted),
+        cast(Vertical, _FakeTimelineContainer(mounted)),
         PRReview.model_construct(
             body=Body("LGTM"),
             state=ReviewState.COMMENTED,
@@ -153,7 +156,7 @@ async def test_description_starts_as_loading_card_until_summary_loads() -> None:
         assert description.has_class("timeline-loading")
 
         timeline.refresh_description(
-            PR(number=123, body="Description body", author=PRUser(login="alice"))
+            PR(number=123, body="Description body", user=PRUser(login="alice"))
         )
         await pilot.pause()
 
@@ -361,7 +364,7 @@ async def test_timeline_staggers_body_mount_delay_after_initial_items() -> None:
         await timeline._build_timeline_async()
         await pilot.pause()
 
-        cards = list(app.query("CommentCard.comment-box"))
+        cards = list(app.query(CommentCard).filter(".comment-box"))
         delays = [card._body_mount_delay for card in cards]
 
         assert (
@@ -466,7 +469,7 @@ async def test_description_and_issue_comment_use_shared_comment_cards() -> None:
     store.state.pr = PR(
         number=123,
         body="Description body",
-        author=PRUser(login="alice"),
+        user=PRUser(login="alice"),
     )
     store.state.issue_comments = [
         PRIssueComment(
@@ -562,7 +565,7 @@ async def test_pr_description_code_block_can_copy_raw_code() -> None:
 uv run pytest
 ```
 """,
-        author=PRUser(login="alice"),
+        user=PRUser(login="alice"),
     )
 
     class TestApp(App):
@@ -745,7 +748,7 @@ async def test_timeline_refresh_thread_metadata_updates_existing_thread_card() -
             scroll_container.scrolled_home = True
 
         scroll_container.scroll_home = scroll_home
-        timeline._scroll_container = scroll_container
+        timeline._scroll_container = cast(VerticalScroll, scroll_container)
 
         store.state.thread_info_cache[100] = ReviewThreadInfo(
             thread_id="thread-100",
@@ -949,7 +952,7 @@ async def test_timeline_shows_pending_review_summary_before_threads() -> None:
         assert isinstance(summary, CommentCard)
         assert summary.has_class("pending-review-summary")
 
-        header = summary.query_one(".comment-header")
+        header = summary.query_one(".comment-header", Static)
         header_text = getattr(header.content, "plain", str(header.content))
         assert "mizisu" in header_text
         assert "pending" in header_text

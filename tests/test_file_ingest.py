@@ -7,7 +7,6 @@ import pytest
 import rit.state.file_ingest as file_ingest_module
 from rit.core.diff import ParsedFilePatch, ParsedFilePatchSummary
 from rit.core.types import DiffHunk, DiffLine, FileDiff
-from rit.state.models import LoadingState, PR, PRComment, PRFile
 from rit.state.file_ingest import (
     append_file_batch,
     append_file_summaries,
@@ -16,6 +15,7 @@ from rit.state.file_ingest import (
     load_raw_diff_text,
     load_streamed_diff_summaries,
 )
+from rit.state.models import PR, LoadingState, PRComment, PRFile
 
 
 @dataclass
@@ -79,7 +79,7 @@ def test_begin_file_ingest_resets_loaded_indexes_without_pr_total() -> None:
 
 
 def test_begin_file_ingest_uses_pr_changed_file_count_as_total_hint() -> None:
-    state = IngestState(pr=PR(number=123, changedFiles=12), files_total_count=3)
+    state = IngestState(pr=PR(number=123, changed_files=12), files_total_count=3)
 
     begin_file_ingest(state)
 
@@ -196,7 +196,7 @@ def test_append_file_summaries_applies_lightweight_file_metadata() -> None:
 
 @pytest.mark.asyncio
 async def test_load_raw_diff_text_fetches_parses_and_posts_progress() -> None:
-    state = IngestState(pr=PR(number=123, changedFiles=2), files_total_count=2)
+    state = IngestState(pr=PR(number=123, changed_files=2), files_total_count=2)
     progress_updates: list[tuple[int, int]] = []
     calls: list[int] = []
 
@@ -239,7 +239,7 @@ async def test_load_raw_diff_text_fetches_parses_and_posts_progress() -> None:
 @pytest.mark.asyncio
 async def test_load_raw_diff_text_returns_false_without_parsed_files() -> None:
     state = IngestState()
-    progress_updates = 0
+    progress_updates: list[None] = []
 
     async def get_diff_text(pr_number: int) -> str:
         return ""
@@ -248,11 +248,13 @@ async def test_load_raw_diff_text_returns_false_without_parsed_files() -> None:
         state,
         pr_number=123,
         get_diff_text=get_diff_text,
-        on_progress=lambda: progress_updates + 1,
+        on_progress=lambda: progress_updates.append(None),
     )
 
     assert loaded is False
     assert state.files_loading == LoadingState.IDLE
+    assert progress_updates == []
+
 
 @pytest.mark.asyncio
 async def test_load_raw_diff_text_propagates_non_runtime_source_errors() -> None:
@@ -303,7 +305,7 @@ async def test_load_raw_diff_text_propagates_parser_errors(
 
 @pytest.mark.asyncio
 async def test_load_streamed_diff_summaries_posts_first_and_final_batches() -> None:
-    state = IngestState(pr=PR(number=123, changedFiles=2), files_total_count=2)
+    state = IngestState(pr=PR(number=123, changed_files=2), files_total_count=2)
     parsed_batches: list[tuple[str, ...]] = []
     progress_updates: list[tuple[int, int]] = []
 
@@ -363,7 +365,7 @@ async def test_load_streamed_diff_summaries_returns_false_without_loaded_files()
     None
 ):
     state = IngestState()
-    progress_updates = 0
+    progress_updates: list[None] = []
 
     async def stream_sections(pr_number: int):
         yield "empty"
@@ -376,11 +378,12 @@ async def test_load_streamed_diff_summaries_returns_false_without_loaded_files()
         pr_number=123,
         stream_sections=stream_sections,
         parse_summaries=parse_summaries,
-        on_progress=lambda: progress_updates + 1,
+        on_progress=lambda: progress_updates.append(None),
     )
 
     assert loaded is False
     assert state.files_loading == LoadingState.IDLE
+    assert progress_updates == []
 
 
 @pytest.mark.asyncio

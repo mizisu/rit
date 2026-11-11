@@ -126,7 +126,7 @@ async def test_fetch_pr_files_uses_graphql_cursor_pagination_and_canonical_patch
 async def test_fetch_pr_files_falls_back_to_paginated_patches_on_diff_limit(
     changed_ref: str | None,
 ) -> None:
-    nodes = [
+    nodes: list[dict[str, object]] = [
         {
             "path": f"file-{index}.py",
             "changeType": "MODIFIED",

@@ -22,6 +22,7 @@ from rit.ui.widgets.review_thread_card import ReviewThreadItem
 
 if TYPE_CHECKING:
     from textual.screen import Screen
+    from textual.worker import Worker
 
     from rit.core.types import DiffLine
     from rit.state.models import PendingReviewComment
@@ -285,7 +286,7 @@ def _queue_viewport_render(view: DiffView) -> None:
             batch.close()
 
     try:
-        worker = view.run_worker(
+        worker: Worker[None] = view.run_worker(
             render,
             start=False,
             exclusive=True,

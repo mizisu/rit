@@ -1,5 +1,6 @@
 import builtins
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from functools import partial
 
 import pytest
 
@@ -9,9 +10,9 @@ from rit.ui.widgets.diff_selection_range import (
     visible_selection_line_range,
     visual_selection_bounds,
     visual_selection_delta,
+    visual_selection_spec_for_line,
     visual_selection_specs_for_visible_lines,
     visual_selection_specs_with_dirty_lines,
-    visual_selection_spec_for_line,
 )
 
 
@@ -117,7 +118,8 @@ def test_visual_selection_spec_normalizes_same_line_char_selection() -> None:
 
 
 def test_visual_selection_spec_handles_forward_multiline_char_selection() -> None:
-    common = dict(
+    selection_for_line = partial(
+        visual_selection_spec_for_line,
         visual_mode=True,
         visual_anchor_line=1,
         visual_anchor_column=3,
@@ -128,13 +130,14 @@ def test_visual_selection_spec_handles_forward_multiline_char_selection() -> Non
         line_is_rendered=True,
     )
 
-    assert visual_selection_spec_for_line(1, **common) == (3, None, "char")
-    assert visual_selection_spec_for_line(2, **common) == (0, None, "char")
-    assert visual_selection_spec_for_line(3, **common) == (0, 5, "char")
+    assert selection_for_line(1) == (3, None, "char")
+    assert selection_for_line(2) == (0, None, "char")
+    assert selection_for_line(3) == (0, 5, "char")
 
 
 def test_visual_selection_spec_handles_backward_multiline_char_selection() -> None:
-    common = dict(
+    selection_for_line = partial(
+        visual_selection_spec_for_line,
         visual_mode=True,
         visual_anchor_line=3,
         visual_anchor_column=5,
@@ -145,9 +148,9 @@ def test_visual_selection_spec_handles_backward_multiline_char_selection() -> No
         line_is_rendered=True,
     )
 
-    assert visual_selection_spec_for_line(1, **common) == (2, None, "char")
-    assert visual_selection_spec_for_line(2, **common) == (0, None, "char")
-    assert visual_selection_spec_for_line(3, **common) == (0, 5, "char")
+    assert selection_for_line(1) == (2, None, "char")
+    assert selection_for_line(2) == (0, None, "char")
+    assert selection_for_line(3) == (0, 5, "char")
 
 
 def test_visual_selection_bounds_defaults_missing_anchor_column() -> None:
@@ -264,7 +267,9 @@ def test_visible_selection_line_range_returns_none_without_overlap() -> None:
     )
 
 
-def test_visual_selection_specs_for_visible_lines_clips_and_skips_unrendered_lines() -> None:
+def test_visual_selection_specs_for_visible_lines_clips_and_skips_unrendered_lines() -> (
+    None
+):
     specs = visual_selection_specs_for_visible_lines(
         visual_mode=True,
         visual_anchor_line=2,
@@ -285,7 +290,9 @@ def test_visual_selection_specs_for_visible_lines_clips_and_skips_unrendered_lin
     }
 
 
-def test_visual_selection_specs_for_visible_lines_returns_empty_without_overlap() -> None:
+def test_visual_selection_specs_for_visible_lines_returns_empty_without_overlap() -> (
+    None
+):
     specs = visual_selection_specs_for_visible_lines(
         visual_mode=True,
         visual_anchor_line=1,
@@ -302,13 +309,15 @@ def test_visual_selection_specs_for_visible_lines_returns_empty_without_overlap(
     assert specs == {}
 
 
-def test_visual_selection_delta_clears_removed_specs_and_applies_changed_specs() -> None:
-    old_specs = {
+def test_visual_selection_delta_clears_removed_specs_and_applies_changed_specs() -> (
+    None
+):
+    old_specs: dict[int, SelectionSpec] = {
         1: (0, None, "line"),
         2: (0, 3, "char"),
         3: (0, None, "char"),
     }
-    new_specs = {
+    new_specs: dict[int, SelectionSpec] = {
         2: (0, 4, "char"),
         3: (0, None, "char"),
         4: (0, None, "line"),
@@ -323,12 +332,12 @@ def test_visual_selection_delta_clears_removed_specs_and_applies_changed_specs()
 def test_visual_selection_delta_full_refresh_avoids_key_set_copies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    old_specs = {
+    old_specs: dict[int, SelectionSpec] = {
         1: (0, None, "line"),
         2: (0, 3, "char"),
         3: (0, None, "char"),
     }
-    new_specs = {
+    new_specs: dict[int, SelectionSpec] = {
         2: (0, 4, "char"),
         3: (0, None, "char"),
         4: (0, None, "line"),
@@ -377,7 +386,7 @@ def test_visual_selection_delta_unchanged_specs_avoids_scanning() -> None:
 
 
 def test_visual_selection_delta_reapplies_dirty_lines_with_same_spec() -> None:
-    specs = {2: (0, None, "line")}
+    specs: dict[int, SelectionSpec] = {2: (0, None, "line")}
 
     delta = visual_selection_delta(specs, specs, dirty_lines={2})
 
@@ -388,9 +397,9 @@ def test_visual_selection_delta_reapplies_dirty_lines_with_same_spec() -> None:
 def test_visual_selection_delta_dirty_lines_reuses_empty_line_sets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    specs = {2: (0, None, "line")}
+    specs: dict[int, SelectionSpec] = {2: (0, None, "line")}
 
-    def frozenset_for_non_empty(values: object = ()) -> frozenset[int]:
+    def frozenset_for_non_empty(values: Iterable[int] = ()) -> frozenset[int]:
         frozen = builtins.frozenset(values)
         if not frozen:
             raise AssertionError("dirty selection delta should reuse empty line sets")
@@ -456,7 +465,7 @@ def test_visual_selection_delta_dirty_lines_avoids_full_key_copies() -> None:
 
 
 def test_visual_selection_specs_with_dirty_lines_updates_and_removes_specs() -> None:
-    old_specs = {
+    old_specs: dict[int, SelectionSpec] = {
         1: (0, None, "line"),
         2: (0, 3, "char"),
     }
@@ -479,8 +488,10 @@ def test_visual_selection_specs_with_dirty_lines_updates_and_removes_specs() -> 
     }
 
 
-def test_visual_selection_specs_with_dirty_lines_returns_copy_for_empty_dirty_specs() -> None:
-    old_specs = {2: (0, None, "line")}
+def test_visual_selection_specs_with_dirty_lines_returns_copy_for_empty_dirty_specs() -> (
+    None
+):
+    old_specs: dict[int, SelectionSpec] = {2: (0, None, "line")}
 
     updated = visual_selection_specs_with_dirty_lines(old_specs, {})
 

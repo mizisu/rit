@@ -5,7 +5,7 @@ from typing import ClassVar, Literal
 
 from textual import on
 from textual.app import ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Vertical
 from textual.document._history import EditHistory
 from textual.geometry import Region
@@ -163,7 +163,7 @@ class InlineCommentEditor(Vertical):
     }
     """
 
-    BINDINGS: ClassVar[list[Binding]] = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         *EMOJI_PICKER_BINDINGS,
         Binding("ctrl+s,ctrl+enter", "submit('queue')", "Save draft", show=False),
         Binding("tab", "focus_next", "Next action", show=False),

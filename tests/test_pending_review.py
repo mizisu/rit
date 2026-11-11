@@ -1,3 +1,6 @@
+from collections.abc import Sequence
+from typing import cast
+
 import pytest
 
 from rit.core.types import DiffHunk, DiffLine, FileDiff
@@ -267,11 +270,11 @@ def test_remove_pending_comment_empty_comments_skips_scan() -> None:
             raise AssertionError("empty pending comments should not be scanned")
 
     unchanged, removed = remove_pending_comment(
-        EmptyComments(),
+        cast(Sequence[PendingReviewComment], EmptyComments()),
         path="missing.py",
         line=2,
         side="RIGHT",
-    )  # type: ignore[arg-type]
+    )
 
     assert unchanged == []
     assert removed is False
@@ -419,7 +422,7 @@ def test_review_submission_plan_stops_at_first_unsupported_draft() -> None:
         plan_review_submission(
             "COMMENT",
             "summary",
-            Drafts(),  # type: ignore[arg-type]
+            cast(Sequence[PendingReviewComment], Drafts()),
             pending_review_id=None,
         )
 

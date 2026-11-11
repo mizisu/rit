@@ -1,5 +1,7 @@
 """Tests for the go-to-file fuzzy picker."""
 
+from typing import cast
+
 import pytest
 from rich.text import Text
 from textual.app import App, ComposeResult
@@ -73,7 +75,7 @@ def test_file_picker_restore_highlight_falls_back_when_previous_option_is_missin
 
     options = MissingOptionList()
 
-    screen._restore_highlight(options, "missing")
+    screen._restore_highlight(cast(OptionList, options), "missing")
 
     assert options.highlighted is None
     assert options.first_selected is True
@@ -92,7 +94,7 @@ def test_file_picker_restore_highlight_reraises_unexpected_option_errors(
             raise AssertionError("fallback should not hide unexpected errors")
 
     with pytest.raises(RuntimeError, match="option list failed"):
-        screen._restore_highlight(BrokenOptionList(), "broken")
+        screen._restore_highlight(cast(OptionList, BrokenOptionList()), "broken")
 
 
 @pytest.mark.asyncio

@@ -4,7 +4,7 @@ from typing import ClassVar, Literal
 
 from textual import on
 from textual.app import ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.timer import Timer
@@ -122,7 +122,7 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
     }
     """
 
-    BINDINGS: ClassVar[list[Binding]] = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         *EMOJI_PICKER_BINDINGS,
         Binding("j", "cursor_down", "Next", show=False),
         Binding("k", "cursor_up", "Prev", show=False),
@@ -290,7 +290,7 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
             self.query_one("#review-submit-cancel", Button),
         )
 
-    def _move_focus(self, offset: int) -> None:
+    def _move_review_focus(self, offset: int) -> None:
         targets = self._focus_targets()
         focused = self.focused
         try:
@@ -300,10 +300,10 @@ class ReviewSubmitScreen(ModalScreen[tuple[ReviewEvent, str] | None]):
         targets[(index + offset) % len(targets)].focus()
 
     def action_focus_next(self) -> None:
-        self._move_focus(1)
+        self._move_review_focus(1)
 
     def action_focus_prev(self) -> None:
-        self._move_focus(-1)
+        self._move_review_focus(-1)
 
     def _pending_comment_meta(self, comment: PendingReviewComment) -> str:
         if comment.is_reply:

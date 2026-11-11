@@ -2,17 +2,15 @@
 
 import asyncio
 from collections.abc import Callable
-from typing import TypeVar
-
-T = TypeVar("T")
+from typing import Literal
 
 
-async def wait_until(
-    predicate: Callable[[], T | None | bool],
+async def wait_until[T](
+    predicate: Callable[[], T | None | Literal[False]],
     *,
-    timeout: float = 0.25,
+    timeout: float = 2.0,
 ) -> T:
-    """Wait until a test predicate returns a truthy value."""
+    """Wait for a truthy predicate without busy-polling the UI event loop."""
     deadline = asyncio.get_running_loop().time() + timeout
     while True:
         value = predicate()
@@ -20,4 +18,4 @@ async def wait_until(
             return value
         if asyncio.get_running_loop().time() >= deadline:
             raise AssertionError("condition was not met before timeout")
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.001)

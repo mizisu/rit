@@ -428,7 +428,7 @@ def test_search_refresh_update_single_match_avoids_generator_allocation(
 
     assert diff_search_policy.search_refresh_update(
         [_match(0, 4, "auto", 0)],
-        previous_match_lines=(),
+        previous_match_lines=frozenset(),
     ) == diff_search_types.SearchRefreshUpdate(
         dirty_lines=original_frozenset({4}),
         previous_match_lines=original_frozenset({4}),
@@ -457,7 +457,7 @@ def test_search_refresh_update_two_matches_avoids_generator_allocation(
 
     assert diff_search_policy.search_refresh_update(
         [_match(0, 4, "auto", 0), _match(1, 7, "auto", 2)],
-        previous_match_lines=(),
+        previous_match_lines=frozenset(),
     ) == diff_search_types.SearchRefreshUpdate(
         dirty_lines=original_frozenset({4, 7}),
         previous_match_lines=original_frozenset({4, 7}),
@@ -510,7 +510,7 @@ def test_search_refresh_update_empty_state_reuses_empty_current_lines(
 
     assert diff_search_policy.search_refresh_update(
         [],
-        previous_match_lines=(),
+        previous_match_lines=frozenset(),
     ) == diff_search_types.SearchRefreshUpdate(
         dirty_lines=original_frozenset(),
         previous_match_lines=original_frozenset(),
@@ -689,16 +689,7 @@ def test_context_search_match_is_shared_by_both_panes(
 
 
 def test_search_match_index_at_cursor_uses_indexed_lookup_without_prefix_scan() -> None:
-    class IndexedMatches:
-        def __init__(self, matches: list[DiffSearchMatch]) -> None:
-            self._matches = matches
-
-        def __len__(self) -> int:
-            return len(self._matches)
-
-        def __getitem__(self, index: int) -> DiffSearchMatch:
-            return self._matches[index]
-
+    class IndexedMatches(list[DiffSearchMatch]):
         def __iter__(self):
             raise AssertionError("cursor match lookup should not scan match prefix")
 
@@ -839,19 +830,7 @@ def test_next_search_match_index_prefers_later_row_then_later_column() -> None:
 
 
 def test_next_search_match_index_uses_indexed_lookup_without_scanning_prefix() -> None:
-    class IndexedMatches:
-        def __init__(self, matches: list[DiffSearchMatch]) -> None:
-            self._matches = matches
-
-        def __bool__(self) -> bool:
-            return bool(self._matches)
-
-        def __len__(self) -> int:
-            return len(self._matches)
-
-        def __getitem__(self, index: int) -> DiffSearchMatch:
-            return self._matches[index]
-
+    class IndexedMatches(list[DiffSearchMatch]):
         def __iter__(self):
             raise AssertionError("next search lookup should not scan match prefix")
 

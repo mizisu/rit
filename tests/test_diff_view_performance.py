@@ -2,15 +2,18 @@
 
 import asyncio
 import threading
+from collections import UserDict
 from typing import Literal, cast
 from unittest.mock import Mock
 
 import pytest
 from textual import events
 from textual.app import App, ComposeResult
+from textual.containers import VerticalScroll
 from textual.content import Content
 from textual.geometry import Region
 from textual.selection import Selection
+from textual.widget import Widget
 from textual.widgets import Static
 from textual.worker import Worker
 
@@ -204,8 +207,8 @@ def test_line_number_width_reuses_number_index_keys_without_tuple_copy(
         raising=False,
     )
 
-    assert _render_mod._old_line_number_width(View()) == 4
-    assert _render_mod._new_line_number_width(View()) == 4
+    assert _render_mod._old_line_number_width(cast(DiffView, View())) == 4
+    assert _render_mod._new_line_number_width(cast(DiffView, View())) == 4
 
 
 def test_line_number_width_uses_planned_values_without_scanning_keys(
@@ -226,8 +229,8 @@ def test_line_number_width_uses_planned_values_without_scanning_keys(
         ),
     )
 
-    assert _render_mod._old_line_number_width(View()) == 3
-    assert _render_mod._new_line_number_width(View()) == 4
+    assert _render_mod._old_line_number_width(cast(DiffView, View())) == 3
+    assert _render_mod._new_line_number_width(cast(DiffView, View())) == 4
 
 
 def test_code_content_without_cursor_skips_line_text_lookup(
@@ -424,8 +427,8 @@ def test_split_code_content_without_selection_skips_line_content_lookup() -> Non
             return base_content
 
     content = _render_mod._build_split_code_content(
-        View(),
-        Line(),
+        cast(DiffView, View()),
+        cast(DiffLine, Line()),
         side="old",
         placeholder_when_missing=False,
     )
@@ -461,8 +464,8 @@ def test_split_code_content_skips_selection_spec_when_visual_mode_off() -> None:
             return base_content
 
     content = _render_mod._build_split_code_content(
-        View(),
-        Line(),
+        cast(DiffView, View()),
+        cast(DiffLine, Line()),
         side="old",
         placeholder_when_missing=False,
     )
@@ -543,7 +546,7 @@ def test_block_height_tracks_rendered_rows_when_reused(split: bool) -> None:
 def test_cursor_ui_flush_transfers_pending_line_sets_without_copy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class NonCopyablePendingLines:
+    class NonCopyablePendingLines(set[int]):
         def __bool__(self) -> bool:
             return False
 
@@ -565,8 +568,8 @@ def test_cursor_ui_flush_transfers_pending_line_sets_without_copy(
         def __init__(self) -> None:
             self._cursor_ui = CursorUIState()
             self._cursor_ui.flush_pending = True
-            self._cursor_ui.dirty_lines = pending_cursor_lines  # type: ignore[assignment]
-            self._cursor_ui.selection_dirty = pending_selection_lines  # type: ignore[assignment]
+            self._cursor_ui.dirty_lines = pending_cursor_lines
+            self._cursor_ui.selection_dirty = pending_selection_lines
 
         def _update_line_cursor(self, _line_idx: int) -> None:
             raise AssertionError("no line repaint expected")
@@ -588,7 +591,7 @@ def test_cursor_ui_flush_transfers_pending_line_sets_without_copy(
 
     view = View()
 
-    _cursor_mod._flush_queued_cursor_ui_updates(view)
+    _cursor_mod._flush_queued_cursor_ui_updates(cast(DiffView, view))
 
     assert seen["cursor_lines"] is pending_cursor_lines
     assert seen["selection_dirty_lines"] is pending_selection_lines
@@ -635,7 +638,7 @@ def test_cursor_ui_flush_skips_sort_for_single_dirty_line(
 
     view = View()
 
-    _cursor_mod._flush_queued_cursor_ui_updates(view)
+    _cursor_mod._flush_queued_cursor_ui_updates(cast(DiffView, view))
 
     assert view.updated_lines == [4]
 
@@ -756,7 +759,7 @@ def test_build_comment_map_reuses_planned_file_paths_without_line_scan() -> None
 
     diff_view = DiffView(store=PRStore())
     diff_view.current_file = "large.py"
-    diff_view._diff_file_paths = {"large.py"}
+    diff_view._diff_file_paths = frozenset({"large.py"})
     diff_view._all_lines = NoIterLines()
 
     _comments_mod.build_comment_map(diff_view)
@@ -767,7 +770,7 @@ def test_build_comment_map_reuses_planned_file_paths_without_line_scan() -> None
 def test_file_path_lookup_reuses_planned_container_without_copy() -> None:
     """Comment mapping should use planned file path membership without copying."""
 
-    class NoIterFilePaths:
+    class NoIterFilePaths(frozenset[str]):
         def __bool__(self) -> bool:
             return True
 
@@ -829,8 +832,9 @@ def test_build_comment_map_merges_line_indices_without_temporary_sets(
 ) -> None:
     diff_view = DiffView(store=PRStore())
     diff_view.current_file = "large.py"
-    diff_view._diff_file_paths = {"large.py"}
+    diff_view._diff_file_paths = frozenset({"large.py"})
     diff_view._line_index_by_new_number = {1: 4, 2: 9}
+    assert diff_view.store is not None
     diff_view.store.state.pending_review.comments = [
         PendingReviewComment(
             path="large.py",
@@ -900,7 +904,7 @@ def test_active_comment_widget_indexes_groups_without_combining() -> None:
         _pending_comment_widgets_by_line = {4: IndexedWidgets(draft)}
         _comment_widgets_by_line = {4: IndexedWidgets(thread)}
 
-    assert _comments_mod.active_comment_widget(View(), 4) is thread
+    assert _comments_mod.active_comment_widget(cast(DiffView, View()), 4) is thread
 
 
 def test_clear_cursor_highlight_iterates_widget_groups_without_copy() -> None:
@@ -925,7 +929,7 @@ def test_clear_cursor_highlight_iterates_widget_groups_without_copy() -> None:
         _pending_comment_widgets_by_line = {9: NoLengthWidgets(draft)}
         _comment_widgets_by_line = {9: NoLengthWidgets(thread)}
 
-    _comments_mod._clear_cursor_line_class(View(), 9)
+    _comments_mod._clear_cursor_line_class(cast(DiffView, View()), 9)
 
     assert "--cursor-line" not in draft.classes
     assert "--cursor-line" not in thread.classes
@@ -959,7 +963,7 @@ def test_exiting_visual_mode_clears_selection_without_copying_specs(
 
     view = View()
 
-    DiffView.watch_visual_mode(view, True, False)
+    DiffView.watch_visual_mode(cast(DiffView, view), True, False)
 
     assert cleared == [2, 4, 6]
     assert view._visual_selection_specs == {}
@@ -1037,7 +1041,7 @@ def test_unified_block_render_passes_lazy_line_indices(
     class View:
         _showing_full_file = False
         _unified_code_width = 80
-        _unified_blocks_by_line: dict[int, object] = {}
+        _unified_blocks_by_line: dict[int, FakeUnifiedBlock] = {}
 
         def _register_line_widget(self, _line_index: int, _widget: object) -> None:
             pass
@@ -1053,7 +1057,9 @@ def test_unified_block_render_passes_lazy_line_indices(
         DiffLine(None, None, line_index=11),
     ]
 
-    _blocks_mod._render_unified_line_block(View(), Container(), lines)
+    _blocks_mod._render_unified_line_block(
+        View(), cast(VerticalScroll, Container()), lines
+    )
 
     assert View._unified_blocks_by_line[10].line_indices == (10, 11)
 
@@ -1083,7 +1089,7 @@ def test_split_block_render_passes_lazy_line_indices(
             self.mounted.append(widget)
 
     class View:
-        _split_blocks_by_line: dict[int, object] = {}
+        _split_blocks_by_line: dict[int, FakeSplitBlock] = {}
         _split_old_code_width = 40
         _split_new_code_width = 40
 
@@ -1111,7 +1117,9 @@ def test_split_block_render_passes_lazy_line_indices(
         DiffLine(None, None, line_index=21),
     ]
 
-    _blocks_mod._render_split_line_block(View(), Container(), lines)
+    _blocks_mod._render_split_line_block(
+        View(), cast(VerticalScroll, Container()), lines
+    )
 
     assert View._split_blocks_by_line[20].line_indices == (20, 21)
 
@@ -1129,7 +1137,7 @@ def test_split_horizontal_scroll_noop_source_event_skips_widget_scan() -> None:
 
     view = View()
 
-    DiffView._sync_split_horizontal_scroll(view, 8.0, source=object())
+    DiffView._sync_split_horizontal_scroll(cast(DiffView, view), 8.0, source=Widget())
 
     assert view._split_horizontal_scroll_x == 8.0
     assert view._syncing_split_scroll is False
@@ -1177,10 +1185,10 @@ def test_unified_block_refresh_updates_blocks_as_they_are_discovered(
             events.append(("get", index))
             return DiffLine(None, None, line_index=index)
 
-    class BlocksByLine(dict[int, object]):
-        def get(self, key: int, default: object = None) -> object:
+    class BlocksByLine(UserDict[int, object]):
+        def __getitem__(self, key: int) -> object:
             events.append(("lookup", key))
-            return super().get(key, default)
+            return super().__getitem__(key)
 
     class Block:
         is_mounted = True
@@ -1532,11 +1540,11 @@ async def test_show_diff_renders_plain_first_then_applies_highlight(
         render_calls = {"count": 0}
         original_render_diff = diff_view._render_diff
 
-        async def counted_render_diff() -> None:
+        async def counted_render_diff(*, finalize: bool = True) -> None:
             render_calls["count"] += 1
-            await original_render_diff()
+            await original_render_diff(finalize=finalize)
 
-        diff_view._render_diff = counted_render_diff  # type: ignore[method-assign]
+        diff_view._render_diff = counted_render_diff
         diff = parse_patch(patch, "test.py")
 
         await diff_view.show_diff("test.py", diff)
@@ -1758,11 +1766,11 @@ async def test_windowed_highlight_refreshes_grouped_blocks_without_full_rerender
         render_calls = {"count": 0}
         original_render_diff = diff_view._render_diff
 
-        async def counted_render_diff() -> None:
+        async def counted_render_diff(*, finalize: bool = True) -> None:
             render_calls["count"] += 1
-            await original_render_diff()
+            await original_render_diff(finalize=finalize)
 
-        diff_view._render_diff = counted_render_diff  # type: ignore[method-assign]
+        diff_view._render_diff = counted_render_diff
 
         diff = parse_patch(patch, "big.py")
         await diff_view.show_diff("big.py", diff)
@@ -2644,11 +2652,11 @@ async def test_grouped_unified_virtual_window_shift_avoids_full_rerender() -> No
         render_calls = {"count": 0}
         original_render_diff = diff_view._render_diff
 
-        async def counted_render_diff() -> None:
+        async def counted_render_diff(*, finalize: bool = True) -> None:
             render_calls["count"] += 1
-            await original_render_diff()
+            await original_render_diff(finalize=finalize)
 
-        diff_view._render_diff = counted_render_diff  # type: ignore[method-assign]
+        diff_view._render_diff = counted_render_diff
 
         diff = parse_patch(patch, "big.py")
         await diff_view.show_diff("big.py", diff)
@@ -2687,11 +2695,11 @@ async def test_grouped_split_virtual_window_shift_avoids_full_rerender() -> None
         render_calls = {"count": 0}
         original_render_diff = diff_view._render_diff
 
-        async def counted_render_diff() -> None:
+        async def counted_render_diff(*, finalize: bool = True) -> None:
             render_calls["count"] += 1
-            await original_render_diff()
+            await original_render_diff(finalize=finalize)
 
-        diff_view._render_diff = counted_render_diff  # type: ignore[method-assign]
+        diff_view._render_diff = counted_render_diff
 
         diff = parse_patch(patch, "big.py")
         await diff_view.show_diff("big.py", diff)
@@ -3357,11 +3365,11 @@ async def test_virtual_window_down_shift_avoids_full_rerender(
         render_calls = {"count": 0}
         original_render_diff = diff_view._render_diff
 
-        async def counted_render_diff() -> None:
+        async def counted_render_diff(*, finalize: bool = True) -> None:
             render_calls["count"] += 1
-            await original_render_diff()
+            await original_render_diff(finalize=finalize)
 
-        diff_view._render_diff = counted_render_diff  # type: ignore[method-assign]
+        diff_view._render_diff = counted_render_diff
 
         diff = parse_patch(patch, "big.py")
         await diff_view.show_diff("big.py", diff)
@@ -3406,11 +3414,11 @@ async def test_virtual_window_up_shift_avoids_full_rerender(
         render_calls = {"count": 0}
         original_render_diff = diff_view._render_diff
 
-        async def counted_render_diff() -> None:
+        async def counted_render_diff(*, finalize: bool = True) -> None:
             render_calls["count"] += 1
-            await original_render_diff()
+            await original_render_diff(finalize=finalize)
 
-        diff_view._render_diff = counted_render_diff  # type: ignore[method-assign]
+        diff_view._render_diff = counted_render_diff
 
         diff = parse_patch(patch, "big.py")
         await diff_view.show_diff("big.py", diff)
@@ -3563,7 +3571,7 @@ async def test_grouped_virtual_large_jump_reuses_blocks(
             render_calls["count"] += 1
             await original_render_diff(finalize=finalize)
 
-        diff_view._render_diff = counted_render_diff  # type: ignore[method-assign]
+        diff_view._render_diff = counted_render_diff
 
         diff = parse_patch(patch, "big.py")
         await diff_view.show_diff("big.py", diff)
@@ -3854,7 +3862,7 @@ def test_scroll_to_hunk_uses_direct_hunk_range_lookup(
         lambda _view, top, bottom, **_kwargs: scrolled.append((top, bottom)),
     )
 
-    _cursor_mod._scroll_to_hunk(HunkJumpView(), 1)
+    _cursor_mod._scroll_to_hunk(cast(DiffView, HunkJumpView()), 1)
 
     assert scrolled == [(20, 21)]
 

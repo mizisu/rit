@@ -5,7 +5,7 @@ from typing import ClassVar
 
 from textual import on
 from textual.app import ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
 from textual.content import Content
 from textual.css.styles import RulesMap
@@ -29,7 +29,7 @@ from rit.state.store import PRStore
 class SummaryOptionList(OptionList):
     """Render logical rows instead of mounting a widget per file or check."""
 
-    BINDINGS: ClassVar[list[Binding]] = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("j", "cursor_down", show=False),
         Binding("k", "cursor_up", show=False),
         Binding("g", "first", show=False),
@@ -385,12 +385,13 @@ class FileGroup(Vertical):
             return
         button = self.query_one(Button)
         button.label = _line(f"{'▾' if self._expanded else '▸'} {self.category_name}")
-        button.tooltip = (
+        tooltip = (
             f"{self.category_name} · {len(self.group.files)} files · "
             f"+{self.group.additions} -{self.group.deletions}"
         )
         if self.category_name == "Generated":
-            button.tooltip += " · identified by filename conventions"
+            tooltip += " · identified by filename conventions"
+        button.tooltip = tooltip
         self.query_one(SummaryOptionList).display = self._expanded
 
     def _append_files(self, start: int, end: int) -> None:

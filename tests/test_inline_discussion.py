@@ -42,9 +42,7 @@ def test_reply_history_threshold_matches_visible_entries_and_virtual_height(
 
     assert widget.history_count(len(comments)) == history_count
     expected = (
-        comments
-        if expanded or not history_count
-        else [comments[0], *comments[-2:]]
+        comments if expanded or not history_count else [comments[0], *comments[-2:]]
     )
     assert [
         comment
@@ -52,9 +50,9 @@ def test_reply_history_threshold_matches_visible_entries_and_virtual_height(
         if (comment := widget.comment_at(index)) is not None
     ] == expected
     assert widget.comment_count == len(expected) + len(drafts) + bool(history_count)
-    assert (
-        widget._history_card in widget._review_thread_card._comment_cards
-    ) == bool(history_count)
+    assert (widget._history_card in widget._review_thread_card._comment_cards) == bool(
+        history_count
+    )
     if drafts:
         assert widget.pending_at(widget.comment_count - 1) is drafts[0]
     if not history_count:
@@ -200,9 +198,12 @@ async def test_discussion_disclosure_reply_drafts_and_virtualized_input(
         assert view._composer.resume()
         await wait_until(
             lambda: (
-                any(area.has_focus for area in view.query(TextArea))
+                view._composer.widget is not None
+                and view._composer.widget.is_mounted
+                and any(area.has_focus for area in view.query(TextArea))
                 and view.active_pending_draft_index() == 0
-            )
+            ),
+            timeout=2,
         )
         body = view.query_one(TextArea)
         assert view.cursor_line == 0

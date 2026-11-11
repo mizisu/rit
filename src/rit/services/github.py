@@ -1,6 +1,6 @@
 import asyncio
 import re
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -133,7 +133,7 @@ class GitHubError(RuntimeError):
 
 
 @contextmanager
-def translate_pull_request_graphql_errors() -> Iterator[None]:
+def translate_pull_request_graphql_errors() -> Generator[None]:
     """Translate PR GraphQL parser errors into GitHub service errors."""
     try:
         yield

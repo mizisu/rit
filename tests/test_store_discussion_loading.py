@@ -1,9 +1,10 @@
 import asyncio
 from datetime import UTC, datetime
+from typing import cast
 
 import pytest
 
-from rit.services.github import PRDiscussion
+from rit.services.github import GitHubService, PRDiscussion
 from rit.state.models import (
     PR,
     NodeList,
@@ -127,7 +128,7 @@ class MetadataOnlyFullDiscussionService:
 async def test_load_pr_discussion_uses_one_full_request() -> None:
     store = PRStore(pr_number=123)
     service = FastThenSlowDiscussionService()
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
     messages = []
     store.set_message_sink(messages.append)
 
@@ -152,7 +153,7 @@ async def test_load_pr_discussion_posts_metadata_only_when_full_content_matches(
     None
 ):
     store = PRStore(pr_number=123)
-    store._service = MetadataOnlyFullDiscussionService()  # type: ignore[assignment]
+    store._service = cast(GitHubService, MetadataOnlyFullDiscussionService())
     messages = []
     store.set_message_sink(messages.append)
 

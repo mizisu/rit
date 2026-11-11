@@ -1,9 +1,12 @@
+from typing import cast
+
 import pytest
 
 from rit.core.types import DiffLine
 from rit.ui.messages import Flash
 from rit.ui.widgets import diff_selection
 from rit.ui.widgets.diff_selection_text import VisualYank
+from rit.ui.widgets.diff_view import DiffView
 
 
 class _YankView:
@@ -53,7 +56,7 @@ class _VisualYankView(_YankView):
 def test_update_selection_highlighting_uses_dirty_lines_without_copy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class DirtyLines:
+    class DirtyLines(set[int]):
         def __bool__(self) -> bool:
             return True
 
@@ -100,7 +103,7 @@ def test_update_selection_highlighting_uses_dirty_lines_without_copy(
 
     view = View()
 
-    diff_selection._update_selection_highlighting(view, DirtyLines())
+    diff_selection._update_selection_highlighting(cast(DiffView, view), DirtyLines())
 
     assert computed == [2, 4]
     assert cleared == []
@@ -170,7 +173,7 @@ def test_update_selection_highlighting_applies_dirty_specs_in_place(
     view = View()
     original_specs = view._visual_selection_specs
 
-    diff_selection._update_selection_highlighting(view, {2, 4})
+    diff_selection._update_selection_highlighting(cast(DiffView, view), {2, 4})
 
     assert computed == [2, 4]
     assert cleared == [4]
@@ -222,7 +225,7 @@ def test_update_selection_highlighting_skips_sort_for_single_dirty_line(
 
     view = View()
 
-    diff_selection._update_selection_highlighting(view, {2})
+    diff_selection._update_selection_highlighting(cast(DiffView, view), {2})
 
     assert applied == [2]
     assert view._visual_selection_specs == {
@@ -283,7 +286,7 @@ def test_update_selection_highlighting_skips_sort_for_two_dirty_lines(
 
     view = View()
 
-    diff_selection._update_selection_highlighting(view, {4, 2})
+    diff_selection._update_selection_highlighting(cast(DiffView, view), {4, 2})
 
     assert cleared == []
     assert applied == [2, 4]
@@ -315,8 +318,8 @@ def test_single_line_selection_refresh_uses_singleton_tuple_for_grouped_blocks(
 
     view = View()
 
-    diff_selection._clear_line_selection(view, 0)
-    diff_selection._apply_line_selection(view, 0, 0, None)
+    diff_selection._clear_line_selection(cast(DiffView, view), 0)
+    diff_selection._apply_line_selection(cast(DiffView, view), 0, 0, None)
 
     assert calls == [(0,), (0,)]
 
@@ -324,7 +327,7 @@ def test_single_line_selection_refresh_uses_singleton_tuple_for_grouped_blocks(
 def test_visual_yank_does_not_scan_every_diff_line() -> None:
     view = _VisualYankView()
 
-    diff_selection._yank(view)
+    diff_selection._yank(cast(DiffView, view))
 
     assert view.copied == "line1\nline2\n"
     assert view.visual_mode is False
@@ -337,7 +340,7 @@ def test_yank_copies_selected_file_header_path() -> None:
 
     view = FileHeaderYankView()
 
-    diff_selection._yank(view)
+    diff_selection._yank(cast(DiffView, view))
 
     assert view.copied == "src/rit/ui/widgets/diff_view.py"
     assert len(view.messages) == 1
@@ -354,7 +357,7 @@ def test_visual_yank_takes_precedence_over_selected_file_header() -> None:
 
     view = VisualFileHeaderYankView()
 
-    diff_selection._yank(view)
+    diff_selection._yank(cast(DiffView, view))
 
     assert view.copied == "line1\nline2\n"
     assert view.visual_mode is False
@@ -368,7 +371,7 @@ def test_copy_yank_to_clipboard_posts_error_when_clipboard_copy_fails() -> None:
     view = CopyFailingView()
 
     diff_selection._copy_yank_to_clipboard(
-        view,
+        cast(DiffView, view),
         VisualYank(text="line\n", success_message="Copied 1 line"),
     )
 
@@ -388,7 +391,7 @@ def test_copy_yank_to_clipboard_reraises_unexpected_success_flash_errors() -> No
 
     with pytest.raises(RuntimeError, match="flash dispatch failed"):
         diff_selection._copy_yank_to_clipboard(
-            view,
+            cast(DiffView, view),
             VisualYank(text="line\n", success_message="Copied 1 line"),
         )
 

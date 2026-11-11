@@ -1,11 +1,11 @@
 """Tests for file viewed state feature."""
 
 import pytest
-from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.widgets import Tree
 
 from rit.state.models import FileViewedState, PRFile
+from rit.state.store import PRStore
 from rit.ui.widgets import file_tree as file_tree_module
 from rit.ui.widgets.file_tree import FileTree
 
@@ -75,24 +75,17 @@ def test_update_view_state_uses_filename_lookup_without_file_scan() -> None:
         def __iter__(self):
             raise AssertionError("single file updates should use filename lookup")
 
-    class LabelNode:
-        def __init__(self) -> None:
-            self.label: Text | None = None
-
-        def set_label(self, label: Text) -> None:
-            self.label = label
-
     file = PRFile(filename="README.md", viewer_viewed_state=FileViewedState.VIEWED)
-    node = LabelNode()
+    node = Tree[str]("files").root.add_leaf("")
     tree = FileTree()
     tree._all_files = NoIterFiles([file])
     tree._files_by_filename = {"README.md": file}
-    tree._file_nodes = {"README.md": node}  # type: ignore[dict-item]
+    tree._file_nodes = {"README.md": node}
 
     tree.update_view_state("README.md")
 
     assert node.label is not None
-    assert node.label.plain.startswith("✓ ")
+    assert str(node.label).startswith("✓ ")
 
 
 def test_get_current_index_uses_filename_index_lookup_without_store_scan() -> None:
@@ -100,13 +93,9 @@ def test_get_current_index_uses_filename_index_lookup_without_store_scan() -> No
         def __iter__(self):
             raise AssertionError("current index lookup should use filename index")
 
-    class State:
-        files = NoIterFiles([PRFile(filename="README.md")])
-
-    class Store:
-        state = State()
-
-    tree = FileTree(store=Store())  # type: ignore[arg-type]
+    store = PRStore()
+    store.state.files = NoIterFiles([PRFile(filename="README.md")])
+    tree = FileTree(store=store)
     tree.selected_file = "README.md"
     tree._file_index_by_filename = {"README.md": 0}
 
@@ -139,13 +128,13 @@ async def test_file_tree_uses_compact_folder_indentation() -> None:
         await pilot.pause()
 
         compacted_root = tree.root.children[0]
-        assert compacted_root.label.plain == "app/lemonbase/account/application"
+        assert str(compacted_root.label) == "app/lemonbase/account/application"
 
         file_node = file_tree._file_nodes[filename]
         ancestor_labels: list[str] = []
         parent = file_node.parent
         while parent is not None and parent is not tree.root:
-            ancestor_labels.append(parent.label.plain)
+            ancestor_labels.append(str(parent.label))
             parent = parent.parent
 
         assert list(reversed(ancestor_labels)) == [
@@ -172,14 +161,14 @@ async def test_update_view_state_updates_single_node(
 
         # Initially no badge
         node = file_tree._file_nodes["README.md"]
-        assert "✓" not in node.label.plain
+        assert "✓" not in str(node.label)
 
         # Mark as viewed
         sample_files[2].viewer_viewed_state = FileViewedState.VIEWED
         file_tree.update_view_state("README.md")
         await pilot.pause()
 
-        assert node.label.plain.startswith("✓ ")
+        assert str(node.label).startswith("✓ ")
 
 
 @pytest.mark.asyncio

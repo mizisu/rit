@@ -128,7 +128,7 @@ class FakeSlowSummaryStreamingService:
     async def get_pr_summary(self, pr_number: int) -> PR:
         self.summary_requested.set()
         await self.allow_summary.wait()
-        return PR(number=pr_number, changedFiles=1)
+        return PR(number=pr_number, changed_files=1)
 
     async def get_pr_discussion(self, pr_number: int) -> PRDiscussion:
         return PRDiscussion(body="", reviews=[], issue_comments=[], review_threads=[])
@@ -309,7 +309,7 @@ def test_store_get_file_diff_parses_lazily_and_caches_status_metadata() -> None:
             filename="new.py",
             status="added",
             patch=patch,
-            previousFilename="old.py",
+            previous_filename="old.py",
         )
     ]
 
@@ -397,7 +397,7 @@ async def test_store_load_files_streams_first_raw_diff_file_before_completion() 
     service = FakeStreamingRawDiffService([first_section, second_section])
     messages = []
     store = PRStore(pr_number=123)
-    store.state.pr = PR(number=123, changedFiles=2)
+    store.state.pr = PR(number=123, changed_files=2)
     store.state.files_total_count = 2
     store._service = cast(Any, service)
     store.set_message_sink(messages.append)
@@ -472,7 +472,7 @@ async def test_store_load_files_uses_complete_graphql_metadata_without_eager_par
     service = FakeFilesService({1: first_page, 2: second_page})
     messages = []
     store = PRStore(pr_number=123)
-    store.state.pr = PR(number=123, changedFiles=101)
+    store.state.pr = PR(number=123, changed_files=101)
     store.state.files_total_count = 101
     store._service = cast(Any, service)
     store.set_message_sink(messages.append)
@@ -556,7 +556,7 @@ async def test_store_load_files_keeps_graphql_metadata_when_raw_stream_differs()
     ]
     service = FakeFilesAndStreamingService({1: first_page}, raw_section)
     store = PRStore(pr_number=123)
-    store.state.pr = PR(number=123, changedFiles=3001)
+    store.state.pr = PR(number=123, changed_files=3001)
     store.state.files_total_count = 3001
     store._service = cast(Any, service)
 
@@ -834,7 +834,9 @@ async def test_file_tree_click_top_aligns_selected_file(
             filename = store.state.files[index].filename
             node = changes.file_tree._file_nodes[filename]
             assert await pilot.click(tree, offset=(6, node.line))
-            await wait_until(lambda target=filename: store.state.selected_file == target)
+            await wait_until(
+                lambda target=filename: store.state.selected_file == target
+            )
             await wait_until(
                 lambda: not view._fold_worker_active and not view._virt.render_pending
             )
@@ -1396,7 +1398,7 @@ async def test_open_file_during_combined_load_does_not_render_single_file(
             calls.append(filename)
             await original_show_diff(filename, diff, **kwargs)
 
-        file_changes.diff_view.show_diff = counted_show_diff  # type: ignore[method-assign]
+        file_changes.diff_view.show_diff = counted_show_diff
 
         file_changes.open_file(
             "two.py", focus_diff=True, expand=expand, top_align=not expand
@@ -1774,10 +1776,10 @@ async def test_combined_full_preview_restores_combined_scroll(
 
         calls: list[str] = []
 
-        async def counted_show_diff(filename: str, diff) -> None:
+        async def counted_show_diff(filename: str, diff: FileDiff, **_kwargs: object) -> None:
             calls.append(filename)
 
-        file_changes.diff_view.show_diff = counted_show_diff  # type: ignore[method-assign]
+        file_changes.diff_view.show_diff = counted_show_diff
 
         file_changes.file_tree.select_file("two.py")
         await pilot.pause()
@@ -1877,7 +1879,7 @@ async def test_location_jump_during_combined_load_does_not_render_single_file(
             calls.append(filename)
             await original_show_diff(filename, diff, **kwargs)
 
-        file_changes.diff_view.show_diff = counted_show_diff  # type: ignore[method-assign]
+        file_changes.diff_view.show_diff = counted_show_diff
 
         assert (
             file_changes.jump_to_file_location(
@@ -2199,10 +2201,10 @@ async def test_rapid_file_tree_selection_in_combined_scroll_jumps_without_rerend
 
         calls: list[str] = []
 
-        async def blocking_show_diff(filename: str, diff) -> None:
+        async def blocking_show_diff(filename: str, diff: FileDiff, **_kwargs: object) -> None:
             calls.append(filename)
 
-        file_changes.diff_view.show_diff = blocking_show_diff  # type: ignore[method-assign]
+        file_changes.diff_view.show_diff = blocking_show_diff
 
         file_changes.file_tree.select_file("two.py")
         file_changes.file_tree.select_file("three.py")
@@ -2245,10 +2247,10 @@ async def test_open_file_focuses_current_diff_without_rerender() -> None:
 
         calls: list[str] = []
 
-        async def counted_show_diff(filename: str, diff) -> None:
+        async def counted_show_diff(filename: str, diff: FileDiff, **_kwargs: object) -> None:
             calls.append(filename)
 
-        file_changes.diff_view.show_diff = counted_show_diff  # type: ignore[method-assign]
+        file_changes.diff_view.show_diff = counted_show_diff
 
         file_changes.open_file("one.py", focus_diff=True)
         await pilot.pause()

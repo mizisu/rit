@@ -1,7 +1,9 @@
 import asyncio
+from typing import cast
 
 import pytest
 
+from rit.services.github import GitHubService
 from rit.state.models import PR, FileViewedState, PRFile
 from rit.state.store import GitHubError, PRStore, PRStoreState, ViewedFiles
 
@@ -23,7 +25,7 @@ async def test_set_file_viewed_updates_local_file_state_after_marking() -> None:
     store = PRStore(pr_number=123)
     service = CaptureViewedStateService()
     file = PRFile(filename="src/app.py")
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
     store.state.pr = PR(node_id="PR_node", number=123)
     store.state.files = [file]
     store.state.files_by_filename = {file.filename: file}
@@ -43,7 +45,7 @@ async def test_set_file_viewed_updates_local_file_state_after_unmarking() -> Non
         filename="src/app.py",
         viewer_viewed_state=FileViewedState.VIEWED,
     )
-    store._service = service  # type: ignore[assignment]
+    store._service = cast(GitHubService, service)
     store.state.pr = PR(node_id="PR_node", number=123)
     store.state.files = [file]
     store.state.files_by_filename = {file.filename: file}

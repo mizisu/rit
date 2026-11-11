@@ -1,5 +1,6 @@
 import pytest
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.widgets import Button, Footer, OptionList, TextArea
 
 from rit.app import RitApp
@@ -199,7 +200,8 @@ async def test_comment_editor_owns_tab_while_open(
 
 def test_inline_comment_editor_has_no_post_now_shortcut() -> None:
     assert all(
-        binding.action != "submit('post')" for binding in InlineCommentEditor.BINDINGS
+        binding.action != "submit('post')"
+        for binding in Binding.make_bindings(InlineCommentEditor.BINDINGS)
     )
 
 

@@ -1,17 +1,26 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import cast
 
-from rit.state.models import PR, PRReview, PRTeam, PRUser, ReviewRequest, ReviewState
 import rit.state.reviewer_status as reviewer_status_module
+from rit.state.models import (
+    PR,
+    NodeList,
+    PRReview,
+    PRTeam,
+    PRUser,
+    ReviewRequest,
+    ReviewState,
+)
 from rit.state.reviewer_status import derive_reviewer_states
 
 
 def _pr(*, requested_reviewers: list[ReviewRequest] | None = None) -> PR:
     return PR(
         number=123,
-        author=PRUser(login="author"),
-        reviewRequests={"nodes": requested_reviewers or []},
+        user=PRUser(login="author"),
+        review_requests_connection=NodeList(nodes=requested_reviewers or []),
     )
 
 
@@ -21,12 +30,12 @@ def _review(
     *,
     submitted_at: datetime | None,
 ) -> PRReview:
-    return PRReview(author=PRUser(login=login), state=state, submittedAt=submitted_at)
+    return PRReview(user=PRUser(login=login), state=state, submitted_at=submitted_at)
 
 
 def test_requested_only_reviewer_is_kept() -> None:
     pr = _pr(
-        requested_reviewers=[ReviewRequest(requestedReviewer=PRUser(login="alice"))]
+        requested_reviewers=[ReviewRequest(requested_reviewer=PRUser(login="alice"))]
     )
 
     reviewers = derive_reviewer_states(pr, [])
@@ -45,14 +54,14 @@ def test_empty_reviewer_state_skips_author_lookup() -> None:
             raise AssertionError("empty reviewer state should not inspect author")
 
     pr = _pr()
-    pr.user = User()
+    pr.user = cast(PRUser, User())
 
     assert derive_reviewer_states(pr, []) == []
 
 
 def test_requested_reviewer_with_pending_review_stays_requested() -> None:
     pr = _pr(
-        requested_reviewers=[ReviewRequest(requestedReviewer=PRUser(login="alice"))]
+        requested_reviewers=[ReviewRequest(requested_reviewer=PRUser(login="alice"))]
     )
     reviews = [_review("alice", ReviewState.PENDING, submitted_at=None)]
 
@@ -64,7 +73,7 @@ def test_requested_reviewer_with_pending_review_stays_requested() -> None:
 
 def test_requested_reviewer_with_approved_review_shows_approved() -> None:
     pr = _pr(
-        requested_reviewers=[ReviewRequest(requestedReviewer=PRUser(login="alice"))]
+        requested_reviewers=[ReviewRequest(requested_reviewer=PRUser(login="alice"))]
     )
     reviews = [
         _review("alice", ReviewState.APPROVED, submitted_at=datetime(2026, 4, 1, 12))
@@ -122,7 +131,7 @@ def test_latest_review_state_is_chosen_by_timestamp() -> None:
 
 def test_pending_review_can_be_compared_with_timezone_aware_reviews() -> None:
     pr = _pr()
-    submitted_at = datetime(2026, 4, 3, 9, tzinfo=timezone.utc)
+    submitted_at = datetime(2026, 4, 3, 9, tzinfo=UTC)
     reviews = [
         _review("alice", ReviewState.APPROVED, submitted_at=submitted_at),
         _review("alice", ReviewState.PENDING, submitted_at=None),
@@ -137,7 +146,7 @@ def test_pending_review_can_be_compared_with_timezone_aware_reviews() -> None:
 
 def test_author_reviews_are_excluded() -> None:
     pr = _pr(
-        requested_reviewers=[ReviewRequest(requestedReviewer=PRUser(login="author"))]
+        requested_reviewers=[ReviewRequest(requested_reviewer=PRUser(login="author"))]
     )
     reviews = [
         _review("author", ReviewState.APPROVED, submitted_at=datetime(2026, 4, 1, 9)),
@@ -167,14 +176,14 @@ def test_review_order_uses_seen_set_for_unique_reviewers() -> None:
     pr = _pr()
     reviews = [
         PRReview(
-            author=alice,
+            user=alice,
             state=ReviewState.COMMENTED,
-            submittedAt=datetime(2026, 4, 1, 9),
+            submitted_at=datetime(2026, 4, 1, 9),
         ),
         PRReview(
-            author=bob,
+            user=bob,
             state=ReviewState.APPROVED,
-            submittedAt=datetime(2026, 4, 1, 10),
+            submitted_at=datetime(2026, 4, 1, 10),
         ),
     ]
 
@@ -185,7 +194,7 @@ def test_review_order_uses_seen_set_for_unique_reviewers() -> None:
 
 def test_team_reviewer_is_marked_as_team() -> None:
     pr = _pr(
-        requested_reviewers=[ReviewRequest(requestedReviewer=PRTeam(name="backend"))]
+        requested_reviewers=[ReviewRequest(requested_reviewer=PRTeam(name="backend"))]
     )
 
     reviewers = derive_reviewer_states(pr, [])
@@ -202,9 +211,7 @@ def test_graphql_team_reviewer_preserves_slug() -> None:
             "number": 123,
             "author": {"login": "author"},
             "reviewRequests": {
-                "nodes": [
-                    {"requestedReviewer": {"name": "Backend", "slug": "backend"}}
-                ]
+                "nodes": [{"requestedReviewer": {"name": "Backend", "slug": "backend"}}]
             },
         }
     )

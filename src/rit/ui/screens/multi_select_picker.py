@@ -5,7 +5,7 @@ from typing import ClassVar
 
 from textual import on
 from textual.app import ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widget import Widget
@@ -77,7 +77,7 @@ class MultiSelectPickerScreen(ModalScreen[MultiSelectResult | None]):
     }
     """
 
-    BINDINGS: ClassVar[list[Binding]] = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("j", "cursor_down", "Next", show=False),
         Binding("down", "cursor_down", "Next", show=False),
         Binding("k", "cursor_up", "Prev", show=False),

@@ -2,20 +2,20 @@
 
 import threading
 from pathlib import Path
-from types import SimpleNamespace
-from typing import ClassVar
+from typing import cast
 
 import pytest
 from textual.app import App, ComposeResult
+from textual.containers import VerticalScroll
 from textual.content import Content
 from textual.geometry import Region
-from textual.widget import Widget
 from textual.widgets import Static
 
 from rit.core.diff import parse_patch
 from rit.core.types import DiffLine, FileDiff
 from rit.state.models import PRFile
 from rit.ui.components.combined_diff import build_combined_diff_document
+from rit.ui.messages import Flash
 from rit.ui.widgets import diff_blocks as _blocks
 from rit.ui.widgets import diff_render as _render
 from rit.ui.widgets import diff_view as _diff_view
@@ -29,7 +29,9 @@ def _as_plain(widget: Static) -> str:
 
 
 def _has_cursor_cell(widget: Static) -> bool:
-    return any(segment.style and segment.style.reverse for segment in widget.render_line(0))
+    return any(
+        segment.style and segment.style.reverse for segment in widget.render_line(0)
+    )
 
 
 def test_cycle_diff_mode_uses_shared_mode_label_mapping(
@@ -37,7 +39,7 @@ def test_cycle_diff_mode_uses_shared_mode_label_mapping(
 ) -> None:
     view = DiffView()
     view.mode = "auto"
-    messages: list[object] = []
+    messages: list[Flash] = []
     monkeypatch.setattr(view, "post_message", messages.append)
     monkeypatch.setattr(
         _diff_view,
@@ -54,7 +56,7 @@ def test_cycle_diff_mode_uses_shared_mode_label_mapping(
 
 def test_change_background_styles_remain_subtle() -> None:
     """Change markers should stay readable over syntax-highlighted code."""
-    view = SimpleNamespace(_showing_full_file=False)
+    view = DiffView()
     added = DiffLine(old_line_no=None, new_line_no=1, new_content="new", is_added=True)
     deleted = DiffLine(
         old_line_no=1,
@@ -134,14 +136,14 @@ def test_cursor_line_refresh_uses_singleton_tuple_for_grouped_blocks(
         refresh_grouped_blocks,
     )
 
-    _render._update_line_cursor(View(), 0)
+    _render._update_line_cursor(cast(DiffView, View()), 0)
 
     assert calls == [(0,)]
 
 
 def test_scrollable_content_region_tolerates_unmounted_content_widget() -> None:
     view = DiffView()
-    view._content_widget = Widget()
+    view._content_widget = VerticalScroll()
 
     assert view.scrollable_content_region == Region(0, 0, 0, 0)
 
@@ -153,7 +155,7 @@ def test_scrollable_content_region_reraises_unexpected_dock_gutter_errors() -> N
             raise RuntimeError("dock gutter failed")
 
     view = DiffView()
-    view._content_widget = BrokenContentWidget()
+    view._content_widget = cast(VerticalScroll, BrokenContentWidget())
 
     with pytest.raises(RuntimeError, match="dock gutter failed"):
         _ = view.scrollable_content_region
@@ -390,7 +392,7 @@ async def test_hunk_jump_places_target_near_top_of_viewport() -> None:
 @pytest.mark.asyncio
 async def test_app_static_style_keeps_only_cursor_line_number_bright() -> None:
     class TestApp(App):
-        CSS_PATH: ClassVar[Path] = Path(__file__).parents[1] / "src/rit/rit.tcss"
+        CSS_PATH = Path(__file__).parents[1] / "src/rit/rit.tcss"
 
         def compose(self) -> ComposeResult:
             yield DiffView(mode="unified", id="diff-view")

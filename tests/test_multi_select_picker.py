@@ -1,3 +1,5 @@
+from typing import cast
+
 import pytest
 from textual.app import App
 from textual.widgets import Input, OptionList
@@ -31,7 +33,7 @@ def test_multi_select_restore_highlight_falls_back_when_previous_option_is_missi
 
     options = MissingOptionList()
 
-    screen._restore_highlight(options, "missing")
+    screen._restore_highlight(cast(OptionList, options), "missing")
 
     assert options.highlighted is None
     assert options.first_selected is True
@@ -52,7 +54,7 @@ def test_multi_select_restore_highlight_reraises_unexpected_option_errors() -> N
             raise AssertionError("fallback should not hide unexpected errors")
 
     with pytest.raises(RuntimeError, match="option list failed"):
-        screen._restore_highlight(BrokenOptionList(), "broken")
+        screen._restore_highlight(cast(OptionList, BrokenOptionList()), "broken")
 
 
 @pytest.mark.asyncio

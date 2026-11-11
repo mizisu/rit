@@ -1,5 +1,5 @@
 import builtins
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import rit.state.discussion_signature as discussion_signature_module
 from rit.state.discussion_signature import (
@@ -8,14 +8,14 @@ from rit.state.discussion_signature import (
     thread_render_signature,
 )
 from rit.state.models import (
-    NodeList,
     PR,
+    NodeList,
     PRComment,
     PRIssueComment,
     PRReview,
     PRUser,
-    ReviewThread,
     ReviewState,
+    ReviewThread,
 )
 
 
@@ -28,8 +28,8 @@ def test_discussion_signature_ignores_metadata_only_thread_changes() -> None:
         line=12,
         side="RIGHT",
         pull_request_review_id=10,
-        created_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
-        updated_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 6, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 6, 1, tzinfo=UTC),
     )
     full_comment = PRComment(
         id=100,
@@ -40,8 +40,8 @@ def test_discussion_signature_ignores_metadata_only_thread_changes() -> None:
         original_line=12,
         side="",
         pull_request_review_id=10,
-        created_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
-        updated_at=datetime(2026, 6, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 6, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 6, 1, tzinfo=UTC),
     )
 
     fast_pr = PR(
@@ -126,7 +126,7 @@ def test_thread_signature_reuses_empty_comment_section(monkeypatch) -> None:
 
 
 def test_discussion_signature_reuses_singleton_sections(monkeypatch) -> None:
-    created_at = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    created_at = datetime(2026, 6, 1, tzinfo=UTC)
     review = PRReview(
         id=10,
         body="review",
@@ -177,13 +177,16 @@ def test_discussion_signature_reuses_singleton_sections(monkeypatch) -> None:
 
     signature = discussion_render_signature(pr)
 
+    assert isinstance(signature[1], tuple)
+    assert isinstance(signature[2], tuple)
+    assert isinstance(signature[3], tuple)
     assert signature[1][0][0] == 10
     assert signature[2][0][0] == 20
     assert signature[3][0][2][0][0] == 30
 
 
 def test_discussion_signature_detects_rendered_content_changes() -> None:
-    created_at = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    created_at = datetime(2026, 6, 1, tzinfo=UTC)
     before = PR(
         number=123,
         body="Body",

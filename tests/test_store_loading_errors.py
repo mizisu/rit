@@ -1,5 +1,8 @@
+from typing import cast
+
 import pytest
 
+from rit.services.github import GitHubService
 from rit.state.models import PRFile
 from rit.state.store import PRStore
 
@@ -27,7 +30,7 @@ class BrokenFileViewStateAdapter:
 @pytest.mark.asyncio
 async def test_load_pr_summary_propagates_non_runtime_adapter_errors() -> None:
     store = PRStore(pr_number=123)
-    store._service = BrokenSummaryAdapter()  # type: ignore[assignment]
+    store._service = cast(GitHubService, BrokenSummaryAdapter())
 
     with pytest.raises(ValueError, match="bad summary adapter state"):
         await store.load_pr_summary()
@@ -36,7 +39,7 @@ async def test_load_pr_summary_propagates_non_runtime_adapter_errors() -> None:
 @pytest.mark.asyncio
 async def test_load_files_propagates_non_runtime_adapter_errors() -> None:
     store = PRStore(pr_number=123)
-    store._service = BrokenFileMetadataAdapter()  # type: ignore[assignment]
+    store._service = cast(GitHubService, BrokenFileMetadataAdapter())
 
     with pytest.raises(ValueError, match="bad file metadata adapter state"):
         await store.load_files()
@@ -45,7 +48,7 @@ async def test_load_files_propagates_non_runtime_adapter_errors() -> None:
 @pytest.mark.asyncio
 async def test_load_file_view_states_propagates_non_runtime_adapter_errors() -> None:
     store = PRStore(pr_number=123)
-    store._service = BrokenFileViewStateAdapter()  # type: ignore[assignment]
+    store._service = cast(GitHubService, BrokenFileViewStateAdapter())
 
     with pytest.raises(ValueError, match="bad file view state adapter"):
         await store.load_file_view_states()

@@ -83,7 +83,7 @@ def _patch_tgp_sender(*, use_tmux_passthrough: bool) -> None:
     global _PATCHED
     if use_tmux_passthrough:
         if not _PATCHED:
-            tgp._send_tgp_message = _send_tgp_message_via_tmux
+            vars(tgp)["_send_tgp_message"] = _send_tgp_message_via_tmux
             _PATCHED = True
         return
 

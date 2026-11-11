@@ -1,14 +1,14 @@
-from rit.core.diff import parse_patch
-from rit.core.types import DiffLine
 import rit.ui.widgets.diff_full_file_preview as full_preview_module
+from rit.core.diff import parse_patch
+from rit.core.types import DiffLine, FileDiff
 from rit.ui.widgets.diff_full_file_preview import (
     FullFilePreviewAction,
     FullFileRestorePosition,
     build_full_file_diff,
     choose_full_file_preview_action,
-    full_file_restore_line_index,
     full_file_anchor_line_index,
     full_file_preview_target,
+    full_file_restore_line_index,
     nearest_full_file_anchor_for_deleted_line,
     selected_full_file_anchor,
 )
@@ -88,7 +88,7 @@ def test_deleted_line_anchor_scans_neighbors_without_copying_slices() -> None:
 
 
 def test_build_full_file_diff_reuses_single_pass_change_counts() -> None:
-    class SinglePassDiff(type(parse_patch("@@ -1 +1 @@\n-old\n+new", "preview.py"))):
+    class SinglePassDiff(FileDiff):
         @property
         def total_additions(self) -> int:
             raise AssertionError("full-file preview should not count additions alone")
@@ -212,7 +212,9 @@ def test_full_file_preview_target_falls_back_to_current_file() -> None:
         "preview.py",
     )
 
-    assert full_file_preview_target("preview.py", diff.hunks[0].lines[1]) == "preview.py"
+    assert (
+        full_file_preview_target("preview.py", diff.hunks[0].lines[1]) == "preview.py"
+    )
     assert full_file_preview_target(None, diff.hunks[0].lines[1]) is None
 
 

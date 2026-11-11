@@ -15,6 +15,7 @@ from textual.widgets import Button, Static
 import rit.ui.components.pr_info as pr_info_module
 from rit.state.models import (
     PR,
+    NodeList,
     PRLabel,
     PRReview,
     PRTeam,
@@ -337,8 +338,8 @@ def test_pr_info_reuses_header_rendering_for_unchanged_inputs(
         title="Add diff cache",
         additions=10,
         deletions=2,
-        baseRefName="main",
-        headRefName="feature",
+        base_ref="main",
+        head_ref="feature",
     )
     pr_info = PRInfo(store)
     widgets = {
@@ -370,7 +371,7 @@ def test_pr_info_reuses_reviewer_rendering_for_unchanged_inputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = PRStore()
-    store.state.pr = PR(number=1, author={"login": "author"})
+    store.state.pr = PR(number=1, user=PRUser(login="author"))
     pr_info = PRInfo(store)
     reviewers_widget = _CaptureStatic()
     calls = 0
@@ -410,7 +411,7 @@ def test_pr_info_single_reviewer_rendering_skips_iteration(
             raise AssertionError("single reviewer rendering should not iterate")
 
     store = PRStore()
-    store.state.pr = PR(number=1, author={"login": "author"})
+    store.state.pr = PR(number=1, user=PRUser(login="author"))
     pr_info = PRInfo(store)
     reviewers_widget = _CaptureStatic()
 
@@ -443,7 +444,9 @@ def test_pr_info_reuses_label_rendering_for_unchanged_inputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = PRStore()
-    store.state.pr = PR(number=1, labels={"nodes": [PRLabel(name="bug")]})
+    store.state.pr = PR(
+        number=1, labels_connection=NodeList(nodes=[PRLabel(name="bug")])
+    )
     pr_info = PRInfo(store)
     labels_widget = _CaptureStatic()
 
@@ -488,7 +491,9 @@ def test_pr_info_reuses_assignee_rendering_for_unchanged_inputs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = PRStore()
-    store.state.pr = PR(number=1, assignees={"nodes": [PRUser(login="alice")]})
+    store.state.pr = PR(
+        number=1, assignees_connection=NodeList(nodes=[PRUser(login="alice")])
+    )
     pr_info = PRInfo(store)
     assignees_widget = _CaptureStatic()
 

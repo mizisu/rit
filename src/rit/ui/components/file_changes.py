@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, ClassVar, Literal
 from rich.text import Text
 from textual import events, getters, on
 from textual.app import ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.message import Message
@@ -109,7 +109,7 @@ class FileChanges(Vertical):
     FileTree, ResizeHandle, DiffView { layer: base; }
     """
 
-    BINDINGS: ClassVar[list[Binding]] = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding(">", "expand_sidebar", "Expand Sidebar", show=False),
         Binding("<", "collapse_sidebar", "Collapse Sidebar", show=False),
         Binding("[", "prev_file", "Prev File", show=False),

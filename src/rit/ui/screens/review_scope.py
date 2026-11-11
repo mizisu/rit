@@ -6,7 +6,7 @@ from rich.table import Table
 from rich.text import Text
 from textual import events, on
 from textual.app import ComposeResult
-from textual.binding import Binding
+from textual.binding import Binding, BindingType
 from textual.containers import Vertical
 from textual.geometry import Region
 from textual.screen import ModalScreen
@@ -55,7 +55,7 @@ class ReviewScopePicker(ModalScreen[ReviewScope | None]):
     #review-scope-error { display: none; color: $warning; }
     """
 
-    BINDINGS: ClassVar[list[Binding]] = [
+    BINDINGS: ClassVar[list[BindingType]] = [
         Binding("escape", "cancel", "Cancel", show=False, priority=True),
         Binding("enter", "submit", "Select", show=False),
         Binding("j", "move(1)", "Next", show=False),
@@ -216,13 +216,17 @@ class ReviewScopePicker(ModalScreen[ReviewScope | None]):
         rows = [
             Option(
                 self._scope_row(
-                    "All changes", active.kind == "all" and not self._range_anchor, "Full PR"
+                    "All changes",
+                    active.kind == "all" and not self._range_anchor,
+                    "Full PR",
                 ),
                 id="all",
             ),
             Option(
                 self._scope_row(
-                    "Since last review", active.kind == "since" and not self._range_anchor, note
+                    "Since last review",
+                    active.kind == "since" and not self._range_anchor,
+                    note,
                 ),
                 id="since",
                 disabled=bool(reason),
