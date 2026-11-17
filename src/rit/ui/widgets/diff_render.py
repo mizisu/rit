@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from rich.text import Text
-from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.containers import Center, Horizontal, Vertical, VerticalScroll
 from textual.content import Content
 from textual.widget import Widget
-from textual.widgets import Static
+from textual.widgets import Button, Static
 
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.state.models import FileViewedState, PRFile
@@ -721,16 +721,39 @@ def _create_file_header_widget(
     header_widget.styles.height = _geometry.FILE_DIFF_HEADER_HEIGHT
     header_widget.styles.min_height = _geometry.FILE_DIFF_HEADER_HEIGHT
     header_widget.styles.width = max(1, width)
-    if not view._split_for_hunk(hunk):
-        return header_widget
-    header_scroll = SyncedCodeScroll(
-        header_widget,
-        classes="split-file-diff-header-scroll",
-        on_scroll_x=view._sync_split_horizontal_scroll,
+    header: Widget = header_widget
+    if view._split_for_hunk(hunk):
+        header = SyncedCodeScroll(
+            header_widget,
+            classes="split-file-diff-header-scroll",
+            on_scroll_x=view._sync_split_horizontal_scroll,
+        )
+        header.styles.height = _geometry.FILE_DIFF_HEADER_HEIGHT
+        header.styles.min_height = _geometry.FILE_DIFF_HEADER_HEIGHT
+    if not view._shows_test_notice(hunk.file_path or view.current_file or ""):
+        return header
+    notice = Vertical(
+        Static("Test files are not shown by default", classes="test-diff-notice-text"),
+        Center(
+            Button(
+                "Show diff",
+                id=f"show-test-diff-{hunk_index}",
+                classes="test-diff-show",
+                compact=True,
+            ),
+            classes="test-diff-action",
+        ),
+        classes="test-diff-notice",
     )
-    header_scroll.styles.height = _geometry.FILE_DIFF_HEADER_HEIGHT
-    header_scroll.styles.min_height = _geometry.FILE_DIFF_HEADER_HEIGHT
-    return header_scroll
+    notice.styles.height = _folding.TEST_DIFF_NOTICE_HEIGHT
+    wrapper = Vertical(header, notice, classes="test-diff-header")
+    scroll_x = int(view._content_widget.scroll_x) if view._content_widget is not None else 0
+    wrapper.styles.offset = (scroll_x, 0)
+    header_widget.styles.offset = (-scroll_x, 0)
+    wrapper.styles.height = (
+        _geometry.FILE_DIFF_HEADER_HEIGHT + _folding.TEST_DIFF_NOTICE_HEIGHT
+    )
+    return wrapper
 
 
 def _create_hunk_header_widget(

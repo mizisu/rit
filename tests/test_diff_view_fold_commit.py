@@ -369,9 +369,9 @@ async def test_fold_preserves_visible_selection_panes_and_viewport(
         app.store.state.files[0].viewer_viewed_state = FileViewedState.VIEWED
         for expanded in [False, True, False]:
             if expanded:
-                view._expanded_viewed_files.add("one.py")
+                view._expanded_files.add("one.py")
             else:
-                view._expanded_viewed_files.discard("one.py")
+                view._expanded_files.discard("one.py")
             await app.reconcile()
             await pilot.pause()
             assert view._all_lines[view.cursor_line] is cursor
@@ -597,7 +597,7 @@ async def test_fold_preserves_inline_and_file_drafts_and_hidden_targets(
         assert view._composer.session is not None
         assert view._composer.session.buffer.text == "unsaved draft"
         assert view._inline_comment_editor_target == ("two.py", 20, "LEFT")
-        view._expanded_viewed_files.add("two.py")
+        view._expanded_files.add("two.py")
         await app.reconcile()
         inline = view._composer.widget
         assert inline is not None and inline.is_open

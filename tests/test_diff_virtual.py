@@ -21,7 +21,6 @@ from rit.ui.components.combined_diff import build_combined_diff_document
 from rit.ui.widgets import (
     diff_blocks,
     diff_comments,
-    diff_folding,
     diff_highlight,
     diff_virtual,
 )
@@ -223,11 +222,8 @@ async def test_virtual_window_shift_preserves_file_headers(
 
     diff = FileDiff(
         filename="All files",
-        hunks=[file_hunk("one.py"), file_hunk("two.py"), file_hunk("folded.py")],
+        hunks=[file_hunk("one.py"), file_hunk("two.py"), file_hunk("tests/folded.py")],
         show_hunk_headers=False,
-    )
-    diff, _ = diff_folding.build_viewed_file_fold_diff(
-        diff, is_collapsed=lambda path: path == "folded.py"
     )
 
     class TestApp(App):
@@ -277,6 +273,12 @@ async def test_virtual_window_shift_preserves_file_headers(
             assert await diff_virtual._try_shift_virtual_window_incremental(diff_view)
             await pilot.pause()
             assert bool(diff_view.query("#file-header-2")) is (center == 14)
+            assert bool(diff_view.query(".test-diff-notice")) is (center == 14)
+            if center == 14:
+                assert diff_view.query_one(".test-diff-notice").region.height == 4
+                wrapper = diff_view._get_file_header_widget(2)
+                assert wrapper is not None
+                assert wrapper.region.height == 5
             assert 16 not in diff_view._line_widgets_by_index
 
         diff_virtual._set_virtual_window_around(diff_view, 4)

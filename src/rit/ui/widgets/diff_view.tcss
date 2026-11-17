@@ -30,6 +30,44 @@ DiffView .file-diff-header {
     content-align: left middle;
 }
 
+DiffView .test-diff-header {
+    width: 1fr;
+    overflow: hidden;
+}
+
+DiffView .test-diff-notice {
+    width: 1fr;
+    padding: 1 0;
+}
+
+DiffView .test-diff-action {
+    height: 1;
+}
+
+DiffView .test-diff-notice-text {
+    height: 1;
+    text-align: center;
+    text-wrap: nowrap;
+    color: $text-muted;
+}
+
+DiffView .test-diff-show {
+    width: auto;
+    min-width: 0;
+    height: 1;
+    min-height: 1;
+    border: none;
+    padding: 0 1;
+    background: transparent;
+    color: $primary;
+    text-style: underline;
+}
+
+DiffView .test-diff-show:hover,
+DiffView .test-diff-show:focus {
+    background: $primary 15%;
+}
+
 DiffView #diff-sticky-header {
     layer: sticky;
     dock: top;

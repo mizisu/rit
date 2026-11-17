@@ -6,6 +6,9 @@ from collections.abc import Callable
 
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 
+TEST_DIFF_NOTICE_HEIGHT = 4
+
+
 __all__ = (
     "build_viewed_file_fold_diff",
     "is_folded_placeholder_line",

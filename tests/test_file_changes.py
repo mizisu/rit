@@ -1776,7 +1776,9 @@ async def test_combined_full_preview_restores_combined_scroll(
 
         calls: list[str] = []
 
-        async def counted_show_diff(filename: str, diff: FileDiff, **_kwargs: object) -> None:
+        async def counted_show_diff(
+            filename: str, diff: FileDiff, **_kwargs: object
+        ) -> None:
             calls.append(filename)
 
         file_changes.diff_view.show_diff = counted_show_diff
@@ -2201,7 +2203,9 @@ async def test_rapid_file_tree_selection_in_combined_scroll_jumps_without_rerend
 
         calls: list[str] = []
 
-        async def blocking_show_diff(filename: str, diff: FileDiff, **_kwargs: object) -> None:
+        async def blocking_show_diff(
+            filename: str, diff: FileDiff, **_kwargs: object
+        ) -> None:
             calls.append(filename)
 
         file_changes.diff_view.show_diff = blocking_show_diff
@@ -2247,7 +2251,9 @@ async def test_open_file_focuses_current_diff_without_rerender() -> None:
 
         calls: list[str] = []
 
-        async def counted_show_diff(filename: str, diff: FileDiff, **_kwargs: object) -> None:
+        async def counted_show_diff(
+            filename: str, diff: FileDiff, **_kwargs: object
+        ) -> None:
             calls.append(filename)
 
         file_changes.diff_view.show_diff = counted_show_diff
@@ -2258,3 +2264,54 @@ async def test_open_file_focuses_current_diff_without_rerender() -> None:
         assert calls == []
         assert file_changes.diff_view.has_focus
         assert store.state.selected_file == "one.py"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("combined", [True, False])
+async def test_hidden_test_location_jump_reveals_before_resolving(
+    combined: bool,
+) -> None:
+    patch = "@@ -40,3 +40,3 @@\n first\n second\n third"
+    filename = "tests/test_jump.py"
+    store = PRStore()
+    store.state.files_loading = (
+        LoadingState.LOADED if combined else LoadingState.LOADING
+    )
+    store.state.files = [PRFile(filename=filename, status="modified", patch=patch)]
+    store.state.file_diffs = {filename: parse_patch(patch, filename)}
+    store.state.selected_file = filename
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        changes = app.query_one(FileChanges)
+        view = changes.diff_view
+        if combined:
+            changes.refresh_files()
+            await wait_until(lambda: view.current_file == "All files")
+            await wait_until(lambda: not changes._file_render_worker_active)
+        else:
+            await view.show_diff(filename, store.state.file_diffs[filename])
+            view.display = True
+        await pilot.pause()
+        assert view._is_file_folded(filename)
+        assert view.line_index_for_location(filename, 41, "RIGHT") is None
+
+        assert changes.jump_to_file_location(filename, 41, "RIGHT", focus_diff=True)
+        await wait_until(
+            lambda: (
+                (line := view._current_line()) is not None
+                and line.new_line_no == 41
+                and view.has_focus
+            )
+        )
+        await wait_until(lambda: not changes._file_render_worker_active)
+        line = view._current_line()
+        assert line is not None and line.file_path == filename
+        assert not view._is_file_folded(filename)
+        assert view.has_focus
+        assert not view.query(".test-diff-notice")
+        assert store.state.files[0].viewer_viewed_state == FileViewedState.UNVIEWED

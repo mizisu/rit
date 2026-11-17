@@ -17,6 +17,7 @@ from textual.worker import Worker, WorkerState
 
 from rit.core.types import FileDiff
 from rit.state.models import FileViewedState, LoadingState
+from rit.state.pr_overview import FileChangeGroup
 from rit.state.review_scope import ReviewScope
 from rit.state.store import PRStore
 from rit.ui.components.combined_diff import (
@@ -855,7 +856,12 @@ class FileChanges(Vertical):
         focus_diff: bool,
     ) -> bool:
         """Jump to a file/line location, preserving combined-diff navigation."""
-        if self._render_session.showing_combined_files:
+        hidden = not self.diff_view._showing_full_file and (
+            self.diff_view._is_file_folded(filename)
+            or self.diff_view._should_collapse_file(filename)
+        )
+        self.diff_view.expand_file(filename)
+        if self._render_session.showing_combined_files and not hidden:
             line_index = self._line_index_for_location(filename, line, side)
             if line_index is None:
                 return False
@@ -873,10 +879,10 @@ class FileChanges(Vertical):
             )
             self.store.state.selected_file = filename
             self.file_tree.select_file(filename, emit_message=False)
-            self._queue_combined_files_render(focus_diff=False)
+            self._queue_combined_files_render(focus_diff=False, force=hidden)
             return True
 
-        if self.diff_view.current_file == filename:
+        if self.diff_view.current_file == filename and not hidden:
             line_index = self._line_index_for_location(filename, line, side)
             if line_index is None:
                 return False
@@ -1056,13 +1062,22 @@ class FileChanges(Vertical):
     def on_file_tree_file_selected(self, event: FileTree.FileSelected) -> None:
         """Open the selected file at its header and focus the diff."""
         event.stop()
-        self.open_file(event.filename, focus_diff=True, top_align=True)
+        self.open_file(
+            event.filename,
+            focus_diff=True,
+            expand=FileChangeGroup.category(event.filename) != "Tests",
+            top_align=True,
+        )
 
     @on(FileTree.FilePreviewed)
     def on_file_tree_file_previewed(self, event: FileTree.FilePreviewed) -> None:
         """Handle file preview from tree (Space — focus stays on tree)."""
         event.stop()
-        self.open_file(event.filename, focus_diff=False)
+        self.open_file(
+            event.filename,
+            focus_diff=False,
+            expand=FileChangeGroup.category(event.filename) != "Tests",
+        )
 
     @on(PRStore.FileSelected)
     def on_store_file_selected(self, event: PRStore.FileSelected) -> None:

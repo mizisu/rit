@@ -1,6 +1,8 @@
+from typing import Literal
+
 import pytest
 from textual.app import App, ComposeResult
-from textual.widgets import Static
+from textual.widgets import Button, Static, Tree
 
 from rit.core.diff import parse_patch
 from rit.state.models import (
@@ -14,23 +16,27 @@ from rit.state.store import PRStore
 from rit.ui.components.file_changes import FileChanges
 from rit.ui.widgets.comment_card import CommentCard
 from rit.ui.widgets.diff_view import DiffView
+from rit.ui.widgets.file_tree import FileTree
 from tests.conftest import wait_until
 
 
-def test_collapse_viewed_file_clears_manual_expansion() -> None:
-    filename = "one.py"
+@pytest.mark.parametrize("filename", ["one.py", "tests/test_one.py"])
+def test_collapse_viewed_file_clears_manual_expansion(filename: str) -> None:
     store = PRStore()
     store.state.files = [
         PRFile(filename=filename, viewer_viewed_state=FileViewedState.VIEWED)
     ]
     diff_view = DiffView(store=store)
-    diff_view._expanded_viewed_files.add(filename)
+    diff_view.expand_file(filename)
 
     assert diff_view._should_collapse_file(filename) is False
 
     diff_view.collapse_viewed_file(filename)
 
     assert diff_view._should_collapse_file(filename) is True
+
+    store.state.files[0].viewer_viewed_state = FileViewedState.UNVIEWED
+    assert diff_view._should_collapse_file(filename) is False
 
 
 def _make_review_thread(path: str, *, root_id: int, line: int) -> ReviewThread:
@@ -354,3 +360,197 @@ async def test_folded_file_hides_inline_comments_until_expanded() -> None:
         await wait_until(lambda: "one.py" not in diff_view._folded_file_paths)
 
         assert len(diff_view.query("#inline-thread-101")) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["split", "unified"])
+async def test_test_diff_notice_reveals_in_place_and_remembers_expansion(
+    mode: Literal["split", "unified"],
+) -> None:
+    patch = "@@ -1,2 +1,2 @@\n-old\n+new\n line2"
+    filename = "tests/test_example.py"
+    store = PRStore()
+    store.state.files_loading = LoadingState.LOADED
+    store.state.files = [
+        PRFile(filename="app.py", status="modified", patch=patch),
+        PRFile(filename=filename, status="modified", patch=patch),
+        PRFile(
+            filename="tests/test_viewed.py",
+            status="modified",
+            patch=patch,
+            viewer_viewed_state=FileViewedState.VIEWED,
+        ),
+    ]
+    store.state.file_diffs = {
+        file.filename: parse_patch(patch, file.filename) for file in store.state.files
+    }
+
+    store.state.file_diffs["app.py"] = parse_patch(
+        patch.replace(" line2", " " + "x" * 240), "app.py"
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store=store)
+
+    app = TestApp()
+    async with app.run_test(size=(120, 24)) as pilot:
+        changes = app.query_one(FileChanges)
+        view = changes.diff_view
+        view.mode = mode
+        changes.refresh_files()
+        await wait_until(lambda: view.current_file == "All files")
+        await wait_until(lambda: not changes._file_render_worker_active)
+        await pilot.pause()
+        source = view.current_diff
+        assert source is not None
+        assert view._folded_file_paths == {filename, "tests/test_viewed.py"}
+        assert view.line_index_for_location("app.py", 2, "RIGHT") is not None
+        assert view.line_index_for_location(filename, 2, "RIGHT") is None
+        assert len(view.query(".test-diff-notice")) == 1
+        notice = view.query_one(".test-diff-notice")
+        header = view.query_one("#file-header-1")
+        button = view.query_one("#show-test-diff-1", Button)
+        assert str(view.query_one(".test-diff-notice-text", Static).content) == (
+            "Test files are not shown by default"
+        )
+        assert str(button.label) == "Show diff"
+        assert header.region.height == 1
+        assert notice.region.height == 4
+        assert notice.region.y == header.region.y + 1
+        assert button.region.y == header.region.y + 3
+        assert button.region.height == 1
+        button_center, _ = button.region.center
+        viewport_center, _ = view.scrollable_content_region.center
+        assert abs(button_center - viewport_center) <= 1
+        assert view.query_one("#file-header-2").region.y == header.region.y + 5
+        assert view._hunk_header_top_offsets[2] - view._hunk_header_top_offsets[1] == 5
+        assert view._sticky_header.region.height == 1
+
+        content = view._content_widget
+        assert content is not None
+        if mode == "unified":
+            content.scroll_to(x=30, animate=False, immediate=True)
+        else:
+            view._sync_split_horizontal_scroll(30)
+        await pilot.pause()
+        assert abs(button.region.center[0] - viewport_center) <= 1
+        assert notice.region.x == view.scrollable_content_region.x
+        if mode == "unified":
+            assert content.scroll_x == 30
+            content.scroll_to(x=0, animate=False, immediate=True)
+        else:
+            view._sync_split_horizontal_scroll(0)
+        await pilot.pause()
+
+        folded_paths = view._folded_file_paths
+        store.state.files[1].viewer_viewed_state = FileViewedState.VIEWED
+        view.collapse_viewed_file(filename)
+        changes.update_file_view_state(filename)
+        await wait_until(
+            lambda: not view._fold_worker_active and not view.query(".test-diff-notice")
+        )
+        await pilot.pause()
+        assert view._folded_file_paths == folded_paths
+        assert view.query_one("#file-header-2").region.y == (
+            view.query_one("#file-header-1").region.y + 1
+        )
+        assert view._hunk_header_top_offsets[2] - view._hunk_header_top_offsets[1] == 1
+
+        store.state.files[1].viewer_viewed_state = FileViewedState.UNVIEWED
+        changes.update_file_view_state(filename)
+        await wait_until(
+            lambda: not view._fold_worker_active and view.query(".test-diff-notice")
+        )
+        await pilot.pause()
+        assert view._folded_file_paths == folded_paths
+        assert view.query_one("#file-header-2").region.y == (
+            view.query_one("#file-header-1").region.y + 5
+        )
+
+        changes.file_tree.query_one("#file-tree", Tree).focus()
+        changes.file_tree.post_message(FileTree.FilePreviewed(filename))
+        await wait_until(lambda: view.selected_file_header_path() == filename)
+        assert changes.file_tree.has_focus_within
+        assert view._is_file_folded(filename)
+        changes.file_tree.post_message(FileTree.FileSelected(filename))
+        await wait_until(lambda: view.has_focus)
+        assert view._is_file_folded(filename)
+
+        view.jump_to_line_index(0, side="RIGHT", focus=True)
+        await pilot.pause()
+        assert view.file_for_line_index(view.cursor_line) == "app.py"
+        scroll_y = view.scroll_y
+        assert await pilot.click("#show-test-diff-1")
+        await wait_until(
+            lambda: not view._is_file_folded(filename) and not view._fold_worker_active
+        )
+        await pilot.pause()
+        assert not view._is_file_folded(filename)
+        assert view.file_for_line_index(view.cursor_line) == filename
+        assert view.has_focus
+        assert view.scroll_y == scroll_y
+        assert not view.query(".test-diff-notice")
+        assert view.current_diff is source
+        assert store.state.files[1].viewer_viewed_state == FileViewedState.UNVIEWED
+
+        await pilot.press("enter")
+        await wait_until(
+            lambda: view._is_file_folded(filename) and not view._fold_worker_active
+        )
+        await pilot.pause()
+        assert not view._is_file_folded("app.py")
+        assert not view.query(".test-diff-notice")
+        assert view.query_one("#file-header-2").region.y == (
+            view.query_one("#file-header-1").region.y + 1
+        )
+        await pilot.press("enter")
+        await wait_until(lambda: not view._is_file_folded(filename))
+        await wait_until(lambda: not view._fold_worker_active)
+
+        store.state.files[1].viewer_viewed_state = FileViewedState.VIEWED
+        view.collapse_viewed_file(filename)
+        changes.update_file_view_state(filename)
+        await wait_until(
+            lambda: view._is_file_folded(filename) and not view._fold_worker_active
+        )
+        assert not view.query(".test-diff-notice")
+        store.state.files[1].viewer_viewed_state = FileViewedState.UNVIEWED
+        changes.update_file_view_state(filename)
+        await wait_until(
+            lambda: not view._is_file_folded(filename) and not view._fold_worker_active
+        )
+        assert not view.query(".test-diff-notice")
+
+        changes.open_file("app.py", focus_diff=False)
+        changes.file_tree.post_message(FileTree.FileSelected(filename))
+        await wait_until(lambda: changes.current_diff_file_target() == filename)
+        view.mode = "unified" if mode == "split" else "split"
+        await pilot.resize_terminal(100, 24)
+        await wait_until(lambda: view.split == (mode != "split"))
+        await pilot.pause()
+        assert not view._is_file_folded(filename)
+
+        for folded in (False, True):
+            if folded:
+                view.reset_comparison()
+                await view.show_diff("All files", source)
+                assert view._is_file_folded(filename)
+            assert await view.show_full_file_preview(
+                filename,
+                "new\nline2\nline3",
+                source_diff=store.state.file_diffs[filename],
+            )
+            assert view.line_index_for_location(filename, 3, "RIGHT") is not None
+            assert not view.query(".test-diff-notice")
+            view.action_toggle_full_file()
+            await wait_until(lambda: view.current_file == "All files")
+            await wait_until(lambda: not view._showing_full_file)
+            assert view._is_file_folded(filename) is folded
+            await wait_until(
+                lambda folded=folded: bool(view.query(".test-diff-notice")) is folded
+            )
+
+        changes.open_file(filename, focus_diff=True)
+        await wait_until(lambda: not view._is_file_folded(filename))
+        assert store.state.files[1].viewer_viewed_state == FileViewedState.UNVIEWED

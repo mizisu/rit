@@ -154,10 +154,21 @@ async def test_counted_g_only_scrolls_for_offscreen_lines() -> None:
     async with app.run_test(size=(100, 12)) as pilot:
         view = app.query_one(DiffView)
         for mode in ("split", "unified"):
+            view.reset_comparison()
             view.mode = mode
-            await view.show_diff("test.py", parse_patch(patch, "test.py"))
+            await view.show_diff(
+                "tests/test_scroll.py", parse_patch(patch, "tests/test_scroll.py")
+            )
+            assert view._is_file_folded("tests/test_scroll.py")
             view.focus()
             await pilot.press("7", "0", "g")
+            await wait_until(
+                lambda: (
+                    (line := view._current_line()) is not None
+                    and line.new_line_no == 70
+                )
+            )
+            assert not view._is_file_folded("tests/test_scroll.py")
             scroll_y = view.scroll_y
             visible_rows = [
                 row

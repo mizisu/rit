@@ -199,6 +199,13 @@ def _extra_heights_by_hunk(view) -> dict[int, int]:
                 extra_heights.get(hunk, 0) + composer.estimate_height()
             )
     extra_heights.update(getattr(view, "_annotation_hunk_heights", {}))
+    for hunk_index, hunk in enumerate(view._diff.hunks):
+        if hunk.starts_file and view._shows_test_notice(
+            hunk.file_path or view.current_file or ""
+        ):
+            extra_heights[hunk_index] = (
+                extra_heights.get(hunk_index, 0) + _folding.TEST_DIFF_NOTICE_HEIGHT
+            )
     return extra_heights
 
 

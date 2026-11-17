@@ -21,7 +21,7 @@ from textual.message import Message
 from textual.reactive import reactive, var
 from textual.scrollbar import ScrollTo
 from textual.widget import AwaitMount, Widget
-from textual.widgets import Collapsible, Input, Static
+from textual.widgets import Button, Collapsible, Input, Static
 
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.state.models import (
@@ -31,6 +31,7 @@ from rit.state.models import (
     PRFile,
     ReviewThread,
 )
+from rit.state.pr_overview import FileChangeGroup
 from rit.ui.messages import Flash
 from rit.ui.widgets import diff_comments as _comments
 from rit.ui.widgets import diff_cursor as _cursor
@@ -292,7 +293,9 @@ class DiffView(VerticalScroll):
         self._source_line_count: int = 0
         self._folded_file_paths: frozenset[str] = frozenset()
         self._manually_folded_files: set[str] = set()
-        self._expanded_viewed_files: set[str] = set()
+        self._expanded_files: set[str] = set()
+        self._revealed_test_files: set[str] = set()
+        self._test_notice_file_paths: frozenset[str] = frozenset()
         self._file_navigation_revision: int = 0
         self._last_navigated_file: str | None = None
         self._suspend_split_state_rerender: bool = False
@@ -583,6 +586,7 @@ class DiffView(VerticalScroll):
         self._search_input_widget = self.query_one("#diff-search-input", Input)
 
         self._content_widget = self.query_one("#diff-content", VerticalScroll)
+        self.watch(self._content_widget, "scroll_x", self._pin_test_notices)
         # Unlike idle callbacks, the unbatched layout signal follows compositor output.
         self.screen.screen_layout_refresh_signal.subscribe(
             self,
@@ -597,6 +601,11 @@ class DiffView(VerticalScroll):
                 exclusive=False,
                 name="diff-highlight-prewarm",
             )
+
+    def _pin_test_notices(self, scroll_x: float) -> None:
+        for wrapper in self.query(".test-diff-header"):
+            wrapper.styles.offset = (int(scroll_x), 0)
+            wrapper.query_one(".file-diff-header").styles.offset = (-int(scroll_x), 0)
 
     @on(events.Focus)
     @on(events.Blur)
@@ -781,6 +790,21 @@ class DiffView(VerticalScroll):
                 self,
                 selection_dirty_lines=queue_update.selection_dirty_lines,
             )
+
+    @on(Button.Pressed, ".test-diff-show")
+    def _show_test_diff(self, event: Button.Pressed) -> None:
+        event.stop()
+        hunk_index = int((event.button.id or "").removeprefix("show-test-diff-"))
+        filename = self._file_path_for_hunk(hunk_index)
+        if filename is None:
+            return
+        if self.visual_mode:
+            _selection._exit_visual_mode(self)
+        self._restore_file_fold_target(
+            filename, preserve_header_position=True, viewport_offset=None
+        )
+        self.focus(scroll_visible=False)
+        self.expand_file(filename)
 
     def on_click(self, event: events.Click) -> None:
         if event.button != 1 or event.widget is None:
@@ -1352,8 +1376,10 @@ class DiffView(VerticalScroll):
         self._diff_plan_cache = None
         self._requested_source = None
         self._file = None
-        self._expanded_viewed_files.clear()
+        self._expanded_files.clear()
         self._manually_folded_files.clear()
+        self._revealed_test_files.clear()
+        self._test_notice_file_paths = frozenset()
         self._saved_diff = None
         self._saved_diff_plan_cache = None
         self._showing_full_file = False
@@ -1367,6 +1393,7 @@ class DiffView(VerticalScroll):
     def _render_diff_for_source(self, diff: FileDiff) -> FileDiff:
         if self._showing_full_file:
             self._folded_file_paths = frozenset()
+            self._test_notice_file_paths = frozenset()
             return diff
 
         render_diff, folded_files = _folding.build_viewed_file_fold_diff(
@@ -1374,6 +1401,7 @@ class DiffView(VerticalScroll):
             is_collapsed=self._should_collapse_file,
         )
         self._folded_file_paths = folded_files
+        self._test_notice_file_paths = self._test_notice_paths(folded_files)
         return render_diff
 
     def _should_collapse_file(self, filename: str) -> bool:
@@ -1381,9 +1409,24 @@ class DiffView(VerticalScroll):
             return False
         if filename in self._manually_folded_files:
             return True
-        if filename in self._expanded_viewed_files:
+        if filename in self._expanded_files:
             return False
-        return self._file_viewed_state(filename) == FileViewedState.VIEWED
+        viewed = self._file_viewed_state(filename) == FileViewedState.VIEWED
+        return viewed or self._is_unrevealed_test_file(filename)
+
+    def _is_unrevealed_test_file(self, filename: str) -> bool:
+        return (
+            filename not in self._revealed_test_files
+            and FileChangeGroup.category(filename) == "Tests"
+        )
+
+    def _test_notice_paths(self, folded_files: frozenset[str]) -> frozenset[str]:
+        return frozenset(
+            filename
+            for filename in folded_files
+            if self._is_unrevealed_test_file(filename)
+            and self._file_viewed_state(filename) != FileViewedState.VIEWED
+        )
 
     def _file_viewed_state(self, filename: str) -> FileViewedState:
         file = self._file_for_path(filename)
@@ -1409,20 +1452,26 @@ class DiffView(VerticalScroll):
     def _is_file_folded(self, filename: str) -> bool:
         return filename in self._folded_file_paths
 
+    def _shows_test_notice(self, filename: str) -> bool:
+        return filename in self._test_notice_file_paths
+
     def expand_file(self, filename: str) -> None:
         """Reveal an explicitly opened file without changing its viewed state."""
         if not self._should_collapse_file(filename):
             return
         self._manually_folded_files.discard(filename)
-        if self._file_viewed_state(filename) == FileViewedState.VIEWED:
-            self._expanded_viewed_files.add(filename)
+        is_test = FileChangeGroup.category(filename) == "Tests"
+        if is_test:
+            self._revealed_test_files.add(filename)
+        if self._file_viewed_state(filename) == FileViewedState.VIEWED or is_test:
+            self._expanded_files.add(filename)
         if self.selected_file_header_path() == filename:
             self._set_file_header_selection(None)
         self.refresh_viewed_folds()
 
     def collapse_viewed_file(self, filename: str) -> None:
         """Clear a manual expansion so a viewed file folds on refresh."""
-        self._expanded_viewed_files.discard(filename)
+        self._expanded_files.discard(filename)
 
     def _file_path_for_hunk(self, hunk_index: int) -> str | None:
         if self._diff is None or not 0 <= hunk_index < len(self._diff.hunks):
@@ -1599,11 +1648,14 @@ class DiffView(VerticalScroll):
             return False
         if self._should_collapse_file(filename):
             self._manually_folded_files.discard(filename)
-            if self._file_viewed_state(filename) == FileViewedState.VIEWED:
-                self._expanded_viewed_files.add(filename)
+            is_test = FileChangeGroup.category(filename) == "Tests"
+            if is_test:
+                self._revealed_test_files.add(filename)
+            if self._file_viewed_state(filename) == FileViewedState.VIEWED or is_test:
+                self._expanded_files.add(filename)
         else:
             self._manually_folded_files.add(filename)
-            self._expanded_viewed_files.discard(filename)
+            self._expanded_files.discard(filename)
         return True
 
     def _request_toggle_file_fold(self) -> None:
@@ -1664,7 +1716,10 @@ class DiffView(VerticalScroll):
                 _, desired = self._fold_projection(
                     source, full_file=self._showing_full_file
                 )
-                if desired == self._folded_file_paths:
+                if (
+                    desired == self._folded_file_paths
+                    and self._test_notice_paths(desired) == self._test_notice_file_paths
+                ):
                     return
                 request_token = self._render_request_token + 1
                 await self.show_diff(
@@ -2512,6 +2567,7 @@ class DiffView(VerticalScroll):
                 self._file_scroll_padding.display = False
             selected_header_path = self.selected_file_header_path()
             plan, rendered_rows, planned_split = render_plan
+            test_notice_file_paths = self._test_notice_paths(folded_file_paths)
             retained_prefix = (
                 _render._capture_retained_render_prefix(
                     self,
@@ -2522,6 +2578,7 @@ class DiffView(VerticalScroll):
                     planned_split=planned_split,
                 )
                 if allow_retained_prefix
+                and test_notice_file_paths == self._test_notice_file_paths
                 else None
             )
             publish_line_metadata(render_diff)
@@ -2610,6 +2667,7 @@ class DiffView(VerticalScroll):
 
             self._file = target_file
             self._folded_file_paths = folded_file_paths
+            self._test_notice_file_paths = test_notice_file_paths
             diff = render_diff
             self._diff = diff
             self._file_header_hunks = [

@@ -21,6 +21,7 @@ from rit.ui.widgets.diff_geometry import (
     virtual_top_buffer_height,
 )
 from rit.ui.widgets.diff_plan import build_diff_plan
+from rit.ui.widgets.diff_view import DiffView
 
 
 def _planned_diff(patch: str):
@@ -111,7 +112,30 @@ def test_file_comment_geometry_uses_file_header_path_without_rescanning() -> Non
         def _file_path_for_hunk(self, _hunk_index: int) -> str:
             raise AssertionError("file header paths should not be rescanned")
 
+        def _shows_test_notice(self, _filename: str) -> bool:
+            return False
+
     assert diff_virtual._extra_heights_by_hunk(View()) == {}
+
+
+def test_hidden_test_notice_height_adds_to_measured_annotations() -> None:
+    view = DiffView()
+    view._diff = view._render_diff_for_source(
+        parse_patch("@@ -1 +1 @@\n context", "tests/test_geometry.py")
+    )
+    build_diff_plan(view._diff)
+    view._annotation_hunk_heights = {0: 7}
+
+    geometry = build_diff_geometry(
+        view._diff,
+        split=False,
+        extra_heights_by_hunk=diff_virtual._extra_heights_by_hunk(view),
+    )
+
+    assert geometry.hunk_header_top_offsets == [0]
+    assert geometry.line_top_offsets == [12]
+    assert geometry.line_heights == [0]
+    assert geometry.virtual_content_height == 12
 
 
 def test_build_diff_geometry_accounts_for_file_comment_annotations() -> None:

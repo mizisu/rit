@@ -125,7 +125,7 @@ async def test_toggle_targets_new_file_when_focus_moves_during_viewed_refresh(
 
         diff_view = screen.file_changes.diff_view
         diff_view._manually_folded_files.add("three.py")
-        diff_view._expanded_viewed_files.add("four.py")
+        diff_view._expanded_files.add("four.py")
         screen.switch_tab(1)
         screen.file_changes.refresh_files()
         await wait_until(
@@ -185,7 +185,7 @@ async def test_toggle_targets_new_file_when_focus_moves_during_viewed_refresh(
         await refresh_worker.wait()
         assert screen.file_changes.current_diff_file_target() == "four.py"
         assert "four.py" not in diff_view._folded_file_paths
-        assert "four.py" in diff_view._expanded_viewed_files
+        assert "four.py" in diff_view._expanded_files
         assert diff_view.scroll_y == diff_view._hunk_header_top_offsets[3]
 
         screen.action_toggle_file_viewed()

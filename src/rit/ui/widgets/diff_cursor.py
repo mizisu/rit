@@ -344,9 +344,34 @@ def _scroll_end(view: DiffView) -> None:
 
 
 def _jump_to_file_line(view: DiffView, line_number: int) -> None:
-    filename = view.file_for_line_index(view.cursor_line)
+    filename = view.selected_file_header_path() or view.file_for_line_index(
+        view.cursor_line
+    )
     if filename is None:
         view.post_message(Flash("No file selected", style="warning", duration=2.0))
+        return
+
+    if view._is_file_folded(filename):
+        source, current_file = view.current_diff, view.current_file
+        if source is None or current_file is None:
+            return
+        view._restore_file_fold_target(
+            filename, preserve_header_position=True, viewport_offset=None
+        )
+        navigation_revision = view.view_revision[1]
+        view.expand_file(filename)
+
+        async def reveal_and_jump() -> None:
+            await view._refresh_viewed_folds(source, current_file)
+            if (
+                view.current_diff is source
+                and view.current_file == current_file
+                and view.view_revision[1] == navigation_revision
+                and not view._is_file_folded(filename)
+            ):
+                _jump_to_file_line(view, line_number)
+
+        view.run_worker(reveal_and_jump(), group="diff-line-jump", exclusive=True)
         return
 
     side: Literal["LEFT", "RIGHT"] = (
