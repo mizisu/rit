@@ -1,6 +1,6 @@
 import asyncio
 import re
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -55,6 +55,7 @@ from rit.services.pr_graphql_response import (
 from rit.services.pr_issue_comment_request import (
     create_issue_comment as create_issue_comment_via_graphql,
 )
+from rit.services.pr_list import PRListLoader
 from rit.services.pr_merge_status import fetch_pr_merge_status
 from rit.services.pr_review_comment_request import (
     create_review_comment as create_review_comment_via_rest,
@@ -114,6 +115,7 @@ from rit.state.models import (
     PRTeam,
     PRUser,
 )
+from rit.state.pr_list import PRListSnapshot
 from rit.state.pr_overview import PRChecksSnapshot, PRFileMetadata, PRMergeSnapshot
 from rit.state.review_scope import ReviewHistory, ReviewScope
 
@@ -167,6 +169,16 @@ class GitHubService:
             if self._detected_repo is None:
                 self._detected_repo = await fetch_repo_view(self._run_gh)
             return self._detected_repo
+
+    async def get_pr_list(
+        self, *, on_initial: Callable[[PRListSnapshot], None] | None = None
+    ) -> PRListSnapshot:
+        """Fetch the inbox, optionally publishing it before stack context arrives."""
+        repo = await self.get_repo()
+        with translate_pull_request_graphql_errors():
+            return await PRListLoader(repo.owner, repo.name, self._run_gh).load(
+                on_initial=on_initial
+            )
 
     async def get_pr_all(self, pr_number: int) -> PR:
         """Fetch PR data via GraphQL, including all activity pages."""

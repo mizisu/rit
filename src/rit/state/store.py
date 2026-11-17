@@ -78,6 +78,7 @@ from rit.state.pending_review_visibility import (
     without_pending_replies,
 )
 from rit.state.pending_review_workspace import PendingReviewWorkspace
+from rit.state.pr_list import PRListSnapshot
 from rit.state.pr_management import plan_assignee_selection, plan_reviewer_selection
 from rit.state.pr_merge import merge_pr_discussion, merge_pr_summary
 from rit.state.pr_overview import PRChecksSnapshot, PRFilesSnapshot, PRMergeSnapshot
@@ -90,6 +91,43 @@ __all__ = (
     "PRStoreState",
     "UnsupportedInlineCommentTarget",
 )
+
+
+class PRListStore:
+    """Shared inbox snapshot; a failed refresh keeps the previous list usable."""
+
+    class Updated(Message):
+        """The inbox is usable or its stack context has finished loading."""
+
+    def __init__(self, owner: str | None = None, repo: str | None = None) -> None:
+        self._service = GitHubService(owner=owner, repo=repo)
+        self.snapshot: PRListSnapshot | None = None
+        self.loading = False
+        self.attempted = False
+        self.error: str | None = None
+        self._message_sink: Callable[[Message], object] | None = None
+
+    def set_message_sink(self, sink: Callable[[Message], object]) -> None:
+        self._message_sink = sink
+
+    def _accept_initial(self, snapshot: PRListSnapshot) -> None:
+        if self.snapshot is None or not self.snapshot.context_complete:
+            self.snapshot = snapshot
+            if self._message_sink is not None:
+                self._message_sink(self.Updated())
+
+    async def load(self) -> None:
+        self.loading = True
+        self.attempted = True
+        self.error = None
+        try:
+            self.snapshot = await self._service.get_pr_list(
+                on_initial=self._accept_initial
+            )
+        except (RuntimeError, ValueError) as error:
+            self.error = str(error)
+        finally:
+            self.loading = False
 
 
 @dataclass

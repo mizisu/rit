@@ -96,8 +96,19 @@ print(json.dumps([
     ]
 
 
+@pytest.mark.parametrize(
+    ("args", "owner", "repo", "number"),
+    [
+        (["owner/repo#123"], "owner", "repo", 123),
+        ([], None, None, 0),
+    ],
+)
 def test_cli_launches_app_through_terminal_configuration(
     monkeypatch: pytest.MonkeyPatch,
+    args: list[str],
+    owner: str | None,
+    repo: str | None,
+    number: int,
 ) -> None:
     app = Mock()
     navigation = Mock()
@@ -106,10 +117,10 @@ def test_cli_launches_app_through_terminal_configuration(
     create_app = Mock(return_value=app)
     monkeypatch.setattr(cli, "create_app", create_app)
 
-    result = CliRunner().invoke(cli.main, ["owner/repo#123"])
+    result = CliRunner().invoke(cli.main, args)
 
     assert result.exit_code == 0, result.output
-    create_app.assert_called_once_with(owner="owner", repo="repo", pr_number=123)
+    create_app.assert_called_once_with(owner=owner, repo=repo, pr_number=number)
     navigation.assert_called_once()
     app.run.assert_called_once_with()
     app.tmux_navigation.__exit__.assert_called_once_with(None, None, None)

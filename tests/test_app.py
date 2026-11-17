@@ -201,8 +201,6 @@ class TestRitApp:
     async def test_timeline_bottom_keys_follow_late_content_without_overriding_navigation(
         self, app: RitApp
     ) -> None:
-        from textual.containers import VerticalScroll
-
         from rit.ui.components.pr_timeline import PRTimeline
         from rit.ui.screens.main import MainScreen
         from rit.ui.widgets.comment_card import CommentCard
@@ -221,7 +219,7 @@ class TestRitApp:
             ]
             screen.pr_info.refresh_pr_data()
             timeline = screen.query_one(PRTimeline)
-            scroll = screen.pr_info.query_one("#main-scroll", VerticalScroll)
+            scroll = screen.pr_info.document_scroll
             await timeline._build_timeline_async()
             await pilot.pause()
             last = list(screen.query(".comment-box"))[-1]
@@ -259,7 +257,6 @@ class TestRitApp:
     async def test_pr_info_z_centers_selection_and_preserves_text_entry(
         self, app: RitApp
     ) -> None:
-        from textual.containers import VerticalScroll
         from textual.widget import Widget
 
         from rit.ui.components.pr_timeline import PRTimeline
@@ -276,7 +273,7 @@ class TestRitApp:
             ]
             screen.pr_info.refresh_pr_data()
             timeline = screen.query_one(PRTimeline)
-            scroll = screen.pr_info.query_one("#main-scroll", VerticalScroll)
+            scroll = screen.pr_info.document_scroll
             await timeline._build_timeline_async()
             await pilot.pause()
 
@@ -320,8 +317,11 @@ class TestRitApp:
             await pilot.press("G")
             await pilot.pause()
             assert scroll.scroll_y == scroll.max_scroll_y
+            sidebar = screen.pr_info.query_one("#sidebar")
             assert (
-                0 <= scroll.scrollable_content_region.bottom - last.region.bottom <= 3
+                0
+                <= scroll.scrollable_content_region.bottom - sidebar.region.bottom
+                <= 3
             )
 
             last.set_content("Long comment", "\n".join("Line" for _ in range(50)))

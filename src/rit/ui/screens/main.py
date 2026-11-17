@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 from textual import events, getters, on
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
-from textual.containers import VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.reactive import reactive
 from textual.screen import Screen
 from textual.widgets import Button, Input, TabbedContent, TabPane, TextArea, Tree
@@ -39,6 +39,7 @@ from rit.ui.screens.review_submit import ReviewSubmitScreen
 from rit.ui.widgets import DiffView, Header
 from rit.ui.widgets.branch_info import BranchInfo
 from rit.ui.widgets.comment_editor import InlineCommentEditor
+from rit.ui.widgets.pr_sidebar import PRSidebar
 
 __all__ = ("MainScreen",)
 
@@ -218,18 +219,29 @@ class MainScreen(Screen[None]):
         self._pending_overview_file: tuple[str, tuple[str, str]] | None = None
 
     def compose(self) -> ComposeResult:
-        yield Header(
-            owner=self.owner,
-            repo=self.repo,
-            pr_number=self.pr_number,
-            id="main-header",
-        )
+        with Horizontal():
+            yield PRSidebar(id="pr-sidebar")
+            with Vertical(id="pr-workspace"):
+                yield Header(
+                    owner=self.owner,
+                    repo=self.repo,
+                    pr_number=self.pr_number,
+                    id="main-header",
+                )
+                with TabbedContent(initial="pr-info", id="main-tabs"):
+                    with TabPane("PR Info", id="pr-info"):
+                        yield PRInfo(store=self.store)
+                    with TabPane("Files", id="files"):
+                        yield FileChanges(store=self.store)
 
-        with TabbedContent(initial="pr-info", id="main-tabs"):
-            with TabPane("PR Info", id="pr-info"):
-                yield PRInfo(store=self.store)
-            with TabPane("Files", id="files"):
-                yield FileChanges(store=self.store)
+    def focus_review(self) -> None:
+        """Return from the PR list without resetting the review location."""
+        if self.current_tab == 1:
+            self.file_changes.restore_focus()
+        else:
+            self.pr_info.query_one("#main-scroll", VerticalScroll).focus(
+                scroll_visible=False
+            )
 
     async def on_mount(self) -> None:
         self.run_worker(self._load_data(), exclusive=True)
@@ -315,6 +327,9 @@ class MainScreen(Screen[None]):
     def on_screen_resume(self) -> None:
         if self.is_mounted and self.file_changes.is_mounted:
             self.file_changes.set_updates_active(self.current_tab == 1)
+            sidebar = self.query_one(PRSidebar)
+            sidebar.sync_visibility()
+            sidebar.refresh_list()
 
     def watch_current_tab(self, old_tab: int, new_tab: int) -> None:
         self._refresh_tab_bindings()
@@ -615,9 +630,7 @@ class MainScreen(Screen[None]):
     def action_scroll_half_page_down(self) -> None:
         if self.current_tab == 0:
             sidebar = self.pr_info.sidebar_has_focus
-            scroll = self.pr_info.query_one(
-                "#sidebar" if sidebar else "#main-scroll", VerticalScroll
-            )
+            scroll = self.pr_info.active_scroll
             scroll.scroll_relative(
                 y=scroll.size.height // 2,
                 duration=0.2,
@@ -628,9 +641,7 @@ class MainScreen(Screen[None]):
     def action_scroll_half_page_up(self) -> None:
         if self.current_tab == 0:
             sidebar = self.pr_info.sidebar_has_focus
-            scroll = self.pr_info.query_one(
-                "#sidebar" if sidebar else "#main-scroll", VerticalScroll
-            )
+            scroll = self.pr_info.active_scroll
             scroll.scroll_relative(
                 y=-(scroll.size.height // 2),
                 duration=0.2,
@@ -641,9 +652,7 @@ class MainScreen(Screen[None]):
     def action_scroll_to_top(self) -> None:
         if self.current_tab == 0:
             sidebar = self.pr_info.sidebar_has_focus
-            scroll = self.pr_info.query_one(
-                "#sidebar" if sidebar else "#main-scroll", VerticalScroll
-            )
+            scroll = self.pr_info.active_scroll
             scroll.scroll_home(animate=False)
             if not sidebar:
                 self.pr_info.select_first_item()
@@ -651,9 +660,7 @@ class MainScreen(Screen[None]):
     def action_scroll_to_bottom(self) -> None:
         if self.current_tab == 0:
             if self.pr_info.sidebar_has_focus:
-                self.pr_info.query_one("#sidebar", VerticalScroll).scroll_end(
-                    animate=False
-                )
+                self.pr_info.active_scroll.scroll_end(animate=False)
             else:
                 self.pr_info.select_last_item()
 
@@ -1389,6 +1396,7 @@ class MainScreen(Screen[None]):
         current_pane = diff_view.active_pane
 
         await self.store.submit_review(event, body)
+        self.app.review_submitted(self.pr_number)
         await self.store.refresh_review_data()
         self.pr_info.refresh_pr_data()
         self.pr_info.refresh_comments()
@@ -1410,6 +1418,8 @@ class MainScreen(Screen[None]):
     ) -> bool:
         changed = await self.store.set_requested_reviewers(users=users, teams=teams)
         self.pr_info.refresh_reviewers()
+        if changed and self.app.pr_list_store.attempted:
+            self.app.refresh_pr_list()
         return changed
 
     async def _set_assignees(self, logins: list[str]) -> bool:
@@ -1834,6 +1844,12 @@ class MainScreen(Screen[None]):
         return fallback
 
     def on_key(self, event: events.Key) -> None:
+        if (
+            self.is_mounted
+            and self.app.pr_list_visible
+            and self.query_one(PRSidebar).has_focus_within
+        ):
+            return
         if self._text_entry_has_focus() or self._comment_editor_has_focus():
             return
         if self.current_tab == 1 and event.key in {"ctrl+h", "ctrl+l"}:
@@ -1855,6 +1871,12 @@ class MainScreen(Screen[None]):
             event.prevent_default()
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if (
+            self.is_mounted
+            and self.app.pr_list_visible
+            and self.query_one(PRSidebar).has_focus_within
+        ):
+            return False
         if self._text_entry_has_focus() or self._comment_editor_has_focus():
             return False
         if (
@@ -1906,7 +1928,10 @@ class MainScreen(Screen[None]):
     def _move_pane_focus(self, direction: Literal["left", "right"]) -> None:
         panel = self.pr_info if self.current_tab == 0 else self.file_changes
         if not panel.move_focus(direction):
-            self.app.tmux_navigation.select_pane(direction)
+            if direction == "left" and self.is_mounted and self.app.pr_list_visible:
+                self.query_one(PRSidebar).focus_list()
+            else:
+                self.app.tmux_navigation.select_pane(direction)
 
     def action_focus_left(self) -> None:
         self._move_pane_focus("left")

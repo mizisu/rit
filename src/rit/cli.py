@@ -67,17 +67,19 @@ def create_app(*, owner: str | None, repo: str | None, pr_number: int) -> RitApp
 
 
 @click.command()
-@click.argument("pr_ref")
+@click.argument("pr_ref", required=False)
 @click.version_option()
-def main(pr_ref: str) -> None:
+def main(pr_ref: str | None) -> None:
     """Review GitHub Pull Requests in your terminal.
+
+    Without PR_REF, select a PR from the current repository's inbox.
 
     PR_REF can be:
     - A PR number (e.g., 123) - uses current repo
     - Full reference (e.g., owner/repo#123)
     - GitHub URL (e.g., https://github.com/owner/repo/pull/123)
     """
-    owner, repo, pr_number = parse_pr_reference(pr_ref)
+    owner, repo, pr_number = parse_pr_reference(pr_ref) if pr_ref else (None, None, 0)
 
     app = create_app(owner=owner, repo=repo, pr_number=pr_number)
     with app.tmux_navigation:
