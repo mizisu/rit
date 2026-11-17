@@ -66,12 +66,13 @@ def timeline_event_header(events: Sequence[PRTimelineEvent], *, time_str: str) -
             if event.commit_oid:
                 action += f" · {escape(event.commit_oid[:7])}"
         elif event.kind in {"ReviewRequestedEvent", "ReviewRequestRemovedEvent"}:
-            target = (
-                f"@{event.reviewer}"
-                if event.reviewer
-                else event.reviewer_team or "unknown"
+            targets = (
+                f"@{request.reviewer}"
+                if request.reviewer
+                else request.reviewer_team or "unknown"
+                for request in events
             )
-            action += f" {escape(target)}"
+            action += " " + ", ".join(escape(target) for target in targets)
     return timeline_header(author=actor, action=action, time_str=time_str)
 
 

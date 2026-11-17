@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from typing import Literal
 
 import pytest
 
@@ -85,6 +86,66 @@ def test_activity_keeps_github_order_despite_commit_dates_and_appends_local_draf
     ]
     assert items[-1].review is not None
     assert items[-1].review.id == 3
+
+
+@pytest.mark.parametrize("kind", ["ReviewRequestedEvent", "ReviewRequestRemovedEvent"])
+def test_review_requests_group_only_consecutive_events_by_kind_and_actor(
+    kind: Literal["ReviewRequestedEvent", "ReviewRequestRemovedEvent"],
+) -> None:
+    events = [
+        PRTimelineEvent(
+            id=identifier,
+            kind=kind,
+            actor=actor,
+            created_at=_dt(5, index),
+        )
+        for index, (identifier, actor) in enumerate(
+            [("a", "alice"), ("b", "alice"), ("c", "bob"), ("d", "alice")]
+        )
+    ]
+    events.extend(
+        [
+            PRTimelineEvent(
+                id="push",
+                kind="HeadRefForcePushedEvent",
+                actor="alice",
+                created_at=_dt(5, 4),
+            ),
+            PRTimelineEvent(id="e", kind=kind, actor="alice", created_at=_dt(5, 5)),
+            PRTimelineEvent(
+                id="issue-1", kind="IssueComment", database_id=1, created_at=_dt(5, 6)
+            ),
+            PRTimelineEvent(id="f", kind=kind, actor="alice", created_at=_dt(5, 7)),
+            PRTimelineEvent(
+                id="opposite",
+                kind=(
+                    "ReviewRequestRemovedEvent"
+                    if kind == "ReviewRequestedEvent"
+                    else "ReviewRequestedEvent"
+                ),
+                actor="alice",
+                created_at=_dt(5, 8),
+            ),
+        ]
+    )
+
+    items = build_timeline_items(
+        issue_comments=[PRIssueComment(id=1, body="Discussion", created_at=_dt(5, 6))],
+        reviews=[],
+        comments=[],
+        events=events,
+    )
+
+    assert [([event.id for event in item.events] or [item.kind]) for item in items] == [
+        ["a", "b"],
+        ["c"],
+        ["d"],
+        ["push"],
+        ["e"],
+        ["issue_comment"],
+        ["f"],
+        ["opposite"],
+    ]
 
 
 def test_review_timeline_time_prefers_submitted_then_pending_thread_then_created() -> (

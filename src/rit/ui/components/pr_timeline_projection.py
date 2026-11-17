@@ -150,9 +150,14 @@ def build_timeline_items(
         if (
             grouped
             and item.events
-            and item.events[0].kind == "PullRequestCommit"
+            and item.events[0].kind
+            in {
+                "PullRequestCommit",
+                "ReviewRequestedEvent",
+                "ReviewRequestRemovedEvent",
+            }
             and grouped[-1].events
-            and grouped[-1].events[-1].kind == "PullRequestCommit"
+            and grouped[-1].events[-1].kind == item.events[0].kind
             and grouped[-1].events[-1].actor == item.events[0].actor
         ):
             grouped[-1].events.extend(item.events)

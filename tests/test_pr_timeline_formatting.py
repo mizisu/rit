@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from typing import Literal
 
 import pytest
 from rich.text import Text
@@ -81,6 +82,43 @@ def test_activity_labels_keep_state_and_external_text_visible(
     header = timeline_event_header([event], time_str="2h ago")
 
     assert Text.from_markup(header).plain == f"{expected} · 2h ago"
+
+
+@pytest.mark.parametrize(
+    "kind, action",
+    [
+        ("ReviewRequestedEvent", "○ requested review from"),
+        ("ReviewRequestRemovedEvent", "— removed review request for"),
+    ],
+)
+def test_grouped_review_requests_show_all_targets_in_order_with_literal_markup(
+    kind: Literal["ReviewRequestedEvent", "ReviewRequestRemovedEvent"],
+    action: str,
+) -> None:
+    events = [
+        PRTimelineEvent(
+            id=str(index),
+            kind=kind,
+            actor="alice",
+            created_at=datetime(2026, 6, 18, tzinfo=UTC),
+            reviewer=reviewer,
+            reviewer_team=team,
+        )
+        for index, (reviewer, team) in enumerate(
+            [
+                ("bob", None),
+                ("carol", None),
+                (None, "Backend [red]"),
+                (None, None),
+            ]
+        )
+    ]
+
+    header = timeline_event_header(events, time_str="")
+
+    assert Text.from_markup(header).plain == (
+        f"alice {action} @bob, @carol, Backend [red], unknown"
+    )
 
 
 def test_author_display_name_normalizes_missing_and_bot_logins() -> None:

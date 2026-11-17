@@ -68,14 +68,23 @@ async def test_activity_cards_share_comment_styles_and_preserve_navigation_and_l
             ),
         ]
     )
-    pr.timeline_events.append(
-        PRTimelineEvent(
-            id="request-1",
-            kind="ReviewRequestedEvent",
-            actor="alice",
-            created_at=when(9),
-            reviewer_team="Backend [red]",
-        )
+    pr.timeline_events.extend(
+        [
+            PRTimelineEvent(
+                id="request-1",
+                kind="ReviewRequestedEvent",
+                actor="alice",
+                created_at=when(9),
+                reviewer_team="Backend [red]",
+            ),
+            PRTimelineEvent(
+                id="request-2",
+                kind="ReviewRequestedEvent",
+                actor="alice",
+                created_at=when(9),
+                reviewer="carol",
+            ),
+        ]
     )
     store.state.pr = pr
     store.state.reviews = [
@@ -111,7 +120,7 @@ async def test_activity_cards_share_comment_styles_and_preserve_navigation_and_l
             self.query_one(PRTimeline).next_comment()
 
     app = TestApp()
-    async with app.run_test(size=(120, 40)) as pilot:
+    async with app.run_test(size=(140, 40)) as pilot:
         app.set_focus(None)
         timeline = app.query_one(PRTimeline)
         await timeline._build_timeline_async()
@@ -125,7 +134,7 @@ async def test_activity_cards_share_comment_styles_and_preserve_navigation_and_l
         assert isinstance(request, Static)
         assert "2 commits" in commits.title
         assert "approved" in str(approval.visual)
-        assert "Backend [red]" in str(request.visual)
+        assert "Backend [red], @carol" in str(request.visual)
         assert commits.collapsed
         assert (
             commits.outer_size.height
@@ -176,7 +185,7 @@ async def test_activity_cards_share_comment_styles_and_preserve_navigation_and_l
         await pilot.pause()
         assert request.outer_size.height > 3
         assert request.region.right <= app.query_one("#main-scroll").region.right
-        assert "Backend [red]" in str(request.visual)
+        assert "Backend [red], @carol" in str(request.visual)
 
         pr.timeline_events.clear()
         store.state.reviews.clear()
