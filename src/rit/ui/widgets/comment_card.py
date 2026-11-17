@@ -35,11 +35,28 @@ class CommentCard(Vertical):
     }
 
     CommentCard.description-container {
+        padding: 1 1;
         margin-bottom: 2;
+    }
+
+    CommentCard.description-container > .comment-content {
+        max-width: 100;
     }
 
     CommentCard.description-container .comment-header {
         color: $text-muted;
+    }
+
+    CommentCard.description-container .comment-content MarkdownHeader {
+        width: 1fr;
+    }
+
+    CommentCard.description-container .comment-content MarkdownTableContent {
+        grid-columns: 1fr;
+    }
+
+    CommentCard.description-container .comment-content MarkdownTableCellContents {
+        text-overflow: fold;
     }
 
     CommentCard.thread-comment {
@@ -201,6 +218,11 @@ class CommentCard(Vertical):
     CommentCard .comment-content Markdown MarkdownBlock > .code_inline {
         color: $text 85%;
         background: $foreground 6%;
+    }
+
+    CommentCard.description-container .comment-content Markdown MarkdownBlock > .code_inline {
+        color: $text 95%;
+        background: $foreground 12%;
     }
 
     CommentCard .comment-content MarkdownFence {
@@ -365,6 +387,7 @@ class CommentCard(Vertical):
             self._content_container,
             self._body,
             base_url=self._markdown_base_url,
+            responsive_images=self.has_class("description-container"),
         )
 
     def _remove_rendered_body_widgets(self) -> None:

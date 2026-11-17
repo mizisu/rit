@@ -264,6 +264,12 @@ class PRTimeline(Vertical):
         self.call_after_refresh(self._select_first_item)
 
     def set_scroll_container(self, container: VerticalScroll) -> None:
+        if (
+            self._scroll_container is not None
+            and self._scroll_container is not container
+            and self._scroll_container.scroll_y > 0
+        ):
+            self._preserve_initial_scroll_home = False
         self._scroll_container = container
 
     def start_issue_comment(self) -> None:
@@ -302,7 +308,9 @@ class PRTimeline(Vertical):
         description_card.remove_class("timeline-loading")
         description_card.set_content(
             f"Description · {author_name}",
-            pr.body or "*No description provided.*",
+            pr.body
+            if pr.body and not pr.body.isspace()
+            else "*No description provided.*",
             markdown_base_url=self._markdown_base_url(),
         )
 
@@ -432,6 +440,7 @@ class PRTimeline(Vertical):
                             for event in item.events
                         )
                         if len(item.events) > 1
+                        and item.events[0].kind == "PullRequestCommit"
                         else "",
                     )
 

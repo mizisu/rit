@@ -48,6 +48,43 @@ ReviewSubmitScreen {
     background: transparent;
 }
 
+#pr-list-tabs {
+    dock: none;
+    height: 2;
+    background: $background;
+}
+
+#pr-list-tabs Tab {
+    height: 1;
+    padding: 0 1;
+    background: $background;
+}
+
+#pr-list-tabs Tab.-active {
+    background: $panel;
+}
+
+Screen.pr-list-overlay PRSidebar {
+    width: 1fr;
+    max-width: 100%;
+}
+
+Screen.pr-list-overlay #pr-workspace {
+    display: none;
+}
+
+#pr-workspace {
+    width: 1fr;
+    height: 1fr;
+}
+
+#pr-list-empty {
+    width: 1fr;
+    height: 1fr;
+    content-align: center middle;
+    color: $text-muted;
+}
+
 TabbedContent {
     height: 1fr;
 }

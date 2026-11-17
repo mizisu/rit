@@ -180,7 +180,7 @@ async def test_large_file_summary_reveals_only_requested_rows_and_reuses_options
         assert checks not in app.screen.focus_chain
         assert "All passed" not in str(checks.get_option_at_index(0).prompt)
 
-        for width in (100, 80, 40):
+        for width in (120, 100, 80, 40):
             await pilot.resize_terminal(width, 30)
             await pilot.pause()
             sidebar = info.query_one("#sidebar", VerticalScroll)
@@ -197,11 +197,14 @@ async def test_large_file_summary_reveals_only_requested_rows_and_reuses_options
             assert heading.region.right <= count.region.x
             assert count.region.right < totals.region.x
             assert totals.region.right <= group.content_region.right
-            if width == 100:
-                assert sidebar.region.width == 38
-            if width < 94:
-                assert 0 < sidebar.region.height <= 14
-                assert main.region.height > sidebar.region.height
+            if width == 120:
+                assert sidebar.region.width == 44
+                assert sidebar.region.x >= main.region.right
+            if width < 120:
+                page = info.query_one("#pr-info-layout", VerticalScroll)
+                assert sidebar.region.width == page.scrollable_content_region.width
+                assert not sidebar.show_vertical_scrollbar
+                assert not main.show_vertical_scrollbar
                 assert sidebar.region.y >= main.region.bottom
 
 

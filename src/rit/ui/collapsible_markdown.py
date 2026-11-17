@@ -312,6 +312,7 @@ class _BaseDetailsCollapsible(Collapsible):
         lazy_threshold: int = LAZY_LOAD_THRESHOLD,
         base_url: str | None = None,
         image_fetcher: ImageFetcher | None = None,
+        responsive_images: bool = False,
         **kwargs,
     ) -> None:
         self._inner_container = Vertical(classes="details-content")
@@ -320,6 +321,7 @@ class _BaseDetailsCollapsible(Collapsible):
         self._lazy_threshold = lazy_threshold
         self._base_url = base_url
         self._image_fetcher = image_fetcher
+        self._responsive_images = responsive_images
         self._content_loaded = False
 
     def _load_content(self) -> None:
@@ -340,6 +342,7 @@ class _BaseDetailsCollapsible(Collapsible):
             lazy_threshold=self._lazy_threshold,
             base_url=self._base_url,
             image_fetcher=self._image_fetcher,
+            responsive_images=self._responsive_images,
         )
 
 
@@ -369,6 +372,7 @@ def mount_markdown_with_details(
     lazy_threshold: int = LAZY_LOAD_THRESHOLD,
     base_url: str | None = None,
     image_fetcher: ImageFetcher | None = None,
+    responsive_images: bool = False,
 ) -> None:
     if not body:
         return
@@ -386,6 +390,7 @@ def mount_markdown_with_details(
                     lazy_threshold=lazy_threshold,
                     base_url=base_url,
                     image_fetcher=image_fetcher,
+                    responsive_images=responsive_images,
                 )
                 container.mount(collapsible)
             else:
@@ -395,6 +400,7 @@ def mount_markdown_with_details(
                     lazy_threshold=lazy_threshold,
                     base_url=base_url,
                     image_fetcher=image_fetcher,
+                    responsive_images=responsive_images,
                 )
                 container.mount(collapsible)
         else:
@@ -403,6 +409,7 @@ def mount_markdown_with_details(
                 part.content,
                 base_url=base_url,
                 image_fetcher=image_fetcher,
+                responsive_images=responsive_images,
             )
 
 
@@ -412,6 +419,7 @@ def mount_markdown_code_parts(
     *,
     base_url: str | None = None,
     image_fetcher: ImageFetcher | None = None,
+    responsive_images: bool = False,
 ) -> None:
     for part in parse_fenced_code_blocks(body):
         if part.is_code:
@@ -422,4 +430,5 @@ def mount_markdown_code_parts(
                 part.content,
                 base_url=base_url,
                 image_fetcher=image_fetcher,
+                responsive_images=responsive_images,
             )

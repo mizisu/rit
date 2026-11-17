@@ -173,12 +173,19 @@ async def test_document_markdown_style_is_shared_with_comments_and_details() -> 
             strong_style = paragraph.get_component_styles("strong")
             assert strong_style.text_style.bold
             assert strong_style.color.a > body_color.a
+            code_style = paragraph.get_component_styles("code_inline")
             if card.has_class("description-container"):
                 assert card.query_one(".comment-header").styles.color.a < body_color.a
-                assert card.styles.padding.left == card.styles.padding.right == 3
-            code_style = paragraph.get_component_styles("code_inline")
-            assert code_style.color == paragraph.styles.color
-            assert 0 < code_style.background.a <= 0.1
+                assert card.styles.background.hex == "#1E2030"
+                assert card.styles.border.top[0] == "solid"
+                assert card.styles.padding.left == card.styles.padding.right == 1
+                assert code_style.color.a > body_color.a
+                assert code_style.background.a == pytest.approx(0.12)
+            else:
+                assert card.styles.padding.left == 3
+                assert card.styles.border.left[0] == "solid"
+                assert code_style.color == paragraph.styles.color
+                assert code_style.background.a == pytest.approx(0.06)
             assert paragraph.styles.link_style_hover.underline
             quote = card.query_one("MarkdownBlockQuote")
             assert quote.styles.background.a == 0
@@ -193,6 +200,10 @@ async def test_document_markdown_style_is_shared_with_comments_and_details() -> 
             )
             table_header = card.query_one("MarkdownTableContent > .header")
             assert table_header.styles.text_style.bold
+            cell = card.query_one("MarkdownTableContent > .cell")
+            assert cell.styles.text_overflow == (
+                "fold" if card.has_class("description-container") else "ellipsis"
+            )
             assert (
                 card.query_one("CopyableCodeBlock MarkdownFence").styles.padding.left
                 == 0

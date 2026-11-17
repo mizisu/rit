@@ -12,6 +12,7 @@ PRInfo #pr-info-layout {
     height: 100%;
     width: 100%;
     max-width: 183;
+    overflow: hidden hidden;
 }
 
 /* Scroll container for main content */
@@ -31,6 +32,10 @@ PRInfo .main-content {
 /* Center the document and sidebar as one unit. */
 PRInfo.-wide {
     padding: 0;
+}
+
+PRInfo.-wide CommentCard.description-container {
+    padding: 1 3;
 }
 
 /* Sidebar owns its scroll independently of the document. */
@@ -264,18 +269,23 @@ PRInfo #pr-reviewers {
 
 PRInfo.-compact #pr-info-layout {
     layout: vertical;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
 }
 
 PRInfo.-compact #main-scroll {
     width: 100%;
-    height: 1fr;
+    height: auto;
+    overflow-y: hidden;
+    scrollbar-gutter: auto;
 }
 
 PRInfo.-compact .sidebar {
     width: 100%;
-    height: 40%;
-    max-height: 14;
-    min-height: 5;
+    height: auto;
+    min-height: 0;
+    overflow-y: hidden;
+    scrollbar-gutter: auto;
     border-left: none;
     border-top: solid #363a4f;
 }

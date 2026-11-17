@@ -149,18 +149,69 @@ async def test_description_starts_as_loading_card_until_summary_loads() -> None:
             yield PRTimeline(store)
 
     app = TestApp()
-    async with app.run_test() as pilot:
+    async with app.run_test():
         timeline = app.query_one(PRTimeline)
         description = app.query_one("#pr-description-card")
 
         assert description.has_class("timeline-loading")
 
-        timeline.refresh_description(
-            PR(number=123, body="Description body", user=PRUser(login="alice"))
-        )
-        await pilot.pause()
+        for source, selector, expected in (
+            ("Description body", ".comment-body-plain", "Description body"),
+            ("### 제목\n\n**내용**", "MarkdownParagraph", "내용"),
+            (" \t\n", "MarkdownParagraph", "No description provided."),
+            ("다시 일반 본문", ".comment-body-plain", "다시 일반 본문"),
+        ):
+            timeline.refresh_description(
+                PR(number=123, body=source, user=PRUser(login="alice"))
+            )
+            await wait_until(
+                lambda selector=selector, expected=expected: any(
+                    str(widget.content) == expected
+                    for widget in description.query(selector).results(Static)
+                )
+                and len(description.query(".comment-body-plain"))
+                == (selector == ".comment-body-plain")
+                and bool(description.query("Markdown"))
+                == (selector == "MarkdownParagraph")
+            )
+            assert not description.has_class("timeline-loading")
+            assert not description.has_class("--empty-body")
+            assert len(description.query(".comment-body-plain")) == (
+                selector == ".comment-body-plain"
+            )
+            assert bool(description.query("Markdown")) == (
+                selector == "MarkdownParagraph"
+            )
 
-        assert not description.has_class("timeline-loading")
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ("", "*No description provided.*"),
+        (" \t\n", "*No description provided.*"),
+        ("\u3000", "*No description provided.*"),
+        ("설명", "설명"),
+        ("  첫 줄\n\n다음 줄  ", "  첫 줄\n\n다음 줄  "),
+        ("### 제목\n\n**본문**", "### 제목\n\n**본문**"),
+    ],
+)
+def test_description_fallback_preserves_nonempty_source(
+    body: str, expected: str
+) -> None:
+    timeline = PRTimeline(PRStore())
+    card = CommentCard(
+        "Loading", "Loading", classes="description-container timeline-loading"
+    )
+    timeline._description_card = card
+    pr = PR(number=1, body=body)
+
+    timeline.refresh_description(pr)
+
+    assert card._body == expected
+    assert card._header == "Description \u00b7 unknown"
+    assert not card.has_class("timeline-loading")
+    assert not card.has_class("--empty-body")
+    assert pr.body == body
 
 
 def test_refresh_timeline_skips_unchanged_render_signature(
@@ -486,7 +537,7 @@ async def test_description_and_issue_comment_use_shared_comment_cards() -> None:
             yield PRTimeline(store)
 
     app = TestApp()
-    async with app.run_test() as pilot:
+    async with app.run_test(size=(180, 40)) as pilot:
         timeline = app.query_one(PRTimeline)
         timeline.refresh_description(store.state.pr)
         timeline.refresh_timeline()
@@ -495,6 +546,38 @@ async def test_description_and_issue_comment_use_shared_comment_cards() -> None:
 
         assert len(app.query("CommentCard.description-container")) == 1
         assert len(app.query("CommentCard.comment-box")) == 1
+        description = app.query_one("#pr-description-card", CommentCard)
+        comment = app.query_one("CommentCard.comment-box", CommentCard)
+        assert description.region.x == comment.region.x
+        assert description.region.right == comment.region.right
+        assert description.query_one(".comment-content").content_region.width == 100
+        assert description.has_class("--selected")
+        assert description.styles.background.hex == "#1E2030"
+        assert description.styles.border.top[0] == "solid"
+        assert description.styles.border.left[0] == "solid"
+        selected_border = description.styles.border
+        original_region = description.region
+        original_content = description.content_region
+        assert comment.styles.background.hex == "#1E2030"
+        assert comment.styles.border.top[0] == "solid"
+        assert comment.styles.padding.left == comment.styles.padding.right == 3
+
+        timeline.next_item()
+        await pilot.pause()
+        assert comment.has_class("--selected")
+        assert not description.has_class("--selected")
+        assert description.styles.border.left == description.styles.border.top
+        assert description.styles.border.left != selected_border.left
+        assert description.region == original_region
+        assert description.content_region == original_content
+
+        timeline.prev_item()
+        await pilot.pause()
+        assert description.has_class("--selected")
+        assert not comment.has_class("--selected")
+        assert description.styles.border == selected_border
+        assert description.region == original_region
+        assert description.content_region == original_content
 
 
 @pytest.mark.asyncio

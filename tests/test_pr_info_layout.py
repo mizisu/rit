@@ -1,16 +1,17 @@
 """Tests for PR Info layout."""
 
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
 from rich.cells import cell_len
 from textual import on
 from textual.app import App, ComposeResult
-from textual.containers import VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 from textual.content import Content
 from textual.css.query import NoMatches
 from textual.css.styles import Styles
-from textual.widgets import Button, Static
+from textual.widgets import Button, Markdown, Static
 
 import rit.ui.components.pr_info as pr_info_module
 from rit.state.models import (
@@ -112,6 +113,10 @@ async def test_pr_info_summary_actions_are_clickable() -> None:
             reviewer_button.parent.query_one(".sidebar-section-title").region.right + 1
         )
 
+        app.query_one(PRInfo).document_scroll.scroll_to_widget(
+            reviewer_button, animate=False
+        )
+        await pilot.pause()
         await pilot.click("#edit-reviewers")
         await pilot.click("#edit-assignees")
         await pilot.pause()
@@ -120,15 +125,20 @@ async def test_pr_info_summary_actions_are_clickable() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pr_info_stacks_sidebar_below_main_when_compact() -> None:
+async def test_pr_info_stacks_sidebar_using_available_width() -> None:
     store = PRStore()
+    store.state.pr = PR(number=1, body="Document paragraph.\n\n" * 40)
 
     class TestApp(App[None]):
+        CSS = "#inbox { width: 64; } PRInfo { width: 1fr; }"
+
         def compose(self) -> ComposeResult:
-            yield PRInfo(store)
+            with Horizontal():
+                yield Static(id="inbox")
+                yield PRInfo(store)
 
     app = TestApp()
-    async with app.run_test(size=(80, 30)) as pilot:
+    async with app.run_test(size=(164, 40)) as pilot:
         pr_info = app.query_one(PRInfo)
         await wait_until(lambda: pr_info.compact)
         await pilot.pause()
@@ -136,13 +146,49 @@ async def test_pr_info_stacks_sidebar_below_main_when_compact() -> None:
         main_scroll = app.query_one("#main-scroll")
         sidebar = app.query_one("#sidebar")
 
-        assert main_scroll.region.width == pr_info.region.width
+        page = app.query_one("#pr-info-layout", VerticalScroll)
+        assert main_scroll.region.width == page.scrollable_content_region.width
         assert sidebar.region.y >= main_scroll.region.bottom
+        assert page.show_vertical_scrollbar
+        assert not main_scroll.show_vertical_scrollbar
+        assert not sidebar.show_vertical_scrollbar
+        assert pr_info.document_scroll is page
+        assert app.query_one(PRTimeline)._scroll_container is page
+        main_scroll.focus()
+        await pilot.press("pagedown")
+        await wait_until(lambda: page.scroll_y > 0)
+        assert main_scroll.scroll_y == 0 and sidebar.scroll_y == 0
+        position = page.scroll_y
+        assert pr_info.move_focus("right")
+        await wait_until(
+            lambda: page.scrollable_content_region.overlaps(
+                app.query_one("#edit-reviewers").region
+            )
+        )
+        assert pr_info.active_scroll is page
+        pr_info.move_focus("left")
+        await wait_until(lambda: page.scroll_y == position)
+        page.scroll_to(y=10, animate=False)
+        await wait_until(lambda: page.scroll_y == 10)
 
-        await pilot.resize_terminal(100, 30)
+        assert pr_info.size.width == 100
+        app.query_one("#inbox").display = False
         await wait_until(lambda: not pr_info.compact)
         await pilot.pause()
+        assert sidebar.region.x >= main_scroll.region.right
+        assert not page.show_vertical_scrollbar and page.scroll_y == 0
+        assert main_scroll.show_vertical_scrollbar
+        assert pr_info.document_scroll is main_scroll
+        assert app.query_one(PRTimeline)._scroll_container is main_scroll
+        await wait_until(lambda: main_scroll.scroll_y == 10)
 
+        await pilot.resize_terminal(119, 40)
+        await wait_until(lambda: pr_info.compact)
+        await pilot.pause()
+        assert sidebar.region.y >= main_scroll.region.bottom
+        await pilot.resize_terminal(120, 40)
+        await wait_until(lambda: not pr_info.compact)
+        await pilot.pause()
         assert sidebar.region.x >= main_scroll.region.right
 
 
@@ -207,15 +253,12 @@ async def test_pr_info_keeps_long_reviewers_on_one_line_with_full_tooltip() -> N
 
 @pytest.mark.asyncio
 async def test_pr_description_uses_document_width_and_block_rhythm() -> None:
+    body = (ROOT / "tests/fixtures/pr_description_22546.md").read_text()
     store = PRStore()
     store.state.pr = PR(
         number=1,
         title="Improve description rendering",
-        body=(
-            "## Background\n\nOpening context for reviewers.\n\n"
-            "## Changes\n\n- First change\n  - Nested detail\n- Second change\n\n"
-            "1. Verify behavior\n2. Run tests"
-        ),
+        body=body,
         user=PRUser(login="alice"),
     )
 
@@ -224,42 +267,125 @@ async def test_pr_description_uses_document_width_and_block_rhythm() -> None:
             yield PRInfo(store)
 
     app = TestApp(css_path=ROOT / "src/rit/rit.tcss")
+    app.theme = "catppuccin-macchiato"
     async with app.run_test(size=(180, 40)) as pilot:
-        await wait_until(lambda: len(app.query("MarkdownList > Horizontal")) == 5)
+        await wait_until(lambda: len(app.query("MarkdownParagraph")) == 26)
         await pilot.pause()
 
         description = app.query_one("#pr-description-card")
+        description_body = description.query_one(".comment-content")
         main_content = app.query_one("#main-content")
-        paragraph = app.query_one("Markdown > MarkdownParagraph")
-        bullet_list = app.query_one("Markdown > MarkdownBulletList")
+        main_scroll = app.query_one("#main-scroll", VerticalScroll)
         header = description.query_one(".comment-header", Static)
+        paragraphs = list(description.query("MarkdownParagraph").results(Static))
+        headings = list(description.query("MarkdownH3").results(Static))
+        ordered = list(description.query("MarkdownOrderedList MarkdownParagraph"))
+        endpoint = next(p for p in paragraphs if "GET /api" in str(p.content))
+        korean = next(p for p in paragraphs if str(p.content).startswith("원인:"))
 
-        assert str(header.content) == "Description · alice"
+        assert str(header.content) == "Description \u00b7 alice"
         assert description.has_class("reading")
-        assert description.region.width == main_content.content_region.width
-        assert 120 <= description.content_region.width <= 128
+        assert description.query_one(Markdown).source == body.strip()
         assert description.styles.background.hex == "#1E2030"
         assert description.styles.border.top[0] == "solid"
+        assert description.styles.border.right == description.styles.border.top
+        assert description.styles.border.bottom == description.styles.border.top
         assert description.styles.border.left[0] == "solid"
-        assert description.styles.border.top == description.styles.border.right
         assert description.styles.border.left != description.styles.border.top
-        assert description.styles.padding.top == 1
-        assert description.styles.padding.left == description.styles.padding.right == 3
-        assert paragraph.styles.margin.bottom == 1
-        assert bullet_list.styles.margin.bottom == 0
-        for index, heading in enumerate(description.query("MarkdownHeader")):
+        assert description.styles.padding.top == description.styles.padding.bottom == 1
+        assert [str(heading.content) for heading in headings] == [
+            "배경 (Why)",
+            "변경 내용 (What)",
+            "리뷰 포인트",
+            "참고 사항",
+        ]
+        for index, heading in enumerate(headings):
             assert heading.styles.margin.top == (0 if index == 0 else 2)
             assert heading.styles.margin.bottom == 1
-        for paragraph in description.query("MarkdownList MarkdownParagraph"):
+            assert heading.styles.text_style.bold
+        for paragraph in paragraphs:
             assert paragraph.styles.margin.bottom == 1
-        nested_item = description.query_one("MarkdownList MarkdownList > Horizontal")
-        assert nested_item.styles.margin.bottom == 0
+        for bullet_list in description.query("MarkdownList"):
+            assert bullet_list.styles.margin.bottom == 0
+        assert len(ordered) == 3
+        assert [
+            bullet.render_line(0).text.strip()
+            for bullet in description.query(
+                "MarkdownOrderedList > Horizontal > MarkdownBullet"
+            )
+        ] == ["1.", "2.", "3."]
 
-        for width in (80, 40):
+        for width in (240, 180, 120, 119, 100, 94, 93, 80, 60, 40, 30, 80, 180):
             await pilot.resize_terminal(width, 40)
             await pilot.pause()
-            assert description.region.right <= main_content.content_region.right
-            assert description.content_region.width > 0
+            assert description.region.x == main_content.content_region.x
+            assert description.region.right == main_content.content_region.right
+            side_padding = 3 if width >= 120 else 1
+            assert (
+                description.styles.padding.left
+                == description.styles.padding.right
+                == side_padding
+            )
+            assert description_body.content_region.width == min(
+                100, description.content_region.width
+            )
+            assert header.region.y == description.region.y + 2
+            assert header.region.x == description_body.region.x
+            if width >= 120:
+                comment_header = app.query_one("#comments-container .comment-header")
+                assert header.region.x == comment_header.region.x
+            assert description_body.region.x == description.content_region.x
+            assert description_body.region.right <= description.content_region.right
+            assert main_scroll.max_scroll_x == 0
+            assert description.max_scroll_x == 0
+            assert korean.size.height > 1
+            assert (endpoint.size.height > 1) == (
+                cell_len(str(endpoint.content)) > endpoint.content_size.width
+            )
+
+            for paragraph in paragraphs:
+                lines = [
+                    paragraph.render_line(i).text for i in range(paragraph.size.height)
+                ]
+                assert "".join("".join(lines).split()) == "".join(
+                    str(paragraph.content).split()
+                )
+                assert all(
+                    cell_len(line) <= paragraph.content_size.width for line in lines
+                )
+                assert paragraph.region.right <= description_body.content_region.right
+                assert paragraph.region.bottom <= description_body.content_region.bottom
+                assert paragraph.max_scroll_x == 0
+
+            for row in description.query("MarkdownList > Horizontal"):
+                bullet = row.query_one("MarkdownBullet")
+                paragraph = row.query_one("MarkdownParagraph")
+                assert paragraph.region.x == bullet.region.right
+                assert paragraph.region.y == bullet.region.y
+            assert len({p.region.x for p in ordered}) == 1
+            nested_list = description.query_one("MarkdownOrderedList")
+            parent_item = nested_list.parent
+            assert parent_item is not None
+            parent_paragraph = parent_item.query_one("MarkdownParagraph")
+            assert nested_list.region.x == parent_paragraph.region.x
+            assert ordered[0].region.x == parent_paragraph.region.x + 4
+            assert nested_list.region.y == parent_paragraph.region.bottom + 1
+            for first, second in pairwise(ordered):
+                assert second.region.y == first.region.bottom + 1
+
+            app.query_one(PRInfo).document_scroll.scroll_to_widget(
+                endpoint, top=True, animate=False
+            )
+            await pilot.pause()
+            screen = app.screen._compositor.render_strips()
+            painted = [
+                screen[y].crop(endpoint.region.x, endpoint.region.right).text.rstrip()
+                for y in range(endpoint.region.y, endpoint.region.bottom)
+            ]
+            assert painted == [
+                endpoint.render_line(i).text.rstrip()
+                for i in range(endpoint.size.height)
+            ]
 
 
 def test_pr_info_mount_ignores_missing_scroll_widgets(

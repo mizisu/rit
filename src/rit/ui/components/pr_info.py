@@ -31,7 +31,7 @@ __all__ = ("PRInfo",)
 
 _CSS_PATH = Path(__file__).parent / "pr_info.tcss"
 _DEFAULT_CSS = _CSS_PATH.read_text() if _CSS_PATH.exists() else ""
-_COMPACT_LAYOUT_BREAKPOINT = 94
+_COMPACT_LAYOUT_BREAKPOINT = 120
 _EDIT_ICON = "\U000f03eb"
 
 
@@ -39,7 +39,7 @@ class PRInfo(Container):
     DEFAULT_CSS = _DEFAULT_CSS
 
     wide: var[bool] = var(False, toggle_class="-wide")
-    compact: var[bool] = var(False, toggle_class="-compact")
+    compact: var[bool] = var(False)
 
     @dataclass
     class ResolveToggled(Message):
@@ -58,6 +58,7 @@ class PRInfo(Container):
         self.store = store
         self._timeline: PRTimeline | None = None
         self._sidebar_focus: Widget | None = None
+        self._document_position_before_sidebar: float | None = None
         self._sidebar_widget: VerticalScroll | None = None
         self._title_widget: Static | None = None
         self._stats_widget: Static | None = None
@@ -75,7 +76,7 @@ class PRInfo(Container):
         self._reviewers_render_text: str | None = None
 
     def compose(self) -> ComposeResult:
-        with Horizontal(id="pr-info-layout"):
+        with VerticalScroll(id="pr-info-layout", can_focus=False):
             with (
                 VerticalScroll(id="main-scroll"),
                 Vertical(classes="main-content", id="main-content"),
@@ -130,9 +131,8 @@ class PRInfo(Container):
         self._update_layout_state()
 
         try:
-            main_scroll = self.query_one("#main-scroll", VerticalScroll)
             timeline = self._timeline_widget()
-            timeline.set_scroll_container(main_scroll)
+            timeline.set_scroll_container(self.document_scroll)
         except NoMatches:
             pass
 
@@ -148,6 +148,44 @@ class PRInfo(Container):
         width = self.size.width
         self.wide = width >= 120
         self.compact = width < _COMPACT_LAYOUT_BREAKPOINT
+
+    @property
+    def document_scroll(self) -> VerticalScroll:
+        """The document viewport, shared with metadata in compact mode."""
+        selector = "#pr-info-layout" if self.compact else "#main-scroll"
+        return self.query_one(selector, VerticalScroll)
+
+    @property
+    def active_scroll(self) -> VerticalScroll:
+        """The scroll owner for page navigation in the focused section."""
+        if not self.compact and self.sidebar_has_focus:
+            return self.query_one("#sidebar", VerticalScroll)
+        return self.document_scroll
+
+    def watch_compact(self, compact: bool) -> None:
+        if not self.is_mounted:
+            self.set_class(compact, "-compact")
+            return
+        previous = self.query_one(
+            "#main-scroll" if compact else "#pr-info-layout", VerticalScroll
+        )
+        position = previous.scroll_y
+        if (
+            not compact
+            and self.sidebar_has_focus
+            and self._document_position_before_sidebar is not None
+        ):
+            position = self._document_position_before_sidebar
+        self._document_position_before_sidebar = (
+            position if compact and self.sidebar_has_focus else None
+        )
+        scroll = self.document_scroll
+        self._timeline_widget().set_scroll_container(scroll)
+        self.set_class(compact, "-compact")
+        previous.scroll_to(y=0, animate=False, force=True)
+        self.call_after_refresh(scroll.scroll_to, y=position, animate=False)
+        if self.sidebar_has_focus and self.screen.focused is not None:
+            self.call_after_refresh(self.screen.focused.scroll_visible, animate=False)
 
     @on(Button.Pressed, "#edit-reviewers")
     def _request_edit_reviewers(self, event: Button.Pressed) -> None:
@@ -189,6 +227,11 @@ class PRInfo(Container):
             if self.sidebar_has_focus:
                 self._sidebar_focus = self.screen.focused
             main.focus(scroll_visible=False)
+            if self.compact and self._document_position_before_sidebar is not None:
+                self.document_scroll.scroll_to(
+                    y=self._document_position_before_sidebar, animate=False
+                )
+                self._document_position_before_sidebar = None
             return True
         if self.sidebar_has_focus:
             return False
@@ -196,7 +239,9 @@ class PRInfo(Container):
         if not controls:
             return False
         target = self._sidebar_focus if self._sidebar_focus in controls else controls[0]
-        target.focus(scroll_visible=False)
+        if self.compact:
+            self._document_position_before_sidebar = self.document_scroll.scroll_y
+        target.focus(scroll_visible=self.compact)
         return True
 
     def _sidebar_controls(self) -> list[Widget]:

@@ -314,6 +314,10 @@ class MarkdownImageBlock(Vertical):
         background: #181926;
     }
 
+    MarkdownImageBlock.markdown-image-responsive {
+        width: 1fr;
+    }
+
     MarkdownImageBlock.markdown-image-compact {
         margin: 0;
         border: none;
@@ -345,6 +349,7 @@ class MarkdownImageBlock(Vertical):
         image: MarkdownImageRef,
         *,
         compact: bool = False,
+        responsive: bool = False,
         fetcher: ImageFetcher | None = None,
         on_preview_width: Callable[[int], None] | None = None,
         available_width: AvailableWidthProvider | None = None,
@@ -353,6 +358,8 @@ class MarkdownImageBlock(Vertical):
         super().__init__(classes=classes)
         self.image = image
         self.compact = compact
+        self._responsive = responsive
+        self.set_class(responsive, "markdown-image-responsive")
         self._fetcher = fetcher
         self._on_preview_width = on_preview_width
         self._available_width = available_width
@@ -371,6 +378,14 @@ class MarkdownImageBlock(Vertical):
 
     def on_mount(self) -> None:
         self.call_after_refresh(self.load_image)
+
+    def on_resize(self) -> None:
+        if self._responsive and self._loaded:
+            self.call_after_refresh(self._resize_preview)
+
+    def _resize_preview(self) -> None:
+        if self._pil_image is not None and self.is_mounted:
+            self._size_image_widget(self.query_one(TerminalImage), self._pil_image)
 
     def on_click(self, event: events.Click) -> None:
         event.stop()
@@ -467,6 +482,8 @@ class MarkdownImageBlock(Vertical):
         return target_width
 
     def _available_image_width(self) -> int:
+        if self._responsive:
+            return max(1, self._body.content_size.width)
         if self._available_width is not None:
             provided_width = self._available_width()
             if provided_width is not None and provided_width > 0:
@@ -478,6 +495,8 @@ class MarkdownImageBlock(Vertical):
         )
 
     def _size_block_to_preview(self, preview_width: int) -> None:
+        if self._responsive:
+            return
         body_width = preview_width
         if not self.compact:
             body_width += IMAGE_BLOCK_HORIZONTAL_PADDING_CELLS
@@ -511,6 +530,12 @@ class MarkdownImageTable(Vertical):
         layout: horizontal;
         width: auto;
         height: auto;
+    }
+
+    MarkdownImageTable.markdown-image-responsive,
+    MarkdownImageTable.markdown-image-responsive .markdown-image-table-row,
+    MarkdownImageTable.markdown-image-responsive .markdown-image-table-image-cell {
+        width: 1fr;
     }
 
     MarkdownImageTable .markdown-image-table-data-row {
@@ -550,14 +575,18 @@ class MarkdownImageTable(Vertical):
         self,
         table: MarkdownImageTableData,
         *,
+        responsive: bool = False,
         fetcher: ImageFetcher | None = None,
     ) -> None:
         super().__init__(classes="markdown-image-table")
+        self._responsive = responsive
+        self.set_class(responsive, "markdown-image-responsive")
         self.table = table
         self._fetcher = fetcher
         self._image_columns = self._collect_image_columns()
         self._image_column_widths = dict.fromkeys(self._image_columns, 1)
-        self.styles.width = self._table_width()
+        if not responsive:
+            self.styles.width = self._table_width()
 
     def compose(self) -> ComposeResult:
         for row_index, row in enumerate(self.table.rows):
@@ -573,6 +602,7 @@ class MarkdownImageTable(Vertical):
                             yield MarkdownImageBlock(
                                 cell.image,
                                 compact=True,
+                                responsive=self._responsive,
                                 fetcher=self._fetcher,
                                 on_preview_width=lambda width, index=index: (
                                     self._set_image_column_width(index, width)
@@ -605,7 +635,7 @@ class MarkdownImageTable(Vertical):
         return " ".join(classes)
 
     def _set_image_column_width(self, index: int, width: int) -> None:
-        if index not in self._image_columns:
+        if self._responsive or index not in self._image_columns:
             return
         current_width = self._image_column_widths.get(index, 1)
         if width <= current_width:
@@ -730,13 +760,22 @@ def mount_markdown_image_parts(
     *,
     base_url: str | None = None,
     image_fetcher: ImageFetcher | None = None,
+    responsive_images: bool = False,
 ) -> None:
     """Mount markdown text and inline image widgets."""
     for part in parse_markdown_image_parts(body, base_url=base_url):
         if part.table:
-            container.mount(MarkdownImageTable(part.table, fetcher=image_fetcher))
+            container.mount(
+                MarkdownImageTable(
+                    part.table, fetcher=image_fetcher, responsive=responsive_images
+                )
+            )
         elif part.image:
-            container.mount(MarkdownImageBlock(part.image, fetcher=image_fetcher))
+            container.mount(
+                MarkdownImageBlock(
+                    part.image, fetcher=image_fetcher, responsive=responsive_images
+                )
+            )
         elif part.content:
             container.mount(
                 GitHubMarkdown(part.content, parser_factory=github_markdown_parser)
