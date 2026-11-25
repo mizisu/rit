@@ -171,7 +171,8 @@ async def _highlight_diff_async(
 
 
 def _should_use_windowed_highlight_strategy(view) -> bool:
-    return _blocks._should_use_block_renderer(view)
+    # Preview hunks are navigation boundaries, not independent source fragments.
+    return not view._showing_full_file and _blocks._should_use_block_renderer(view)
 
 
 def _use_windowed_highlight_strategy(view, diff: FileDiff | None = None) -> bool:

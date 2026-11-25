@@ -1185,6 +1185,33 @@ class TestDiffHighlighting:
 
         self._assert_combined_python_class_highlighted(combined)
 
+    def test_missing_lines_between_hunks_do_not_join_python_strings(self):
+        patch = '''@@ -1,2 +1,2 @@
+-def old_name():
++def earlier():
+     """
+@@ -30,7 +30,7 @@
+ def scores():
+     """
+     그룹을 정렬한다.
+     """
+     if enabled:
+-        return "yes"
++        return "ok"
+     return ""
+'''
+        diff = parse_patch(patch, "scores.py")
+        highlight_lines_for_diff(diff)
+
+        for content in ("highlighted_old_content", "highlighted_new_content"):
+            lines = diff.hunks[1].lines
+            assert self._style_for_fragment(getattr(lines[2], content), "그룹") == (
+                "#a6da95 not italic"
+            )
+            assert self._style_for_fragment(getattr(lines[4], content), "if") == (
+                "#c6a0f6 not italic"
+            )
+
     def test_word_diff_highlights_use_subtle_backgrounds(self):
         """Inline word-diff marks should not overpower syntax colors."""
         content = apply_word_diff_spans(

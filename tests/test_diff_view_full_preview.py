@@ -89,6 +89,40 @@ async def test_full_file_preview_renders_source_change_markers_only() -> None:
 
 
 @pytest.mark.asyncio
+async def test_full_file_preview_highlights_docstring_across_change_boundary() -> None:
+    source = '''def scores():
+    """
+    그룹을 정렬한다.
+    """
+    if enabled:
+        return "ok"
+    return ""'''
+    diff = parse_patch(
+        "@@ -3 +3 @@\n-    이전 설명\n+    그룹을 정렬한다.", "scores.py"
+    )
+
+    class TestApp(App):
+        def compose(self) -> ComposeResult:
+            yield DiffView(mode="unified")
+
+    app = TestApp()
+    async with app.run_test():
+        view = app.query_one(DiffView)
+        view.BLOCK_RENDER_LINE_THRESHOLD = 1
+        await view.show_diff(diff.filename, diff)
+        await view.show_full_file_preview(diff.filename, source, source_diff=diff)
+        line = view._all_lines[4]
+        await wait_until(lambda: line.highlighted_new_content is not None)
+        code = line.highlighted_new_content
+        assert code is not None
+        assert any(
+            code.plain[span.start : span.end] == "if"
+            and str(span.style) == "#c6a0f6 not italic"
+            for span in code.spans
+        )
+
+
+@pytest.mark.asyncio
 async def test_full_file_preview_uses_file_header_without_docked_header() -> None:
     patch = """@@ -2,2 +2,2 @@
  line 2

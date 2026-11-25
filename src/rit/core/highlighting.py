@@ -59,10 +59,14 @@ class _DiffLineWindow(Sequence[DiffLine]):
         return self._lines[self._start + index]
 
 
-def _iter_diff_line_file_groups(diff: FileDiff) -> Iterable[tuple[str, list[DiffLine]]]:
+def _iter_contiguous_source_groups(
+    diff: FileDiff,
+) -> Iterable[tuple[str, list[DiffLine]]]:
     active_filename = diff.filename
     current_filename: str | None = None
     current_lines: list[DiffLine] = []
+    last_old: int | None = None
+    last_new: int | None = None
 
     for hunk in diff.hunks:
         if hunk.file_path:
@@ -71,12 +75,22 @@ def _iter_diff_line_file_groups(diff: FileDiff) -> Iterable[tuple[str, list[Diff
 
         for line in hunk.lines:
             filename = line.file_path or hunk_filename
-            if current_filename is not None and filename != current_filename:
+            old, new = line.old_line_no, line.new_line_no
+            if current_filename is not None and (
+                filename != current_filename
+                or (old is not None and last_old is not None and old != last_old + 1)
+                or (new is not None and last_new is not None and new != last_new + 1)
+            ):
                 yield current_filename, current_lines
                 current_lines = []
+                last_old = last_new = None
 
             current_filename = filename
             current_lines.append(line)
+            if old is not None:
+                last_old = old
+            if new is not None:
+                last_new = new
 
     if current_filename is not None and current_lines:
         yield current_filename, current_lines
@@ -330,7 +344,7 @@ def highlight_lines_for_diff(
     dark_mode: bool = True,
 ) -> None:
     """Apply syntax highlighting to all lines in a FileDiff in-place."""
-    for filename, lines in _iter_diff_line_file_groups(diff):
+    for filename, lines in _iter_contiguous_source_groups(diff):
         old_lines_text, new_lines_text = _collect_line_text(lines)
         old_lines, new_lines = _highlight_text_lines(
             filename=filename,
@@ -401,7 +415,9 @@ def _apply_word_diff_to_content(
                 Span(
                     start,
                     end,
-                    WORD_DIFF_ADDED_STYLE if kind == "added" else WORD_DIFF_DELETED_STYLE,
+                    WORD_DIFF_ADDED_STYLE
+                    if kind == "added"
+                    else WORD_DIFF_DELETED_STYLE,
                 )
                 for start, end, kind in segments
             ]
