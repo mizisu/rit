@@ -79,6 +79,23 @@ class PRMergeSnapshot(BaseModel):
     merge_state: str = Field(alias="mergeStateStatus")
     review_decision: str | None = Field(alias="reviewDecision")
     queued: bool = Field(alias="isInMergeQueue")
+    merge_allowed: bool = Field(
+        default=False, validation_alias=AliasPath("repository", "mergeCommitAllowed")
+    )
+    squash_allowed: bool = Field(
+        default=False, validation_alias=AliasPath("repository", "squashMergeAllowed")
+    )
+
+    @property
+    def methods(self) -> tuple[PRAction, ...]:
+        return tuple(
+            method
+            for method, allowed in (
+                (PRAction.MERGE, self.merge_allowed),
+                (PRAction.SQUASH, self.squash_allowed),
+            )
+            if allowed
+        )
 
     @property
     def summary(self) -> tuple[str, tuple[str, ...]]:

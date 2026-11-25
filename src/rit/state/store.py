@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Literal
 
 from textual.message import Message
