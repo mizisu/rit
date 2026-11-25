@@ -81,7 +81,14 @@ from rit.state.pending_review_workspace import PendingReviewWorkspace
 from rit.state.pr_list import PRListSnapshot
 from rit.state.pr_management import plan_assignee_selection, plan_reviewer_selection
 from rit.state.pr_merge import merge_pr_discussion, merge_pr_summary
-from rit.state.pr_overview import PRChecksSnapshot, PRFilesSnapshot, PRMergeSnapshot
+from rit.state.pr_overview import (
+    FilePatchPreview,
+    PRAction,
+    PRChecksSnapshot,
+    PRFileMetadata,
+    PRFilesSnapshot,
+    PRMergeSnapshot,
+)
 from rit.state.review_annotations import ReviewAnnotationIndex
 from rit.state.review_scope import ReviewHistory, ReviewScope
 
@@ -138,6 +145,7 @@ class PRListStore:
 class PRStoreState:
     pr_loading: LoadingState = LoadingState.IDLE
     files_loading: LoadingState = LoadingState.IDLE
+    pr_action_pending: bool = False
     merge_status: OverviewResource[tuple[str, str], PRMergeSnapshot] = field(
         default_factory=OverviewResource[tuple[str, str], PRMergeSnapshot]
     )
@@ -339,6 +347,66 @@ class PRStore:
             on_change=self._post_overview_update,
             refresh=refresh,
         )
+
+    @property
+    def current_merge_status(self) -> PRMergeSnapshot | None:
+        snapshot = self._state.merge_status.loaded_value
+        if snapshot and (snapshot.base_sha, snapshot.head_sha) == self._overview_refs():
+            return snapshot
+        return None
+
+    def can_apply_pr_action(self, action: PRAction) -> bool:
+        pr = self._state.pr
+        snapshot = self.current_merge_status
+        if (
+            not pr
+            or not pr.node_id
+            or pr.state != "OPEN"
+            or self._state.pr_action_pending
+            or (snapshot and snapshot.state != "OPEN")
+        ):
+            return False
+        if action is PRAction.CLOSE:
+            return True
+        return bool(
+            snapshot
+            and not pr.is_draft
+            and snapshot.summary[0] == "Ready"
+            and action in snapshot.methods
+        )
+
+    async def apply_pr_action(self, reviewed: PR, action: PRAction) -> None:
+        """Use the PR identity and head that were shown at confirmation."""
+        pr = self._state.pr
+        if (
+            not self.can_apply_pr_action(action)
+            or not pr
+            or pr.node_id != reviewed.node_id
+            or (
+                action is not PRAction.CLOSE
+                and (
+                    reviewed.head_sha != pr.head_sha
+                    or reviewed.base_ref != pr.base_ref
+                    or reviewed.base_sha != pr.base_sha
+                )
+            )
+        ):
+            raise GitHubError(
+                "PR changed or action unavailable; refresh and review it again"
+            )
+        self._state.pr_action_pending = True
+        self._post_overview_update()
+        try:
+            state = await self._service.apply_pr_action(
+                reviewed.node_id, action, head_sha=reviewed.head_sha
+            )
+            current = self._state.pr
+            if current and current.node_id == reviewed.node_id:
+                self._state.pr = current.model_copy(update={"state": state})
+                self._post_message(self.PRLoaded(pr=self._state.pr))
+        finally:
+            self._state.pr_action_pending = False
+            self._post_overview_update()
 
     async def load_pr_checks(self, *, refresh: bool = False) -> None:
         """Refresh live checks independently of the diff workspace."""

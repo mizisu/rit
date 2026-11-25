@@ -14,6 +14,7 @@ from textual.worker import Worker, WorkerState
 
 from rit.app import RitApp
 from rit.state.models import (
+    PR,
     FileViewedState,
     LoadingState,
     PendingReviewComment,
@@ -21,6 +22,7 @@ from rit.state.models import (
     PRTeam,
     PRUser,
 )
+from rit.state.pr_overview import PRAction
 from rit.state.review_scope import ReviewScope
 from rit.state.store import GitHubError, PRStore, UnsupportedInlineCommentTarget
 from rit.ui.components.file_changes import FileChanges
@@ -35,6 +37,7 @@ from rit.ui.screens.multi_select_picker import (
     MultiSelectPickerScreen,
     MultiSelectResult,
 )
+from rit.ui.screens.pr_action import PRActionScreen
 from rit.ui.screens.review_submit import ReviewSubmitScreen
 from rit.ui.widgets import DiffView, Header
 from rit.ui.widgets.branch_info import BranchInfo
@@ -453,6 +456,37 @@ class MainScreen(Screen[None]):
     async def _reload_merge_status(self) -> None:
         await self.store.load_pr_summary()
         await self.store.load_pr_merge_status(refresh=True)
+
+    @on(Button.Pressed, ".pr-action")
+    def _confirm_pr_action(self, event: Button.Pressed) -> None:
+        event.stop()
+        action = PRAction(event.button.name)
+        pr = self.store.state.pr
+        if (
+            not pr
+            or not self.store.can_apply_pr_action(action)
+            or self.app.screen is not self
+        ):
+            return
+        reviewed = pr.model_copy()
+
+        def confirmed(result: bool | None) -> None:
+            if result:
+                self.run_worker(
+                    self._apply_pr_action(reviewed, action), name="pr-action"
+                )
+
+        self.app.push_screen(PRActionScreen(reviewed, action), confirmed)
+
+    async def _apply_pr_action(self, reviewed: PR, action: PRAction) -> None:
+        try:
+            await self.store.apply_pr_action(reviewed, action)
+        except GitHubError as error:
+            self.notify(str(error), severity="error", markup=False)
+            return
+        self.app.refresh_pr_list()
+        verb = "closed" if action is PRAction.CLOSE else "merged"
+        self.post_message(Flash(f"PR #{reviewed.number} {verb}", style="success"))
 
     @on(Button.Pressed, "#refresh-checks")
     def _refresh_checks(self, event: Button.Pressed) -> None:

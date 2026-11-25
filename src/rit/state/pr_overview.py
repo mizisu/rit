@@ -1,10 +1,12 @@
 """Lightweight PR overview snapshots, separate from the diff workspace."""
 
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasPath, BaseModel, ConfigDict, Field
 
 from rit.state.models import PRFile
 
@@ -47,6 +49,20 @@ class PRChecksSnapshot:
         if "cancelled" in outcomes:
             return "cancelled"
         return "success" if "success" in outcomes else "neutral"
+
+
+class PRAction(StrEnum):
+    MERGE = "MERGE"
+    SQUASH = "SQUASH"
+    CLOSE = "CLOSE"
+
+    @property
+    def label(self) -> str:
+        return {
+            PRAction.MERGE: "Create merge commit",
+            PRAction.SQUASH: "Squash and merge",
+            PRAction.CLOSE: "Close PR",
+        }[self]
 
 
 class PRMergeSnapshot(BaseModel):

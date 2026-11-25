@@ -116,7 +116,13 @@ from rit.state.models import (
     PRUser,
 )
 from rit.state.pr_list import PRListSnapshot
-from rit.state.pr_overview import PRChecksSnapshot, PRFileMetadata, PRMergeSnapshot
+from rit.state.pr_overview import (
+    FilePatchPreview,
+    PRAction,
+    PRChecksSnapshot,
+    PRFileMetadata,
+    PRMergeSnapshot,
+)
 from rit.state.review_scope import ReviewHistory, ReviewScope
 
 __all__ = (
@@ -284,6 +290,44 @@ class GitHubService:
             return await fetch_pr_merge_status(
                 repo.owner, repo.name, pr_number, runner=self._run_gh
             )
+
+    async def apply_pr_action(
+        self, node_id: str, action: PRAction, *, head_sha: str
+    ) -> str:
+        """Close or merge a PR and verify GitHub confirmed the requested state."""
+        if not node_id:
+            raise GitHubError("Missing pull request ID")
+        payload = {"pullRequestId": node_id}
+        if action is PRAction.CLOSE:
+            mutation, input_type, expected = (
+                "closePullRequest",
+                "ClosePullRequestInput",
+                "CLOSED",
+            )
+        elif action in (PRAction.MERGE, PRAction.SQUASH) and head_sha:
+            mutation, input_type, expected = (
+                "mergePullRequest",
+                "MergePullRequestInput",
+                "MERGED",
+            )
+            payload.update(mergeMethod=action.value, expectedHeadOid=head_sha)
+        else:
+            raise GitHubError("Missing merge method or reviewed commit")
+        with translate_pull_request_graphql_errors():
+            result = await run_graphql(
+                f"""mutation($input: {input_type}!) {{
+                  {mutation}(input: $input) {{ pullRequest {{ id state }} }}
+                }}""",
+                {"input": payload},
+                runner=self._run_gh,
+            )
+            response = mapping(mapping(result.get("data")).get(mutation))
+            pr = mapping(response.get("pullRequest"))
+            if pr.get("id") != node_id or pr.get("state") != expected:
+                raise GitHubError(
+                    "PR state not confirmed by GitHub; refresh before retrying"
+                )
+            return expected
 
     async def get_pr_file_metadata(
         self,

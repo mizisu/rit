@@ -65,6 +65,20 @@ PRInfo .sidebar Button {
     tint: transparent;
 }
 
+PRInfo .pr-action {
+    width: auto;
+    min-width: 0;
+    content-align: left middle;
+}
+
+PRInfo #apply-merge {
+    margin-top: 1;
+}
+
+PRInfo #close-pr {
+    color: $error;
+}
+
 PRInfo #sidebar-metadata {
     height: auto;
 }

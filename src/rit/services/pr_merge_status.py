@@ -10,6 +10,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
       baseRefOid headRefOid baseRefName
+      repository { mergeCommitAllowed squashMergeAllowed }
       state isDraft mergeable mergeStateStatus reviewDecision isInMergeQueue
     }
   }

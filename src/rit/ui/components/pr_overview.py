@@ -20,6 +20,7 @@ from rit.state.models import LoadingState, PRFile
 from rit.state.pr_overview import (
     CheckOutcome,
     FileChangeGroup,
+    PRAction,
     PRCheck,
     PRChecksSnapshot,
 )
@@ -145,21 +146,35 @@ class PRMerge(Vertical):
                 flat=True,
             )
         yield Static("Checking...", id="pr-merge-status", markup=False)
+        for button_id, action in (
+            ("apply-merge", PRAction.MERGE),
+            ("apply-squash", PRAction.SQUASH),
+            ("close-pr", PRAction.CLOSE),
+        ):
+            yield Button(
+                f"{action.label}…",
+                id=button_id,
+                name=action,
+                classes="pr-action",
+                compact=True,
+                flat=action is PRAction.CLOSE,
+                disabled=True,
+            )
 
     def refresh_data(self) -> None:
         pr = self.store.state.pr
         resource = self.store.state.merge_status
-        snapshot = resource.loaded_value
-        if snapshot is not None and (
-            pr is None
-            or (snapshot.base_sha, snapshot.head_sha) != (pr.base_sha, pr.head_sha)
-        ):
-            snapshot = None
+        snapshot = self.store.current_merge_status
         self.display = not (
             (pr is not None and pr.state in {"MERGED", "CLOSED"})
             or (snapshot is not None and snapshot.state in {"MERGED", "CLOSED"})
         )
-        self.query_one(Button).disabled = resource.loading == LoadingState.LOADING
+        busy = self.store.state.pr_action_pending
+        self.query_one("#refresh-merge", Button).disabled = (
+            busy or resource.loading == LoadingState.LOADING
+        )
+        for button in self.query(".pr-action").results(Button):
+            button.disabled = not self.store.can_apply_pr_action(PRAction(button.name))
         status = self.query_one("#pr-merge-status", Static)
         status.tooltip = _line(resource.error) if resource.error else None
         if not self.display:
@@ -183,6 +198,10 @@ class PRMerge(Vertical):
         content = Content.assemble((f"{icon} {label}", color))
         for reason in reasons:
             content += Content("\n  ") + _line(reason)
+        if snapshot and label == "Ready" and not snapshot.methods:
+            content += Content("\n  Neither merge method is enabled")
+        if busy:
+            content += Content("\n  Request in progress…")
         status.update(content)
 
 

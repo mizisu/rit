@@ -3,7 +3,7 @@
 import asyncio
 import json
 from typing import cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from textual.widgets import Button, Static
@@ -11,7 +11,7 @@ from textual.widgets import Button, Static
 from rit.app import RitApp
 from rit.services.github import GitHubError, GitHubService
 from rit.state.models import PR, LoadingState
-from rit.state.pr_overview import PRMergeSnapshot
+from rit.state.pr_overview import PRAction, PRMergeSnapshot
 from rit.state.store import PRStore
 from rit.ui.components.pr_overview import PRMerge
 from rit.ui.screens.main import MainScreen
@@ -27,6 +27,7 @@ _MERGE_DATA = {
     "mergeStateStatus": "CLEAN",
     "reviewDecision": None,
     "isInMergeQueue": False,
+    "repository": {"mergeCommitAllowed": True, "squashMergeAllowed": True},
 }
 
 
@@ -83,6 +84,10 @@ async def test_merge_api_validates_data_and_keeps_failures_out_of_ready(
         assert input_text is not None
         request = json.loads(input_text)
         assert request["variables"] == {"owner": "owner", "repo": "repo", "number": 1}
+        assert (
+            "mergeCommitAllowed" in request["query"]
+            and "squashMergeAllowed" in request["query"]
+        )
         for field in _MERGE_DATA:
             assert field in request["query"]
         return json.dumps(response)
@@ -189,7 +194,8 @@ async def test_merge_sidebar_refresh_reasons_and_terminal_states(
         await pilot.pause()
         assert "Ready" in str(status.content)
         assert section.region.bottom <= screen.query_one("#pr-checks-section").region.y
-        assert len(section.query(Button)) == 1
+        assert section.query_one("#apply-merge", Button).disabled
+        assert section.query_one("#close-pr", Button).disabled
         assert not screen.query("#pr-status")
         store.state.pr.head_sha = "new-head"
         screen.pr_info.refresh_overview()
@@ -229,7 +235,8 @@ async def test_merge_sidebar_refresh_reasons_and_terminal_states(
             assert status.region.width <= section.content_region.width
             assert status.size.height >= 4
         monkeypatch.setattr(
-            store._service, "get_pr_merge_status",
+            store._service,
+            "get_pr_merge_status",
             AsyncMock(return_value=PRMergeSnapshot.model_validate(_MERGE_DATA)),
         )
         store._post_message(store.ThreadResolved("thread", 1, True))
@@ -245,3 +252,135 @@ async def test_merge_sidebar_refresh_reasons_and_terminal_states(
             store.state.pr.state = state
             screen.pr_info.refresh_summary()
             assert section.display == (state == "OPEN")
+
+
+@pytest.mark.parametrize("action", list(PRAction))
+async def test_pr_mutation_requires_confirmed_target_state(
+    action: PRAction, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    service = GitHubService()
+    close = action is PRAction.CLOSE
+    name = "closePullRequest" if close else "mergePullRequest"
+    state = "CLOSED" if close else "MERGED"
+    result = {"data": {name: {"pullRequest": {"id": "pr-id", "state": state}}}}
+    runner = AsyncMock(return_value=json.dumps(result))
+    monkeypatch.setattr(service, "_run_gh", runner)
+    assert await service.apply_pr_action("pr-id", action, head_sha="head") == state
+    call = runner.await_args_list[0]
+    assert call.args == (["api", "graphql", "--input", "-"],)
+    request = json.loads(call.kwargs["input_text"])
+    payload = {"pullRequestId": "pr-id"}
+    if not close:
+        payload.update(mergeMethod=action.value, expectedHeadOid="head")
+    assert name in request["query"] and request["variables"] == {"input": payload}
+    for invalid in (
+        {"errors": [{"message": "Not permitted"}]},
+        {"data": {name: {"pullRequest": {"id": "wrong", "state": state}}}},
+        {"data": {name: {"pullRequest": {"id": "pr-id", "state": "OPEN"}}}},
+    ):
+        runner.return_value = json.dumps(invalid)
+        with pytest.raises(GitHubError):
+            await service.apply_pr_action("pr-id", action, head_sha="head")
+
+
+async def test_action_guards_and_failure_leave_pr_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = PRStore(pr_number=1)
+    pr = PR(number=1, node_id="id", base_sha="base", head_sha="head")
+    store.state.pr = pr
+    resource = store.state.merge_status
+    resource.loading = LoadingState.LOADED
+    resource.value = PRMergeSnapshot.model_validate(
+        _MERGE_DATA | {"repository": {"squashMergeAllowed": True}}
+    )
+    write = AsyncMock(side_effect=GitHubError("Not permitted"))
+    monkeypatch.setattr(store._service, "apply_pr_action", write)
+    assert store.can_apply_pr_action(PRAction.SQUASH)
+    assert not store.can_apply_pr_action(PRAction.MERGE)
+    with pytest.raises(GitHubError, match="refresh"):
+        await store.apply_pr_action(
+            pr.model_copy(update={"head_sha": "old"}), PRAction.SQUASH
+        )
+    resource.value = resource.value.model_copy(update={"is_draft": True})
+    with pytest.raises(GitHubError, match="unavailable"):
+        await store.apply_pr_action(pr, PRAction.SQUASH)
+    write.assert_not_awaited()
+    assert store.can_apply_pr_action(PRAction.CLOSE)
+    with pytest.raises(GitHubError, match="Not permitted"):
+        await store.apply_pr_action(pr, PRAction.CLOSE)
+    assert store.state.pr.state == "OPEN" and not store.state.pr_action_pending
+    write.side_effect = None
+    write.return_value = "CLOSED"
+    await store.apply_pr_action(pr, PRAction.CLOSE)
+    assert store.state.pr.state == "CLOSED" and not store.can_apply_pr_action(
+        PRAction.CLOSE
+    )
+
+
+async def test_sidebar_actions_require_explicit_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(PRStore, "load_overview", AsyncMock())
+    monkeypatch.setattr(PRStore, "check_for_updates", AsyncMock())
+    app = RitApp(owner="owner", repo="repo", pr_number=1)
+    refresh = Mock()
+    monkeypatch.setattr(app, "refresh_pr_list", refresh)
+    async with app.run_test(size=(150, 40)) as pilot:
+        screen = cast(MainScreen, app.screen)
+        store = screen.store
+        pr = PR(
+            number=1,
+            node_id="id",
+            head_sha="head",
+            base_sha="base",
+            head_ref="feature",
+            base_ref="main",
+        )
+        store.state.pr = pr
+        screen._pr_overview_refs = ("base", "head")
+        store.state.merge_status.value = PRMergeSnapshot.model_validate(_MERGE_DATA)
+        store.state.merge_status.loading = LoadingState.LOADED
+        screen.pr_info.refresh_pr_data()
+        release = asyncio.Event()
+
+        async def apply(node_id: str, action: PRAction, *, head_sha: str) -> str:
+            assert (node_id, action, head_sha) == ("id", PRAction.SQUASH, "head")
+            await release.wait()
+            return "MERGED"
+
+        write = AsyncMock(side_effect=apply)
+        monkeypatch.setattr(store._service, "apply_pr_action", write)
+        screen.query_one("#close-pr", Button).press()
+        await wait_until(lambda: app.focused and app.focused.id == "pr-action-cancel")
+        await pilot.press("enter")
+        await wait_until(lambda: app.screen is screen)
+        await pilot.click("#apply-merge")
+        await wait_until(lambda: app.focused and app.focused.id == "pr-action-cancel")
+        assert (
+            str(app.screen.query_one("#pr-action-confirm", Button).label)
+            == PRAction.MERGE.label
+        )
+        await pilot.press("escape")
+        await wait_until(lambda: app.screen is screen)
+        write.assert_not_awaited()
+        merge = screen.query_one("#apply-squash", Button)
+        merge.focus()
+        await pilot.press("enter")
+        await wait_until(lambda: app.focused and app.focused.id == "pr-action-cancel")
+        assert (
+            str(app.screen.query_one("#pr-action-confirm", Button).label)
+            == PRAction.SQUASH.label
+        )
+        write.assert_not_awaited()
+        await pilot.press("tab", "enter")
+        await wait_until(lambda: store.state.pr_action_pending and merge.disabled)
+        assert screen.query_one("#close-pr", Button).disabled
+        with pytest.raises(GitHubError):
+            await store.apply_pr_action(pr, PRAction.CLOSE)
+        assert pr.state == "OPEN"
+        release.set()
+        await wait_until(lambda: screen.header.pr_status == "Merged")
+        assert not screen.query_one(PRMerge).display
+        write.assert_awaited_once()
+        refresh.assert_called_once()
