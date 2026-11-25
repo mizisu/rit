@@ -534,6 +534,10 @@ class MainScreen(Screen[None]):
                 self._restore_all_changes(event.filename), name="restore-all-changes"
             )
             return
+        preview = self.store.state.preview_file
+        if preview is not None and preview.filename != event.filename:
+            self.file_changes.reset_workspace()
+            self.file_changes.refresh_revision_status()
         self._pending_overview_file = (event.filename, refs)
         self.store.state.selected_file = event.filename
         self.switch_tab(1)
@@ -590,6 +594,23 @@ class MainScreen(Screen[None]):
         self.pr_info.refresh_pr_data()
         self.pr_info.refresh_comments()
 
+    @on(PRStore.FilePreviewReady)
+    def on_file_preview_ready(self, event: PRStore.FilePreviewReady) -> None:
+        state = self.store.state
+        pr = state.pr
+        if (
+            self.current_tab != 1
+            or pr is None
+            or event.refs != (pr.base_sha, pr.head_sha)
+            or state.scope.kind != "all"
+            or state.files_loading != LoadingState.LOADING
+            or state.selected_file not in (None, event.file.filename)
+        ):
+            return
+        self.file_changes.show_loading_preview(event.file)
+        if self._pending_overview_file == (event.file.filename, event.refs):
+            self._pending_overview_file = None
+
     @on(PRStore.FilesLoaded)
     def on_files_loaded(self, _event: PRStore.FilesLoaded) -> None:
         self.file_changes.refresh_files()
@@ -598,6 +619,9 @@ class MainScreen(Screen[None]):
     @on(PRStore.ErrorOccurred)
     def on_store_error(self, event: PRStore.ErrorOccurred) -> None:
         if event.source == "load_files":
+            if self.store.state.preview_file is not None:
+                self.file_changes.reset_workspace()
+                self.file_changes.refresh_scope()
             self._pending_overview_file = None
             self._files_load_requested = False
         self.notify(event.error, title="Error", severity="error", markup=False)
@@ -1286,6 +1310,8 @@ class MainScreen(Screen[None]):
         return await self.pr_info.toggle_resolve()
 
     async def _refresh_current_diff_after_discussion(self) -> None:
+        if self.store.state.preview_file is not None:
+            return
         diff_view = self.file_changes.diff_view
         current_file = diff_view.current_file
         if current_file is None:

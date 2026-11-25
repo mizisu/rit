@@ -146,6 +146,22 @@ def test_combined_diff_document_adds_placeholder_for_files_without_textual_chang
     assert document.line_index_for_location("image.png", 1, "RIGHT") is None
 
 
+def test_omitted_patch_has_notice_and_no_reviewable_lines() -> None:
+    file = PRFile(
+        filename="lock.yaml", additions=1, deletions=2, patch_unavailable=True
+    )
+    document = build_combined_diff_document(
+        [file], {file.filename: FileDiff(filename=file.filename, hunks=[])}
+    )
+
+    assert document is not None
+    hunk = document.diff.hunks[0]
+    assert hunk.lines[0].new_content == "Patch omitted by GitHub"
+    assert (hunk.file_additions, hunk.file_deletions) == (1, 2)
+    assert hunk.lines[0].old_line_no is None and hunk.lines[0].new_line_no is None
+    assert not document.line_lookup
+
+
 def test_combined_diff_document_returns_none_until_every_diff_is_loaded() -> None:
     patch = "@@ -1,1 +1,1 @@\n-old\n+new"
     files = [

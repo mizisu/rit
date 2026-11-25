@@ -175,6 +175,7 @@ class PRStoreState:
     file_contents: dict[tuple[str, str], str] = field(default_factory=dict)
 
     selected_file: str | None = None
+    preview_file: PRFile | None = None
     files_loaded_count: int = 0
     files_total_count: int = 0
 
@@ -206,6 +207,11 @@ class PRStore:
         files: list[PRFile]
         loaded_count: int = 0
         total_count: int = 0
+
+    @dataclass
+    class FilePreviewReady(Message):
+        file: PRFile
+        refs: tuple[str, str]
 
     class RevisionUpdated(Message):
         """Remote observation or manual refresh status changed."""
@@ -289,9 +295,22 @@ class PRStore:
             self._message_sink(message)
 
     async def load_overview(self) -> None:
-        """Load PR summary and discussion without fetching file patches."""
+        """Load the header, discussion and changed-file metadata without patches."""
+
+        async def load_summary_and_files() -> None:
+            metadata = asyncio.create_task(
+                self._service.get_pr_file_metadata(self.pr_number, validate=True)
+            )
+            try:
+                await self.load_pr_summary()
+                if self._state.pr_loading == LoadingState.LOADED:
+                    await self.load_pr_file_summary(prefetched=metadata)
+            finally:
+                metadata.cancel()
+                await asyncio.gather(metadata, return_exceptions=True)
+
         await asyncio.gather(
-            self.load_pr_summary(),
+            load_summary_and_files(),
             self.load_pr_discussion(),
             return_exceptions=True,
         )
@@ -426,16 +445,23 @@ class PRStore:
             refresh=refresh,
         )
 
-    async def load_pr_file_summary(self, *, refresh: bool = False) -> None:
+    async def load_pr_file_summary(
+        self,
+        *,
+        refresh: bool = False,
+        prefetched: asyncio.Task[PRFileMetadata] | None = None,
+    ) -> None:
         """Prepare one metadata-only snapshot, never populating the diff workspace."""
         if not all(self._overview_refs()):
             return
 
         async def fetch(refs: tuple[str, str]) -> PRFilesSnapshot:
-            metadata = await self._service.get_pr_file_metadata(
-                self.pr_number,
-                validate=True,
-                refresh=refresh,
+            metadata = await (
+                prefetched
+                if prefetched is not None
+                else self._service.get_pr_file_metadata(
+                    self.pr_number, validate=True, refresh=refresh
+                )
             )
             if (metadata.base_sha, metadata.head_sha) != refs:
                 raise GitHubError(
@@ -716,6 +742,7 @@ class PRStore:
     def review_writable(self) -> bool:
         return (
             self._state.scope.kind == "all"
+            and self._state.preview_file is None
             and not self._state.scope_loading
             and self._state.refresh_loading != LoadingState.LOADING
         )
@@ -747,15 +774,47 @@ class PRStore:
                     return
             await self.select_review_scope(scope)
             return
+        preview = self._file_patch_preview()
         error = await load_file_workspace(
             self._state,
             pr_number=self.pr_number,
             source=self._service,
             parse_summaries=self._append_raw_diff_section_summaries,
             on_progress=self._post_files_loaded,
+            get_files=partial(
+                self._service.get_pr_files, expected_refs=preview.refs, preview=preview
+            )
+            if preview
+            else None,
         )
         if error is not None:
             self._mark_files_load_error(error)
+
+    def _file_patch_preview(self) -> FilePatchPreview | None:
+        pr = self._state.pr
+        refs = self._overview_refs()
+        if pr is None or not 300 < pr.changed_files <= 3000 or not all(refs):
+            return None
+        page, target = 1, None
+        if path := self._state.selected_file:
+            summary = self._state.file_summary.loaded_value
+            if (
+                summary is None
+                or (summary.metadata.base_sha, summary.metadata.head_sha) != refs
+            ):
+                return None
+            for index, file in enumerate(summary.metadata.files):
+                if file.filename == path:
+                    page, target = index // 100 + 1, file
+                    break
+            else:
+                return None
+        return FilePatchPreview(
+            refs,
+            page,
+            target,
+            lambda file: self._post_message(self.FilePreviewReady(file, refs)),
+        )
 
     def _mark_files_load_error(self, error: str) -> None:
         self._state.files_loading = LoadingState.ERROR
@@ -1761,7 +1820,11 @@ class ViewedFiles:
         on_change: Callable[[str, FileViewedState], None] | None = None,
     ) -> bool:
         """Toggle locally and report whether a synchronization worker is needed."""
-        if self._state.scope.kind != "all" or self._state.scope_loading:
+        if (
+            self._state.scope.kind != "all"
+            or self._state.scope_loading
+            or self._state.preview_file is not None
+        ):
             return False
         file = self._file(filename)
         if file is None:

@@ -177,18 +177,21 @@ def _record_file_start(
 
 
 def _placeholder_hunk(file: PRFile, filename: str) -> DiffHunk:
+    notice = (
+        "Patch omitted by GitHub" if file.patch_unavailable else "No textual changes"
+    )
     return DiffHunk(
         old_start=0,
         old_count=0,
         new_start=0,
         new_count=0,
-        header="no textual changes",
+        header=notice.lower(),
         lines=[
             DiffLine(
                 old_line_no=None,
                 new_line_no=None,
                 old_content="",
-                new_content="No textual changes",
+                new_content=notice,
                 file_path=filename,
             )
         ],

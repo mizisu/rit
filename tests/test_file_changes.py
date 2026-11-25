@@ -15,6 +15,7 @@ from rit.core.diff import parse_patch
 from rit.core.types import DiffHunk, DiffLine, FileDiff
 from rit.services.github import PRDiscussion
 from rit.state.models import PR, FileViewedState, LoadingState, PRFile
+from rit.state.pr_overview import PRFileMetadata
 from rit.state.store import PRStore
 from rit.ui.components import file_changes as file_changes_module
 from rit.ui.components.combined_diff import CombinedDiffDocument
@@ -22,6 +23,54 @@ from rit.ui.components.file_changes import FileChanges
 from rit.ui.widgets.diff_render import _create_file_header_widget
 from rit.ui.widgets.diff_view import DiffView
 from tests.conftest import wait_until
+
+
+async def test_verified_preview_promotes_without_losing_cursor_or_scroll() -> None:
+    store = PRStore()
+    state = store.state
+    state.files_loading = LoadingState.LOADING
+    patch = "@@ -0,0 +1,90 @@\n" + "\n".join(f"+body {i}" for i in range(90))
+    target = PRFile(filename="selected.py", patch=patch, additions=90)
+
+    class TestApp(App[None]):
+        def compose(self) -> ComposeResult:
+            yield FileChanges(store)
+
+    async with TestApp().run_test(size=(120, 30)) as pilot:
+        changes = pilot.app.query_one(FileChanges)
+        view = changes.diff_view
+        changes.show_loading_preview(target)
+        await wait_until(lambda: not changes._file_render_worker_active)
+        view.focus()
+        await pilot.pause()
+        assert view.current_file == target.filename and not changes.workspace_ready
+        assert not store.review_writable and not view.check_action("start_search", ())
+        assert state.files == [] and not state.file_diffs
+        index = view.line_index_for_location(target.filename, 45, "RIGHT")
+        assert index is not None
+        view.jump_to_line_index(index, side="RIGHT")
+        await pilot.pause()
+        before = view._line_index_at_vertical_offset(int(view.scroll_y))
+        assert before is not None
+        top = view._all_lines[before].new_line_no
+        state.files = [target.model_copy(update={"filename": "earlier.py"}), target]
+        state.files_by_filename = {f.filename: f for f in state.files}
+        state.files_loading = LoadingState.LOADED
+        changes.refresh_files()
+        await wait_until(lambda: changes.workspace_ready)
+        await pilot.pause()
+        assert store.review_writable and state.preview_file is None
+        assert view._inline_comment_target_for_current_line() == (
+            target.filename,
+            45,
+            "RIGHT",
+        )
+        after = view._line_index_at_vertical_offset(int(view.scroll_y))
+        assert after is not None
+        assert (
+            view._all_lines[after].file_path,
+            view._all_lines[after].new_line_no,
+        ) == (target.filename, top)
 
 
 async def test_focus_navigation_follows_visible_file_content() -> None:
@@ -124,6 +173,9 @@ class FakeSlowSummaryStreamingService:
         self.summary_requested = asyncio.Event()
         self.allow_summary = asyncio.Event()
         self.first_section_loaded = asyncio.Event()
+
+    async def get_pr_file_metadata(self, pr_number: int, *, validate: bool) -> PRFileMetadata:
+        return PRFileMetadata("base", "head", ())
 
     async def get_pr_summary(self, pr_number: int) -> PR:
         self.summary_requested.set()

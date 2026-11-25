@@ -5,6 +5,7 @@ from typing import Any, Protocol
 
 from rit.state.file_ingest import (
     MutableFileIngestState,
+    PRFilesGetter,
     begin_file_ingest,
     load_file_metadata,
     load_raw_diff_text,
@@ -29,14 +30,22 @@ async def load_file_workspace(
     source: Any,
     parse_summaries: FileSummaryParser,
     on_progress: ProgressCallback,
+    get_files: PRFilesGetter | None = None,
 ) -> str | None:
     """Load the PR file workspace from the fastest available source."""
     begin_file_ingest(state)
 
     try:
-        metadata_loaded = await _load_from_graphql_files(
-            state, pr_number, source, on_progress
-        )
+        if get_files is None:
+            get_files = getattr(source, "get_pr_files", None)
+        try:
+            metadata_loaded = get_files is not None and await load_file_metadata(
+                state, pr_number=pr_number, get_files=get_files, on_progress=on_progress
+            )
+        except RuntimeError:
+            if not (getattr(source, "iter_pr_diff_sections", None) or getattr(source, "get_pr_diff_text", None)):
+                raise
+            metadata_loaded = False
         try:
             diff_loaded = await _load_from_streamed_raw_diff(
                 state,
@@ -58,24 +67,6 @@ async def load_file_workspace(
         return str(error)
 
     return "No changed files could be loaded"
-
-
-async def _load_from_graphql_files(
-    state: MutableFileIngestState,
-    pr_number: int,
-    source: Any,
-    on_progress: ProgressCallback,
-) -> bool:
-    get_files = getattr(source, "get_pr_files", None)
-    if get_files is None:
-        return False
-
-    return await load_file_metadata(
-        state,
-        pr_number=pr_number,
-        get_files=get_files,
-        on_progress=on_progress,
-    )
 
 
 async def _load_from_streamed_raw_diff(

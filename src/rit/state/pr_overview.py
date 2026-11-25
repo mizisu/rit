@@ -121,6 +121,16 @@ class PRFileMetadata:
 
 
 @dataclass(frozen=True)
+class FilePatchPreview:
+    """A revision-bound request for a single verified file during workspace loading."""
+
+    refs: tuple[str, str]
+    page: int
+    target: PRFile | None
+    publish: Callable[[PRFile], None]
+
+
+@dataclass(frozen=True)
 class FileChangeGroup:
     """A path-based category and its change totals."""
 

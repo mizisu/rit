@@ -7,11 +7,13 @@ from rit.services.graphql_request import mapping
 from rit.services.pr_file_request import (
     _populate_file_list_patches,
     fetch_file_content,
+    fetch_pr_file_metadata,
     fetch_pr_files,
     parse_pr_files_page,
 )
 from rit.state.file_projection import diff_from_file_patch
 from rit.state.models import PR, FileViewedState, PRFile
+from rit.state.pr_overview import FilePatchPreview, PRFileMetadata
 from rit.state.store import PRStore
 from rit.ui.widgets.diff_full_file_preview import build_full_file_diff
 
@@ -84,6 +86,46 @@ def test_parse_pr_files_page_projects_graphql_metadata() -> None:
     assert page.files[0].viewer_viewed_state is FileViewedState.VIEWED
 
 
+@pytest.mark.parametrize("overlap", [False, True])
+async def test_full_metadata_reads_both_ends_in_order(overlap: bool) -> None:
+    nodes = [{"path": str(i)} for i in range(651)]
+    sizes: list[tuple[int, int]] = []
+
+    async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        assert input_text is not None
+        variables = json.loads(input_text)["variables"]
+        first, last = variables["first"], variables["last"]
+        sizes.append((first, last))
+        start = int(variables["after"] or 0)
+        end = start + first
+        files = {
+            "nodes": nodes[start:end],
+            "totalCount": len(nodes),
+            "pageInfo": {"hasNextPage": end < len(nodes), "endCursor": str(end)},
+        }
+        before = int(variables["before"] or len(nodes))
+        tail = nodes[before - last : before]
+        if overlap and tail:
+            tail[0] = nodes[start]
+        pr = {
+            "baseRefOid": "base",
+            "headRefOid": "head",
+            "files": files,
+            "tail": {"nodes": tail, "pageInfo": {"startCursor": str(before - last)}},
+        }
+        return json.dumps({"data": {"repository": {"pullRequest": pr}}})
+
+    if overlap:
+        with pytest.raises(ValueError, match="overlapping"):
+            await fetch_pr_file_metadata("owner", "repo", 123, runner=runner)
+        return
+    snapshot = await fetch_pr_file_metadata("owner", "repo", 123, runner=runner)
+    assert [file.filename for file in snapshot.files] == [
+        node["path"] for node in nodes
+    ]
+    assert sizes == [(100, 0), (100, 100), (100, 100), (100, 51)]
+
+
 async def test_fetch_pr_files_uses_graphql_cursor_pagination_and_canonical_patch() -> (
     None
 ):
@@ -122,8 +164,12 @@ async def test_fetch_pr_files_uses_graphql_cursor_pagination_and_canonical_patch
     assert diff_calls == [CANONICAL_DIFF_ARGS]
 
 
-@pytest.mark.parametrize("changed_ref", [None, "baseRefOid", "headRefOid"])
-async def test_fetch_pr_files_falls_back_to_paginated_patches_on_diff_limit(
+@pytest.mark.parametrize(
+    ("count", "changed_ref"),
+    [(None, None), (651, None), (651, "baseRefOid"), (None, "headRefOid")],
+)
+async def test_fetch_pr_files_uses_paginated_patches_on_diff_limit(
+    count: int | None,
     changed_ref: str | None,
 ) -> None:
     nodes: list[dict[str, object]] = [
@@ -134,44 +180,45 @@ async def test_fetch_pr_files_falls_back_to_paginated_patches_on_diff_limit(
             "deletions": 1,
             "viewerViewedState": "VIEWED",
         }
-        for index in range(301)
+        for index in range(651)
     ]
     body = "@@ -2,2 +2,2 @@\n-old\n+new\n keep"
-    rest_requested = False
+    pages: list[int] = []
+    inflight = peak = 0
     cursors: list[str | None] = []
 
     async def runner(args: list[str], *, input_text: str | None = None) -> str:
-        nonlocal rest_requested
+        nonlocal inflight, peak
         if args == CANONICAL_DIFF_ARGS:
+            assert count is None
             raise RuntimeError(
                 "gh: diff exceeded the maximum number of files (HTTP 406)"
             )
-        if args == [
-            "api",
-            "repos/owner/repo/pulls/123/files?per_page=100",
-            "--paginate",
-        ]:
-            rest_requested = True
-            return "\n".join(
-                json.dumps(
-                    [
-                        {
-                            "filename": node["path"],
-                            "status": "modified",
-                            "additions": 1,
-                            "deletions": 1,
-                            "patch": body,
-                        }
-                        for node in nodes[start : start + 100]
-                    ]
-                )
-                for start in range(0, len(nodes), 100)
+        if args[1].startswith("repos/owner/repo/pulls/123/files?per_page=100&page="):
+            page_num = int(args[1].rsplit("=", 1)[-1])
+            start = (page_num - 1) * 100
+            inflight += 1
+            peak = max(peak, inflight)
+            await asyncio.sleep(0)
+            inflight -= 1
+            pages.append(page_num)
+            return json.dumps(
+                [
+                    {
+                        "filename": node["path"],
+                        "status": "modified",
+                        "additions": 1,
+                        "deletions": 1,
+                        **({"patch": body} if node is not nodes[0] else {}),
+                    }
+                    for node in nodes[start : start + 100]
+                ]
             )
         assert args == ["api", "graphql", "--input", "-"]
         assert input_text is not None
         variables = json.loads(input_text)["variables"]
         if variables["first"] == 1:
-            assert rest_requested
+            assert sorted(pages) == list(range(1, 8))
             page = _files_page(nodes[:1])
             if changed_ref is not None:
                 pr = dict(
@@ -185,24 +232,86 @@ async def test_fetch_pr_files_falls_back_to_paginated_patches_on_diff_limit(
         return json.dumps(
             _files_page(
                 nodes[start : start + 100],
-                has_next_page=start < 300,
+                has_next_page=start + 100 < len(nodes),
                 end_cursor=str(start + 100),
             )
         )
 
     if changed_ref is not None:
         with pytest.raises(RuntimeError, match="PR changed while loading"):
-            await fetch_pr_files("owner", "repo", 123, runner=runner)
+            await fetch_pr_files("owner", "repo", 123, total_count=count, runner=runner)
         return
-    files = await fetch_pr_files("owner", "repo", 123, runner=runner)
+    files = await fetch_pr_files("owner", "repo", 123, total_count=count, runner=runner)
 
-    assert cursors == [None, "100", "200", "300"]
-    assert len(files) == 301
+    assert cursors == [None, "100", "200", "300", "400", "500", "600"]
+    assert peak == 4
+    assert len(files) == 651
     assert all(file.viewer_viewed_state is FileViewedState.VIEWED for file in files)
-    assert all(file.patch == body for file in files)
+    assert all(file.patch == body for file in files[1:])
+    assert files[0].patch_unavailable and not files[0].patch
     diff = diff_from_file_patch(files[-1])
     assert diff.hunks[0].lines[0].old_line_no == 2
     assert diff.hunks[0].lines[-1].new_line_no == 3
+
+
+@pytest.mark.parametrize("case", ["selected", "order differs", "new head", "final refs changed"])
+async def test_selected_patch_preview_is_pinned_and_reuses_prioritized_page(case: str) -> None:
+    files = tuple(PRFile(filename=str(i), additions=1) for i in range(401))
+    refs = ("base-sha", "head-sha")
+    verified = asyncio.Event()
+    release = asyncio.Event()
+    published: list[PRFile] = []
+    pages: list[int] = []
+    checks = 0
+
+    async def metadata() -> PRFileMetadata:
+        await release.wait()
+        return PRFileMetadata(*refs, files)
+
+    async def runner(args: list[str], *, input_text: str | None = None) -> str:
+        nonlocal checks
+        if input_text is not None:
+            checks += 1
+            result = json.dumps(_files_page([{"path": "0", "additions": 1}]))
+            verified.set()
+            if case == "new head" or (case == "final refs changed" and checks == 2):
+                return result.replace("head-sha", "new-head")
+            return result
+        page = int(args[1].rsplit("=", 1)[1])
+        pages.append(page)
+        if page != 5:
+            await release.wait()
+        return json.dumps([
+            {"filename": f.filename, "additions": 1, "patch": "@@ -0,0 +1 @@\n+new"}
+            for f in files[(page-1)*100:page*100]
+        ])
+
+    target = files[0 if case == "order differs" else -1]
+    seen = asyncio.Event()
+    def publish(file: PRFile) -> None:
+        published.append(file)
+        seen.set()
+
+    load = asyncio.create_task(fetch_pr_files(
+        "owner", "repo", 123, total_count=len(files), metadata=metadata(), runner=runner,
+        preview=FilePatchPreview(refs, 5, target, publish)
+    ))
+    async with asyncio.timeout(3):
+        await verified.wait()
+        if case in {"selected", "final refs changed"}:
+            await seen.wait()
+            assert not load.done() and published[0].filename == "400"
+            assert published[0].patch.endswith("+new") and not target.patch
+        release.set()
+        if case in {"new head", "final refs changed"}:
+            with pytest.raises(RuntimeError, match="PR changed"):
+                await load
+        else:
+            result = await load
+            assert [f.filename for f in result] == [f.filename for f in files]
+            assert pages[0] == 5 and sorted(pages) == list(range(1, 6))
+        if case in {"order differs", "new head"}:
+            assert not published
 
 
 @pytest.mark.parametrize(
@@ -217,7 +326,8 @@ async def test_fetch_pr_files_falls_back_to_paginated_patches_on_diff_limit(
             True,
         ),
         (None, 0, 0, True),
-        (None, 1, 1, False),
+        (None, 1, 1, True),
+        ("", 1, 1, False),
         ("@@ -1,2 +1,2 @@\n-old\n+new", 1, 1, False),
         ("@@ -1 +1 @@\n-old\n+new", 2, 1, False),
     ],
@@ -249,6 +359,9 @@ def test_file_list_patches_reject_incomplete_hunks(
     if valid:
         _populate_file_list_patches([file], result)
         assert file.patch == (patch or "")
+        assert file.patch_unavailable is (
+            patch is None and bool(additions or deletions)
+        )
         assert file.previous_filename == "old name.py"
     else:
         with pytest.raises(RuntimeError, match="incomplete or invalid patch"):

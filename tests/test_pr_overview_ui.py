@@ -14,6 +14,7 @@ from rit.app import RitApp
 from rit.state.file_ingest import begin_file_ingest
 from rit.state.models import PR, FileViewedState, LoadingState, PRFile
 from rit.state.pr_overview import (
+    FilePatchPreview,
     PRCheck,
     PRChecksSnapshot,
     PRFileMetadata,
@@ -306,6 +307,64 @@ async def test_single_category_and_mixed_prs_preserve_choices_and_handle_empty_e
         info.refresh_overview()
         assert app.query_one("#refresh-file-summary", Button).disabled
         assert "Loading" in str(status.content)
+
+
+async def test_failed_revision_check_dismisses_verified_preview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def skip(_store: PRStore) -> None:
+        pass
+
+    monkeypatch.setattr(PRStore, "load_overview", skip)
+    monkeypatch.setattr(PRStore, "check_for_updates", skip)
+    app = RitApp(owner="owner", repo="repo", pr_number=1)
+    async with app.run_test(size=(120, 30)):
+        screen = cast(MainScreen, app.screen)
+        store = screen.store
+        store.state.pr = PR(
+            number=1, base_sha="base", head_sha="head", changed_files=301
+        )
+        target = PRFile(filename="selected.py")
+        snapshot = PRFileMetadata(
+            "base",
+            "head",
+            tuple(PRFile(filename=str(i)) for i in range(300)) + (target,),
+        )
+        store.state.file_summary.value = PRFilesSnapshot.from_metadata(snapshot)
+        store.state.file_summary.loading = LoadingState.LOADED
+        release = asyncio.Event()
+
+        async def get_files(
+            number: int,
+            *,
+            total_count: int,
+            expected_refs: tuple[str, str],
+            preview: FilePatchPreview,
+        ) -> list[PRFile]:
+            assert (number, total_count, expected_refs, preview.page) == (
+                1,
+                301,
+                ("base", "head"),
+                4,
+            )
+            assert preview.target is target
+            preview.publish(
+                target.model_copy(update={"patch": "@@ -0,0 +1 @@\n+preview"})
+            )
+            await release.wait()
+            raise RuntimeError("PR changed while loading files; refresh and try again")
+
+        monkeypatch.setattr(store._service, "get_pr_files", get_files)
+        screen._open_overview_file(FileGroup.OpenFileRequested(target.filename))
+        view = screen.file_changes.diff_view
+        await wait_until(lambda: view.current_file == target.filename)
+        assert not store.review_writable and not store.state.files
+        release.set()
+        await wait_until(
+            lambda: store.state.files_loading == LoadingState.ERROR and not view.display
+        )
+        assert store.state.error and "PR changed" in store.state.error
+        assert view.current_file is None and store.state.preview_file is None
 
 
 async def test_ctrl_focus_and_first_file_selection_wait_for_lazy_diff_loading(

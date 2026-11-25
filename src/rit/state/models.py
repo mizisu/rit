@@ -544,6 +544,7 @@ class PRFile(BaseModel):
     deletions: int = 0
     changes: int = 0
     patch: str = ""
+    patch_unavailable: bool = False
     previous_filename: str | None = Field(
         default=None,
         validation_alias=AliasChoices("previousFilename", "previous_filename"),

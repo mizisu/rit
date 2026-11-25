@@ -121,10 +121,7 @@ async def load_file_metadata(
 ) -> bool:
     """Load changed-file metadata from a complete GraphQL source."""
     total_count = state.files_total_count or None
-    try:
-        files = await get_files(pr_number, total_count=total_count)
-    except RuntimeError:
-        return False
+    files = await get_files(pr_number, total_count=total_count)
     if not files:
         return False
     append_file_batch(state, files)

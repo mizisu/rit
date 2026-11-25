@@ -373,6 +373,86 @@ async def test_metadata_requests_are_shared_and_validated_before_patch_reuse(
         await service.get_pr_files(1)
 
 
+@pytest.mark.parametrize("metadata_first", [True, False])
+async def test_open_overlaps_file_metadata_with_summary_without_patches(
+    monkeypatch: pytest.MonkeyPatch,
+    metadata_first: bool,
+) -> None:
+    store = PRStore(pr_number=1)
+    summary_started, metadata_started = asyncio.Event(), asyncio.Event()
+    allow_summary, allow_metadata = asyncio.Event(), asyncio.Event()
+    metadata_returned, header_ready = asyncio.Event(), asyncio.Event()
+    snapshot = PRFileMetadata("base", "head", (PRFile(filename="a.py"),))
+
+    async def summary(number: int) -> PR:
+        summary_started.set()
+        await allow_summary.wait()
+        return PR(number=number, base_sha="base", head_sha="head")
+
+    async def metadata(number: int, *, validate: bool) -> PRFileMetadata:
+        metadata_started.set()
+        await allow_metadata.wait()
+        metadata_returned.set()
+        return snapshot
+
+    fetch = AsyncMock(side_effect=metadata)
+    patches = AsyncMock()
+    monkeypatch.setattr(store._service, "get_pr_summary", summary)
+    monkeypatch.setattr(store._service, "get_pr_file_metadata", fetch)
+    monkeypatch.setattr(store._service, "get_pr_files", patches)
+    monkeypatch.setattr(store, "load_pr_discussion", AsyncMock())
+    store.set_message_sink(
+        lambda msg: header_ready.set() if isinstance(msg, PRStore.PRLoaded) else None
+    )
+
+    async with asyncio.timeout(3):
+        async with asyncio.TaskGroup() as tasks:
+            tasks.create_task(store.load_overview())
+            await asyncio.gather(summary_started.wait(), metadata_started.wait())
+            if metadata_first:
+                allow_metadata.set()
+                await metadata_returned.wait()
+                assert store.state.file_summary.loaded_value is None
+            allow_summary.set()
+            await header_ready.wait()
+            if not metadata_first:
+                # The PRLoaded sidebar handler must share the in-flight load.
+                await store.load_pr_file_summary()
+                assert store.state.file_summary.loaded_value is None
+                allow_metadata.set()
+    assert store.state.file_summary.loaded_value is not None
+    assert store.state.file_summary.loaded_value.metadata is snapshot
+    fetch.assert_awaited_once_with(1, validate=True)
+    patches.assert_not_awaited()
+    assert store.state.files_loading == LoadingState.IDLE
+
+
+async def test_failed_header_cancels_startup_file_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = PRStore(pr_number=1)
+    started, stopped = asyncio.Event(), asyncio.Event()
+
+    async def metadata(number: int, *, validate: bool) -> PRFileMetadata:
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            stopped.set()
+        raise AssertionError("cancelled metadata must not return")
+
+    async def fail_summary(number: int) -> PR:
+        await started.wait()
+        raise GitHubError("missing PR")
+
+    monkeypatch.setattr(store._service, "get_pr_summary", fail_summary)
+    monkeypatch.setattr(store._service, "get_pr_file_metadata", metadata)
+    monkeypatch.setattr(store, "load_pr_discussion", AsyncMock())
+    await asyncio.wait_for(store.load_overview(), timeout=3)
+    assert stopped.is_set() and store.state.pr_loading == LoadingState.ERROR
+    assert store.state.file_summary.loading == LoadingState.IDLE
+
+
 async def test_sidebar_loads_once_without_files_messages_or_workspace_changes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

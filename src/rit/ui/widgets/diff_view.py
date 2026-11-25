@@ -1002,6 +1002,12 @@ class DiffView(VerticalScroll):
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if not self.has_focus:
             return False
+        if (
+            self.store
+            and self.store.state.preview_file is not None
+            and action in {"start_search", "toggle_full_file", "toggle_resolve"}
+        ):
+            return False
         return super().check_action(action, parameters)
 
     def _search_input_has_focus(self) -> bool:
@@ -1160,6 +1166,8 @@ class DiffView(VerticalScroll):
         _comments.prev_comment(self)
 
     def action_toggle_resolve(self) -> None:
+        if self.store is not None and not self.store.review_writable:
+            return
         self.run_worker(
             _comments.toggle_resolve(self),
             exclusive=False,
@@ -2514,7 +2522,17 @@ class DiffView(VerticalScroll):
                 or not cache.source_structure_matches()
             ):
                 return False
-            state = _fold_state.FoldState.capture(self) if fold_refresh else None
+            preview = self.store.state.preview_file if self.store else None
+            leaving_preview = (
+                preview is not None
+                and self.current_file == preview.filename
+                and filename != self.current_file
+            )
+            state = (
+                _fold_state.FoldState.capture(self)
+                if fold_refresh or leaving_preview
+                else None
+            )
             allow_retained_prefix = fold_refresh and not cache.has_source_changes
             if cache.has_source_changes:
                 self._hl_state.request_token += 1

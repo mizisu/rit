@@ -253,4 +253,5 @@ def _replace_file_metadata(existing: PRFile, replacement: PRFile) -> None:
     existing.deletions = replacement.deletions
     existing.changes = replacement.changes
     existing.patch = replacement.patch
+    existing.patch_unavailable = replacement.patch_unavailable
     existing.previous_filename = replacement.previous_filename

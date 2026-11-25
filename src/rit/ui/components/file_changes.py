@@ -16,7 +16,8 @@ from textual.widgets import Button, Static, Tree
 from textual.worker import Worker, WorkerState
 
 from rit.core.types import FileDiff
-from rit.state.models import FileViewedState, LoadingState
+from rit.state.file_projection import diff_from_file_patch
+from rit.state.models import FileViewedState, LoadingState, PRFile
 from rit.state.pr_overview import FileChangeGroup
 from rit.state.review_scope import ReviewScope
 from rit.state.store import PRStore
@@ -53,6 +54,12 @@ def _diff_mode_setting(value: object) -> Literal["auto", "split", "unified"] | N
     if value == "unified":
         return "unified"
     return None
+
+
+def _preview_document(file: PRFile) -> CombinedDiffDocument | None:
+    return build_combined_diff_document(
+        [file], {file.filename: diff_from_file_patch(file)}
+    )
 
 
 class GhostHandle(Static):
@@ -237,6 +244,8 @@ class FileChanges(Vertical):
         error = state.refresh_error or state.probe_error
         if state.refresh_loading == LoadingState.LOADING:
             status = "Refreshing..."
+        elif state.preview_file is not None:
+            status = "Read-only: loading all files…"
         elif self._refresh_notice:
             status = self._refresh_notice
         elif state.refresh_error:
@@ -325,6 +334,10 @@ class FileChanges(Vertical):
             and self.workspace_ready
         ):
             self._scope_render_pending = False
+            if self.store.state.preview_file is not None:
+                self.store.state.preview_file = None
+                self.refresh_revision_status()
+                self.refresh_bindings()
             self.diff_view.display = True
             self.query_one("#review-scope-empty").display = False
             self.post_message(self.WorkspaceReady())
@@ -334,6 +347,9 @@ class FileChanges(Vertical):
         """Discard render requests and cached documents for a superseded PR revision."""
         self.workers.cancel_group(self, "default")
         self.diff_view.reset_comparison()
+        if self.store.state.preview_file is not None:
+            self.diff_view.display = False
+            self.store.state.preview_file = None
         self._file_render_request_revision += 1
         self._queued_file_render = None
         self._file_render_worker_active = False
@@ -352,6 +368,17 @@ class FileChanges(Vertical):
             document is not None
             and self.diff_view._source_diff is document.diff
             and not self._file_render_worker_active
+        )
+
+    def show_loading_preview(self, file: PRFile) -> None:
+        self.store.state.preview_file = file
+        self.store.state.selected_file = file.filename
+        self.diff_view.display = True
+        self.diff_view.expand_file(file.filename)
+        self.refresh_revision_status()
+        self.refresh_bindings()
+        self._queue_file_render_request(
+            file.filename, None, focus_diff=False, sync_tree_selection=False
         )
 
     def refresh_files(self) -> None:
@@ -1031,7 +1058,12 @@ class FileChanges(Vertical):
                 filename == COMBINED_DIFF_FILENAME
             )
             if diff is None:
-                diff = await self.store.get_file_diff_async(filename)
+                preview = self.store.state.preview_file
+                if preview is not None and preview.filename == filename:
+                    document = await asyncio.to_thread(_preview_document, preview)
+                    diff = document.diff if document else None
+                else:
+                    diff = await self.store.get_file_diff_async(filename)
             if diff is None:
                 self._render_session.discard_pending_location_jump(request_revision)
                 continue
@@ -1042,7 +1074,6 @@ class FileChanges(Vertical):
             navigation_revision = self.diff_view.view_revision[1]
             await self.diff_view.show_diff(filename, diff)
             if request_revision != self._file_render_request_revision:
-                self._render_session.discard_pending_location_jump(request_revision)
                 continue
             if filename == COMBINED_DIFF_FILENAME:
                 self._sync_combined_render_target(

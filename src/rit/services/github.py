@@ -384,6 +384,7 @@ class GitHubService:
         *,
         total_count: int | None = None,
         expected_refs: tuple[str, str] | None = None,
+        preview: FilePatchPreview | None = None,
     ) -> list[PRFile]:
         """Fetch metadata and canonical patches without downloading full files."""
         repo = await self.get_repo()
@@ -400,6 +401,7 @@ class GitHubService:
                 pr_number,
                 total_count=total_count,
                 runner=self._run_gh,
+                preview=preview,
                 metadata=self.get_pr_file_metadata(
                     pr_number, validate=True, expected_refs=refs
                 ),

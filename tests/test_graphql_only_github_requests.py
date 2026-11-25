@@ -16,7 +16,7 @@ CANONICAL_DIFF_REQUEST = ast.parse(
 
 
 FILE_PATCHES_REQUEST = ast.parse(
-    '["api", f"repos/{owner}/{repo}/pulls/{pr_number}/files?per_page=100", "--paginate"]',
+    '["api", f"repos/{owner}/{repo}/pulls/{pr_number}/files?per_page=100&page={page}"]',
     mode="eval",
 ).body
 
