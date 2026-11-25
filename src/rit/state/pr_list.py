@@ -87,6 +87,7 @@ class PRListSnapshot:
     warnings: tuple[str, ...] = ()
     default_branch: str = ""
     context_complete: bool = True
+    active_preview: bool = False
 
     def stacks(self, tab: PRListTab, *, now: datetime | None = None) -> list[PRStack]:
         now = now or datetime.now(UTC)

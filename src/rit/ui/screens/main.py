@@ -233,6 +233,22 @@ class MainScreen(Screen[None]):
                         yield PRInfo(store=self.store)
                     with TabPane("Files", id="files"):
                         yield FileChanges(store=self.store)
+        toggle = Button(
+            "↙ Show PRs",
+            id="toggle-pr-list",
+            name="Toggle PR list",
+            action="app.toggle_pr_list",
+            compact=True,
+            flat=True,
+        )
+        toggle.active_effect_duration = 0
+        yield toggle
+
+    def _sync_pr_list_toggle(self, visible: bool) -> None:
+        button = self.query_one("#toggle-pr-list", Button)
+        button.label = "↗ Hide PRs" if visible else "↙ Show PRs"
+        action = "Hide" if visible else "Show"
+        button.tooltip = f"{action} PR list (Ctrl+E)"
 
     def focus_review(self) -> None:
         """Return from the PR list without resetting the review location."""
@@ -244,6 +260,7 @@ class MainScreen(Screen[None]):
             )
 
     async def on_mount(self) -> None:
+        self.watch(self.app, "pr_list_visible", self._sync_pr_list_toggle)
         self.run_worker(self._load_data(), exclusive=True)
 
     async def _load_data(self) -> None:

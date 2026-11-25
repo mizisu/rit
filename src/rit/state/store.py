@@ -122,7 +122,11 @@ class PRListStore:
         self.error = None
         try:
             self.snapshot = await self._service.get_pr_list(
-                on_initial=self._accept_initial
+                on_initial=(
+                    self._accept_initial
+                    if self.snapshot is None or not self.snapshot.context_complete
+                    else None
+                )
             )
         except (RuntimeError, ValueError) as error:
             self.error = str(error)

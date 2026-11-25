@@ -167,6 +167,8 @@ class RitApp(App):
     def action_toggle_pr_list(self) -> None:
         from rit.ui.widgets.pr_sidebar import PRSidebar
 
+        if not self.pr_number or self.screen.is_modal:
+            return
         self.pr_list_visible = not self.pr_list_visible
         if self.pr_list_visible:
             if not self.pr_list_store.attempted:
@@ -219,7 +221,7 @@ class RitApp(App):
 
     def get_system_commands(self, screen: Screen) -> Iterable[SystemCommand]:
         yield from super().get_system_commands(screen)
-        if not screen.is_modal:
+        if self.pr_number and not screen.is_modal:
             yield SystemCommand(
                 "PR list",
                 "Show or hide the repository's pull requests",
@@ -260,7 +262,7 @@ class RitApp(App):
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         if action == "open_pr" and not self.pr_number:
             return False
-        if action == "toggle_pr_list" and self.screen.is_modal:
+        if action == "toggle_pr_list" and (not self.pr_number or self.screen.is_modal):
             return False
         focused = self.focused
         if (

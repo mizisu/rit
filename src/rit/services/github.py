@@ -18,7 +18,7 @@ from rit.services.graphql_mutations import (
 from rit.services.graphql_mutations import (
     unresolve_thread as unresolve_thread_via_graphql,
 )
-from rit.services.graphql_request import run_graphql
+from rit.services.graphql_request import mapping, run_graphql
 from rit.services.local_git import LocalGitSource
 from rit.services.pr_checks import fetch_pr_checks
 from rit.services.pr_comparison import fetch_comparison_files, fetch_review_history
@@ -174,11 +174,18 @@ class GitHubService:
         self, *, on_initial: Callable[[PRListSnapshot], None] | None = None
     ) -> PRListSnapshot:
         """Fetch the inbox, optionally publishing it before stack context arrives."""
-        repo = await self.get_repo()
+        known = (
+            GitHubRepo(self._owner, self._repo)
+            if self._owner and self._repo
+            else self._detected_repo
+        )
         with translate_pull_request_graphql_errors():
-            return await PRListLoader(repo.owner, repo.name, self._run_gh).load(
-                on_initial=on_initial
+            loader = await PRListLoader.bootstrap(
+                known, self._run_gh, on_initial=on_initial
             )
+            if known is None:
+                self._detected_repo = GitHubRepo(loader.owner, loader.repo)
+            return await loader.load(on_initial=on_initial)
 
     async def get_pr_all(self, pr_number: int) -> PR:
         """Fetch PR data via GraphQL, including all activity pages."""

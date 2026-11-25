@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from textual.command import CommandPalette
-from textual.widgets import Input, OptionList, Static, Tabs
+from textual.widgets import Button, Input, OptionList, Static, Tabs
 
 from rit.app import RitApp
 from rit.state.models import PR, PendingReviewComment
@@ -162,6 +162,7 @@ async def test_direct_launch_keeps_hidden_inbox_out_of_focus_and_loads_it_lazily
 
     monkeypatch.setattr(PRStore, "load_overview", skip)
     monkeypatch.setattr(PRListStore, "load", load_list)
+    monkeypatch.setattr(PRStore, "load_files", skip)
     app = RitApp("org", "repo", 1)
     async with app.run_test(size=(160, 40)) as pilot:
         screen = app._get_main_screen()
@@ -169,6 +170,25 @@ async def test_direct_launch_keeps_hidden_inbox_out_of_focus_and_loads_it_lazily
         sidebar = screen.query_one(PRSidebar)
         assert not sidebar.display and not sidebar.has_focus_within
         assert not loads
+        toggle = screen.query_one("#toggle-pr-list", Button)
+        workspace = screen.query_one("#pr-workspace")
+        await pilot.resize_terminal(140, 40)
+        await pilot.pause()
+        button_region = toggle.region
+        assert toggle.tooltip == "Show PR list (Ctrl+E)"
+        assert await pilot.click(toggle)
+        await wait_until(lambda: sidebar.has_focus_within and bool(loads))
+        assert toggle.region == button_region
+        assert sidebar.region.width + workspace.region.width == 140
+        assert toggle.tooltip == "Hide PR list (Ctrl+E)"
+        await pilot.resize_terminal(139, 40)
+        await wait_until(lambda: not workspace.display)
+        assert toggle.region.right == 137
+        assert await pilot.click(toggle)
+        await wait_until(lambda: workspace.display and not sidebar.display)
+        assert workspace.region.width == 139
+        assert screen.pr_info.has_focus_within
+        assert loads == [True]
         await pilot.press("ctrl+l")
         await wait_until(lambda: screen.pr_info.sidebar_has_focus)
         await pilot.press("ctrl+e")
@@ -181,6 +201,20 @@ async def test_direct_launch_keeps_hidden_inbox_out_of_focus_and_loads_it_lazily
         screen.focus_review()
         await pilot.press("ctrl+e")
         await wait_until(lambda: not sidebar.display)
+
+        await pilot.resize_terminal(180, 40)
+        await pilot.press("tab")
+        diff = screen.file_changes.diff_view
+        await wait_until(lambda: diff.has_focus)
+        full_width = diff.region.width
+        screen.store.state.pending_review.set_body("Unsent review")
+        await pilot.click(toggle)
+        await wait_until(lambda: sidebar.has_focus_within and diff.region.width < full_width)
+        await pilot.click(toggle)
+        await wait_until(lambda: diff.has_focus and diff.region.width == full_width)
+        assert screen.tabbed_content.active == "files"
+        assert screen.store.state.pending_review.body == "Unsent review"
+        assert loads == [True]
 
 
 async def test_done_groups_start_collapsed_and_remember_expansion_per_tab(
@@ -231,10 +265,9 @@ async def test_done_groups_start_collapsed_and_remember_expansion_per_tab(
         )
         await wait_until(lambda: not listed(1))
         await pilot.press("ctrl+e")
-        await wait_until(lambda: not sidebar.display)
         assert app.pr_number == 0 and isinstance(app.screen, PRListScreen)
-        await pilot.press("ctrl+e")
-        await wait_until(lambda: sidebar.has_focus_within)
+        assert sidebar.display and sidebar.has_focus_within
+        assert not app.screen.query("#toggle-pr-list")
         assert not listed(1)
 
 
@@ -259,7 +292,14 @@ async def test_inbox_switching_retains_drafts_and_isolates_keys_and_pr_identity(
         list_loads.append(True)
         store.attempted = True
         if len(list_loads) == 1:
-            store._accept_initial(replace(inbox, context_complete=False))
+            store._accept_initial(
+                replace(
+                    inbox,
+                    items=(inbox.items[0],),
+                    context_complete=False,
+                    active_preview=True,
+                )
+            )
             await finish_context.wait()
         store.snapshot = inbox
         store.loading = False
@@ -280,6 +320,13 @@ async def test_inbox_switching_retains_drafts_and_isolates_keys_and_pr_identity(
         assert loads == []
         sidebar = app.screen.query_one(PRSidebar)
         options = sidebar.query_one(OptionList)
+        assert "Loading full PR list" in str(
+            sidebar.query_one("#pr-list-status", Static).content
+        )
+        assert all(
+            options.get_option_at_index(i).id != "group-done"
+            for i in range(options.option_count)
+        )
         options.highlighted = options.get_option_index("1")
         options.focus()
         await pilot.press("j", "k")

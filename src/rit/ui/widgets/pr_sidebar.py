@@ -139,6 +139,8 @@ class PRSidebar(Vertical, can_focus_children=False):
                 members = [stack for stack in stacks if stack.group == group]
                 count = sum(len(stack.targets) for stack in members)
                 done = group == "Done"
+                if done and snapshot.active_preview:
+                    continue
                 expanded = self.app.pr_list_tab in self.app.pr_list_done_expanded
                 marker = ("▾ " if expanded else "▸ ") if done else ""
                 heading = Text(
@@ -192,7 +194,9 @@ class PRSidebar(Vertical, can_focus_children=False):
                 rows.append(Option("", disabled=True))
             if not stacks:
                 empty = (
-                    "No PRs authored by you"
+                    ("Loading full PR list…" if store.loading else "No active PRs in preview")
+                    if snapshot.active_preview
+                    else "No PRs authored by you"
                     if self.app.pr_list_tab == "created"
                     else "No review requests or submitted reviews"
                 )
@@ -226,6 +230,8 @@ class PRSidebar(Vertical, can_focus_children=False):
                 0,
                 "Refreshing PRs and stacks…"
                 if snapshot.context_complete
+                else "Loading full PR list…"
+                if snapshot.active_preview
                 else "Loading stack context…",
             )
         self.query_one("#pr-list-status", Static).update("\n".join(warnings))

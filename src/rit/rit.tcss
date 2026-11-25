@@ -64,6 +64,39 @@ ReviewSubmitScreen {
     background: $panel;
 }
 
+MainScreen {
+    layers: base controls;
+}
+
+MainScreen PRSidebar {
+    width: 26%;
+    max-width: 48;
+}
+
+/* Keep the review control in the same cell even when the inbox covers the workspace. */
+MainScreen #toggle-pr-list {
+    layer: controls;
+    dock: right;
+    margin: 1 2 0 0;
+    width: 12;
+    min-width: 0;
+    height: 1;
+    padding: 0;
+    border: none;
+    background: $panel;
+    color: $foreground;
+}
+
+MainScreen #toggle-pr-list:focus {
+    background: $primary;
+    color: $text-primary;
+}
+
+MainScreen #header-title-row,
+MainScreen.pr-list-overlay #pr-list-title {
+    padding-right: 13;
+}
+
 Screen.pr-list-overlay PRSidebar {
     width: 1fr;
     max-width: 100%;
