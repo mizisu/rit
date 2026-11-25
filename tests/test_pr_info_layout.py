@@ -147,6 +147,11 @@ async def test_pr_info_stacks_sidebar_using_available_width() -> None:
         sidebar = app.query_one("#sidebar")
 
         page = app.query_one("#pr-info-layout", VerticalScroll)
+        facts = app.query_one("#compact-review-facts", Static)
+        assert facts.display and facts.region.height == 3
+        assert app.query_one("#pr-title").region.bottom <= facts.region.y
+        assert facts.region.bottom <= app.query_one(PRTimeline).region.y
+        assert "Open" in str(facts.content)
         assert main_scroll.region.width == page.scrollable_content_region.width
         assert sidebar.region.y >= main_scroll.region.bottom
         assert page.show_vertical_scrollbar
@@ -176,6 +181,7 @@ async def test_pr_info_stacks_sidebar_using_available_width() -> None:
         await wait_until(lambda: not pr_info.compact)
         await pilot.pause()
         assert sidebar.region.x >= main_scroll.region.right
+        assert not facts.display
         assert not page.show_vertical_scrollbar and page.scroll_y == 0
         assert main_scroll.show_vertical_scrollbar
         assert pr_info.document_scroll is main_scroll
@@ -281,7 +287,7 @@ async def test_pr_description_uses_document_width_and_block_rhythm() -> None:
         headings = list(description.query("MarkdownH3").results(Static))
         ordered = list(description.query("MarkdownOrderedList MarkdownParagraph"))
         endpoint = next(p for p in paragraphs if "GET /api" in str(p.content))
-        korean = next(p for p in paragraphs if str(p.content).startswith("원인:"))
+        cause = next(p for p in paragraphs if str(p.content).startswith("Cause:"))
 
         assert str(header.content) == "Description \u00b7 alice"
         assert description.has_class("reading")
@@ -294,10 +300,10 @@ async def test_pr_description_uses_document_width_and_block_rhythm() -> None:
         assert description.styles.border.left != description.styles.border.top
         assert description.styles.padding.top == description.styles.padding.bottom == 1
         assert [str(heading.content) for heading in headings] == [
-            "배경 (Why)",
-            "변경 내용 (What)",
-            "리뷰 포인트",
-            "참고 사항",
+            "Background",
+            "Changes",
+            "Review checklist",
+            "Notes",
         ]
         for index, heading in enumerate(headings):
             assert heading.styles.margin.top == (0 if index == 0 else 2)
@@ -338,7 +344,7 @@ async def test_pr_description_uses_document_width_and_block_rhythm() -> None:
             assert description_body.region.right <= description.content_region.right
             assert main_scroll.max_scroll_x == 0
             assert description.max_scroll_x == 0
-            assert korean.size.height > 1
+            assert cause.size.height > 1
             assert (endpoint.size.height > 1) == (
                 cell_len(str(endpoint.content)) > endpoint.content_size.width
             )

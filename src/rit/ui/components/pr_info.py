@@ -9,13 +9,14 @@ from rich.cells import cell_len
 from textual import events, on
 from textual.app import ComposeResult
 from textual.containers import Container, Horizontal, Vertical, VerticalScroll
+from textual.content import Content
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.reactive import var
 from textual.widget import Widget
 from textual.widgets import Button, OptionList, Static
 
-from rit.state.models import PRComment
+from rit.state.models import LoadingState, PRComment
 from rit.state.reviewer_status import ReviewerDisplayState, derive_reviewer_states
 from rit.state.store import PRStore
 from rit.ui.components.pr_overview import (
@@ -25,6 +26,7 @@ from rit.ui.components.pr_overview import (
     SummaryOptionList,
 )
 from rit.ui.components.pr_timeline import PRTimeline
+from rit.ui.pr_status import PR_STATUS_LABELS
 
 __all__ = ("PRInfo",)
 
@@ -60,6 +62,8 @@ class PRInfo(Container):
         self._sidebar_focus: Widget | None = None
         self._document_position_before_sidebar: float | None = None
         self._sidebar_widget: VerticalScroll | None = None
+        self._compact_facts = Static("", id="compact-review-facts", markup=False)
+        self._compact_reviewers = "Loading..."
         self._title_widget: Static | None = None
         self._stats_widget: Static | None = None
         self._labels_widget: Static | None = None
@@ -84,6 +88,7 @@ class PRInfo(Container):
                 with Horizontal(id="pr-title-row"):
                     yield Static("Loading...", classes="pr-title", id="pr-title")
                 yield Static("", classes="stats-bar", id="pr-stats")
+                yield self._compact_facts
                 yield PRTimeline(self.store, id="pr-timeline")
 
             with VerticalScroll(classes="sidebar", id="sidebar"):
@@ -182,6 +187,7 @@ class PRInfo(Container):
         scroll = self.document_scroll
         self._timeline_widget().set_scroll_container(scroll)
         self.set_class(compact, "-compact")
+        self._refresh_compact_facts()
         previous.scroll_to(y=0, animate=False, force=True)
         self.call_after_refresh(scroll.scroll_to, y=position, animate=False)
         if self.sidebar_has_focus and self.screen.focused is not None:
@@ -267,10 +273,12 @@ class PRInfo(Container):
         self.query_one(PRMerge).refresh_data()
         self.query_one(PRChecks).refresh_data()
         self.query_one(PRFilesSummary).refresh_data()
+        self._refresh_compact_facts()
 
     def refresh_summary(self) -> None:
         self._update_header()
         self._update_sidebar()
+        self._refresh_compact_facts()
         if self.is_mounted:
             self.query_one(PRMerge).refresh_data()
 
@@ -299,6 +307,29 @@ class PRInfo(Container):
 
     def refresh_reviewers(self) -> None:
         self._update_reviewers()
+        self._refresh_compact_facts()
+
+    def _refresh_compact_facts(self) -> None:
+        pr = self.store.state.pr
+        if not self.compact or pr is None:
+            return
+        checks = self.store.state.checks
+        if snapshot := checks.loaded_value:
+            rollup = PRChecks.summary(snapshot)
+        elif checks.loading == LoadingState.ERROR:
+            rollup = Content("Unable to load checks")
+        else:
+            rollup = Content("Loading...")
+        facts = Content.assemble(
+            ("Status     ", "dim"),
+            Content.from_markup(PR_STATUS_LABELS[pr.state_display]),
+            ("\nReviewers  ", "dim"),
+            self._compact_reviewers,
+            ("\nChecks     ", "dim"),
+            rollup,
+        )
+        if self._compact_facts.content != facts:
+            self._compact_facts.update(facts)
 
     def _timeline_widget(self) -> PRTimeline:
         if self._timeline is None:
@@ -423,6 +454,7 @@ class PRInfo(Container):
         reviewers_widget = self._static_widget("_reviewers_widget", "#pr-reviewers")
         reviewers = derive_reviewer_states(pr, state.reviews)
         if not reviewers:
+            self._compact_reviewers = "None yet"
             reviewers_text = "[#6e738d]None yet[/]"
             reviewers_widget.update(reviewers_text)
             reviewers_widget.tooltip = None
@@ -431,6 +463,12 @@ class PRInfo(Container):
             return
 
         reviewer_count = len(reviewers)
+        first = reviewers[0]
+        self._compact_reviewers = (
+            first.display_name if first.is_team else f"@{first.display_name}"
+        )
+        if reviewer_count > 1:
+            self._compact_reviewers += f" +{reviewer_count - 1}"
         if reviewer_count == 1:
             reviewers_text = self._format_reviewer_line(reviewers[0])
         else:

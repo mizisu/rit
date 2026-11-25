@@ -281,6 +281,18 @@ PRInfo #pr-reviewers {
     overflow: hidden;
 }
 
+PRInfo #compact-review-facts {
+    display: none;
+    height: auto;
+    text-wrap: nowrap;
+    text-overflow: ellipsis;
+}
+
+PRInfo.-compact #compact-review-facts {
+    display: block;
+    margin-bottom: 1;
+}
+
 PRInfo.-compact #pr-info-layout {
     layout: vertical;
     overflow-y: auto;
